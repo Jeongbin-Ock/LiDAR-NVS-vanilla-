@@ -1898,6 +1898,166 @@ class GroupedHeadRMSNorm(nn.Module):
             for g in range(self.num_groups)
         ]
 
+
+class FixedMotionHeadRMSNorm(nn.Module):
+    """Two-group RMSNorm with a fixed motion-head gain.
+
+    Head ``match_head`` is normalized with an implicit, non-trainable gain of
+    one. Every other head shares the single learned ``rope_weight`` vector.
+    Consequently no parameter exists that can change the motion head's output
+    norm, while the RoPE feature heads retain the usual learnable RMSNorm gain.
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        num_heads: int,
+        *,
+        match_head: int = 0,
+        eps: float | None = None,
+    ):
+        super().__init__()
+        self.head_dim = int(head_dim)
+        self.num_heads = int(num_heads)
+        self.match_head = int(match_head)
+        self.eps = None if eps is None else float(eps)
+        if self.head_dim <= 0 or self.num_heads < 2:
+            raise ValueError(
+                "fixed-motion RMSNorm needs a positive width and at least two heads"
+            )
+        if not 0 <= self.match_head < self.num_heads:
+            raise ValueError("match_head must index one configured head")
+
+        # This is the only affine parameter: heads 1..H-1 share it. Head 0's
+        # gain is synthesized as a constant one in forward and is never placed
+        # in the optimizer or checkpoint.
+        self.rope_weight = nn.Parameter(torch.ones(self.head_dim))
+        is_match = torch.arange(self.num_heads) == self.match_head
+        self.register_buffer("is_match_head", is_match, persistent=False)
+
+    def forward(self, x):
+        expected = (self.num_heads, self.head_dim)
+        if x.ndim < 2 or tuple(x.shape[-2:]) != expected:
+            raise ValueError(
+                "fixed-motion RMSNorm expects (..., "
+                f"{self.num_heads}, {self.head_dim})"
+            )
+        value = x.float()
+        normalized = F.rms_norm(
+            value,
+            (self.head_dim,),
+            weight=None,
+            eps=self.eps,
+        )
+        learned = self.rope_weight.reshape(1, -1).expand(
+            self.num_heads, -1
+        )
+        gain = torch.where(
+            self.is_match_head.reshape(-1, 1),
+            torch.ones_like(learned),
+            learned,
+        )
+        return (normalized * gain).to(x.dtype)
+
+    @torch.no_grad()
+    def gain_rms(self):
+        return 1.0, float(
+            self.rope_weight.float().square().mean().sqrt()
+        )
+
+
+class FixedMotionGainLearnableMaxSpeedBarrierCrossAttention(
+    LearnableMaxSpeedBarrierLayerWeightedCrossAttention
+):
+    """V12.1: V12 with fixed-gain head 0 and learned-gain RoPE heads.
+
+    Q and K keep separate gain parameters at every layer, but within either
+    projection heads 1..H-1 share one vector. Head 0 has no affine parameter:
+    its RMSNorm gain is always one, so its Q/K logit scale cannot grow during
+    training. V12's learned global ``v_max`` is inherited unchanged. A second
+    global positive scalar learns the barrier strength,
+
+    ``lambda = exp(log_barrier_lambda)``,
+
+    and scales ``relu(d / (v_max * |dt|) - 1)``. It starts at one, so fresh
+    V12.1 behavior still matches V12 before either scalar receives an update.
+    """
+
+    def __init__(self, cfg, dim: int):
+        super().__init__(cfg, dim)
+        self.initial_barrier_lambda = float(
+            _cfg_get(cfg, "barrier_lambda_init", 1.0)
+        )
+        if (
+            not math.isfinite(self.initial_barrier_lambda)
+            or self.initial_barrier_lambda <= 0.0
+        ):
+            raise ValueError("V12.1 barrier_lambda_init must be positive and finite")
+        self.log_barrier_lambda = nn.Parameter(torch.tensor(
+            math.log(self.initial_barrier_lambda), dtype=torch.float32
+        ))
+        self.q_norm = nn.ModuleList([
+            FixedMotionHeadRMSNorm(
+                self.head_dim,
+                self.num_heads,
+                match_head=self._MATCH_HEAD,
+            )
+            for _ in range(self.n_layers)
+        ])
+        self.k_norm = nn.ModuleList([
+            FixedMotionHeadRMSNorm(
+                self.head_dim,
+                self.num_heads,
+                match_head=self._MATCH_HEAD,
+            )
+            for _ in range(self.n_layers)
+        ])
+
+    @property
+    def barrier_lambda(self):
+        """Current positive multiplier on the soft-barrier penalty."""
+        return self.log_barrier_lambda.exp()
+
+    def _barrier_bias(self, query_position, key_position, radius):
+        penalty = super()._barrier_bias(
+            query_position, key_position, radius
+        )
+        return self.barrier_lambda * penalty
+
+    @torch.no_grad()
+    def attention_temperature_stats(self):
+        """Report the fixed match gain and learned RoPE gain separately."""
+        stats = {
+            "qk_motion_head_count": 1.0,
+            "barrier_speed_initial_mps": self.initial_barrier_speed_mps,
+            "barrier_v_0": float(self.v_0),
+            "barrier_speed_mps": float(self.v_max),
+            "barrier_lambda_initial": self.initial_barrier_lambda,
+            "barrier_log_lambda": float(self.log_barrier_lambda),
+            "barrier_lambda": float(self.barrier_lambda),
+            "barrier_weight": self.barrier_weight,
+            "barrier_exponent": float(self.barrier_exponent),
+        }
+        bounds = {"match": 0.0, "rope": 0.0}
+        for layer in range(self.n_layers):
+            q_match, q_rope = self.q_norm[layer].gain_rms()
+            k_match, k_rope = self.k_norm[layer].gain_rms()
+            for tag, rms_q, rms_k in (
+                ("match", q_match, k_match),
+                ("rope", q_rope, k_rope),
+            ):
+                stats[f"qk_gamma_q_{tag}_layer{layer}"] = rms_q
+                stats[f"qk_gamma_k_{tag}_layer{layer}"] = rms_k
+                bounds[tag] = max(
+                    bounds[tag],
+                    rms_q * rms_k * self.head_dim * self.scale,
+                )
+        for tag, bound in bounds.items():
+            stats[f"qk_max_logit_bound_{tag}"] = bound
+        stats["qk_max_logit_bound"] = max(bounds.values())
+        return stats
+
+
 class GroupedGainBarrierCrossAttention(
     MaxSpeedBarrierLayerWeightedCrossAttention
 ):
@@ -1976,6 +2136,8 @@ __all__ = [
     "LayerWeightedDistanceBiasCrossAttention",
     "MaxSpeedBarrierLayerWeightedCrossAttention",
     "FinalFeatureBarrierCrossAttention",
+    "FixedMotionGainLearnableMaxSpeedBarrierCrossAttention",
+    "FixedMotionHeadRMSNorm",
     "GroupedHeadRMSNorm",
     "GroupedGainBarrierCrossAttention",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention",

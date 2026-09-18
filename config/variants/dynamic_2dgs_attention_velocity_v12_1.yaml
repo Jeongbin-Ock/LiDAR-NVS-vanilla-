@@ -1,0 +1,128 @@
+# Dynamic 2DGS V12.1 with the legacy nuscene.py loader.
+#
+# V12.1 keeps V12's learned global max speed:
+#
+#     v_0 = Parameter(log(30))
+#     v_max = exp(v_0)
+#     R_i = v_max * |dt_i|
+#
+# It changes the Q/K RMS gain contract, barrier strength, and Gaussian offset
+# bound:
+#
+# 1. Head 0 is the motion/correspondence head. Its RMS normalization is
+#    non-affine: gamma is the fixed constant one and is not a Parameter.
+# 2. Heads 1-11 are the RoPE feature group. They share one learned gamma vector
+#    for Q and one for K at each layer, independent of head 0.
+# 3. A global positive lambda scales the soft-barrier penalty. It is represented
+#    by learnable log(lambda), starts at lambda=1, and is shared everywhere.
+# 4. p2g.head_offset_bound is 0.4 m instead of the shared 0.8 m default.
+model:
+  variant: dynamic_2dgs_attention_velocity_v12_1
+
+device: [0]
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  anchor_mode: grid
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  # Inactive compatibility values; V12.1 validation requires LoRA above.
+  agg_mlp:
+    hidden_dim: 1024
+    hidden_layers: 2
+    out_dim: 576
+  joint_refiner:
+    num_heads: 12
+    rope_base: 10.0
+    rope_position_scale: 4.0
+  # V12's adaptive K={1,2,3} router, unchanged.
+  grid_query:
+    count_mode: learned_gumbel
+    grad_balance: sqrt_k
+    learned_count:
+      K_max: 3
+      tau: 1.0
+      seed_mode: range_quantile
+      grad_balance_scope: token
+      budget:
+        enable: false
+      logging:
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+
+# Keep V12's pre-random-window loader. ``dataset_name: nuscenes`` is inherited
+# from nuscene_train.yaml and selects src/dataloader/nuscene.py.
+data:
+  mode: bbox
+  bbox_json_path: null
+  # Hold out the complete nuScenes train scenes containing LiDAR4D test clips.
+  train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # V12's learnable max speed plus a learned positive penalty multiplier:
+    #   bias_ij = -lambda * relu(d_ij / (exp(v_0) * |dt|) - 1)
+    #   lambda = exp(log_lambda), initialized to 1.
+    barrier_speed_mps: 30.0
+    barrier_lambda_init: 1.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+
+    # Heads 1-11 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    layer_scale_init: 0.1
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    small_motion:
+      enabled: false
+      weight: 0.005
+      epsilon_m: 0.001
+      warmup_steps: 300
+      ramp_steps: 1700
+
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+loss:
+  w_chamfer: 0.02
+  w_scale: 0.0

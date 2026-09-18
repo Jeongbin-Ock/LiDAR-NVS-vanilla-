@@ -16,6 +16,7 @@ from .definitions import (
     DYNAMIC_VARIANT_V8,
     DYNAMIC_VARIANT_V9,
     DYNAMIC_VARIANT_V10,
+    DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANTS,
     LEARNED_COUNT_MODES,
     LEGACY_COUNT_MODE,
@@ -433,6 +434,8 @@ def validate_experiment_config(config) -> None:
                     "match_chunk_size", "rope_base", "rope_position_scale",
                     "qk_norm", "layer_scale_init",
                 }
+                if variant == DYNAMIC_VARIANT_V12_1:
+                    temporal_keys.add("barrier_lambda_init")
             else:
                 temporal_keys = {
                     "implementation", "layers", "num_heads", "mlp_ratio",
@@ -583,6 +586,10 @@ def validate_experiment_config(config) -> None:
                         "'barrier_rope_split'"
                     )
                 _require_positive(config, f"{temporal_path}.barrier_speed_mps")
+                if variant == DYNAMIC_VARIANT_V12_1:
+                    _require_positive(
+                        config, f"{temporal_path}.barrier_lambda_init"
+                    )
                 if float(OmegaConf.select(
                     config, f"{temporal_path}.barrier_weight"
                 )) < 0.0:

@@ -29,6 +29,9 @@ from src.models_new.module.dynamic_gaussian import (
     FeatureOnlyVelocityOffsetHead,
     FinalFeatureBarrierCrossAttention,
     FinalFeatureBarrierVelocityGaussianBackend,
+    FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
+    FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
+    FixedMotionHeadRMSNorm,
     GaussianAttributeHead,
     InitConditionedVelocityHead,
     LayerWeightedAttentionVelocityGaussianBackend,
@@ -352,6 +355,21 @@ def v12_temporal_cfg(dim=24, heads=4, layers=3, match_chunk_size=2):
 def v12_backend_cfg(dim=24):
     cfg = v11_backend_cfg(dim=dim)
     cfg.temporal = v12_temporal_cfg(dim=dim)
+    return cfg
+
+
+def v12_1_temporal_cfg(dim=24, heads=4, layers=3, match_chunk_size=2):
+    cfg = v12_temporal_cfg(
+        dim=dim, heads=heads, layers=layers,
+        match_chunk_size=match_chunk_size,
+    )
+    cfg.barrier_lambda_init = 1.0
+    return cfg
+
+
+def v12_1_backend_cfg(dim=24):
+    cfg = v12_backend_cfg(dim=dim)
+    cfg.temporal = v12_1_temporal_cfg(dim=dim)
     return cfg
 
 
@@ -3754,6 +3772,159 @@ class V12LearnableMaxSpeedBarrierAttentionTest(unittest.TestCase):
         self.assertAlmostEqual(stats["barrier_speed_initial_mps"], 30.0)
         self.assertAlmostEqual(stats["barrier_v_0"], math.log(42.0), places=5)
         self.assertAlmostEqual(stats["barrier_speed_mps"], 42.0, places=4)
+
+
+class V12_1FixedMotionGainAttentionTest(unittest.TestCase):
+    """V12.1 fixes head 0's gain and learns one gain for heads 1..H-1."""
+
+    @staticmethod
+    def _forward_args(feature, position, first_frame_tokens, duration=0.8):
+        return V11MaxSpeedBarrierAttentionTest._forward_args(
+            feature, position, first_frame_tokens, duration
+        )
+
+    def test_only_the_rope_group_has_a_gain_parameter(self):
+        module = FixedMotionGainLearnableMaxSpeedBarrierCrossAttention(
+            v12_1_temporal_cfg(heads=4, layers=2), dim=24
+        )
+        for layer in range(module.n_layers):
+            for norm in (module.q_norm[layer], module.k_norm[layer]):
+                self.assertIsInstance(norm, FixedMotionHeadRMSNorm)
+                self.assertEqual(norm.match_head, 0)
+                self.assertEqual(
+                    norm.is_match_head.tolist(), [True, False, False, False]
+                )
+                parameters = dict(norm.named_parameters())
+                self.assertEqual(set(parameters), {"rope_weight"})
+                self.assertEqual(
+                    tuple(parameters["rope_weight"].shape), (module.head_dim,)
+                )
+
+    def test_motion_norm_is_fixed_while_rope_gain_learns(self):
+        torch.manual_seed(122)
+        norm = FixedMotionHeadRMSNorm(head_dim=6, num_heads=4)
+        value = torch.randn(5, 4, 6, requires_grad=True)
+        with torch.no_grad():
+            norm.rope_weight.fill_(2.0)
+        output = norm(value)
+        motion_rms = output[:, 0].float().square().mean(dim=-1).sqrt()
+        rope_rms = output[:, 1:].float().square().mean(dim=-1).sqrt()
+        torch.testing.assert_close(
+            motion_rms, torch.ones_like(motion_rms), atol=2.0e-5, rtol=2.0e-5
+        )
+        torch.testing.assert_close(
+            rope_rms, torch.full_like(rope_rms, 2.0), atol=4.0e-5, rtol=2.0e-5
+        )
+
+        output[:, 0].square().sum().backward()
+        self.assertIsNotNone(norm.rope_weight.grad)
+        self.assertEqual(float(norm.rope_weight.grad.abs().sum()), 0.0)
+
+        norm.zero_grad(set_to_none=True)
+        value = torch.randn(5, 4, 6, requires_grad=True)
+        norm(value)[:, 1:].square().sum().backward()
+        self.assertGreater(float(norm.rope_weight.grad.abs().sum()), 0.0)
+
+    def test_initial_forward_matches_v12(self):
+        cfg = v12_1_temporal_cfg(layers=2, match_chunk_size=2)
+        torch.manual_seed(123)
+        reference = LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+            cfg, dim=24
+        ).eval()
+        torch.manual_seed(123)
+        module = FixedMotionGainLearnableMaxSpeedBarrierCrossAttention(
+            cfg, dim=24
+        ).eval()
+        feature = torch.randn(8, 24)
+        position = torch.randn(8, 3) * 12.0
+        args = self._forward_args(feature, position, 4, duration=0.8)
+        with torch.no_grad():
+            refined, fields = module(*args)
+            expected_refined, expected_fields = reference(*args)
+        torch.testing.assert_close(
+            refined, expected_refined, atol=3.0e-6, rtol=3.0e-6
+        )
+        for name in (
+            "delta_p_match", "delta_p_init", "matched_position",
+            "motion_layer_logits", "motion_layer_weights",
+        ):
+            torch.testing.assert_close(
+                fields[name], expected_fields[name], atol=3.0e-6, rtol=3.0e-6
+            )
+
+    def test_lambda_starts_at_one_scales_penalty_and_receives_gradient(self):
+        torch.manual_seed(124)
+        module = FixedMotionGainLearnableMaxSpeedBarrierCrossAttention(
+            v12_1_temporal_cfg(layers=1, match_chunk_size=1), dim=24
+        ).train()
+        self.assertIsInstance(module.log_barrier_lambda, torch.nn.Parameter)
+        self.assertEqual(float(module.log_barrier_lambda), 0.0)
+        self.assertEqual(float(module.barrier_lambda), 1.0)
+
+        query = torch.zeros(1, 3)
+        key = torch.tensor([[20.0, 0.0, 0.0], [60.0, 0.0, 0.0]])
+        initial = module._barrier_bias(query, key, module.v_max)
+        torch.testing.assert_close(initial, torch.tensor([[0.0, 1.0]]))
+        with torch.no_grad():
+            module.log_barrier_lambda.copy_(torch.tensor(math.log(2.0)))
+        doubled = module._barrier_bias(query, key, module.v_max)
+        torch.testing.assert_close(doubled, 2.0 * initial)
+
+        with torch.no_grad():
+            module.log_barrier_lambda.zero_()
+        feature = torch.randn(3, 24)
+        position = torch.cat([query, key], dim=0)
+        _refined, fields = module(
+            *self._forward_args(feature, position, 1, duration=1.0)
+        )
+        fields["matched_position"][0, 0].backward()
+        for parameter in (module.v_0, module.log_barrier_lambda):
+            self.assertIsNotNone(parameter.grad)
+            self.assertTrue(torch.isfinite(parameter.grad))
+            self.assertGreater(float(parameter.grad.abs()), 0.0)
+
+    def test_stats_keep_match_gamma_one_and_report_rope_gamma(self):
+        module = FixedMotionGainLearnableMaxSpeedBarrierCrossAttention(
+            v12_1_temporal_cfg(layers=1), dim=24
+        )
+        with torch.no_grad():
+            module.q_norm[0].rope_weight.fill_(2.0)
+            module.k_norm[0].rope_weight.fill_(3.0)
+        stats = module.attention_temperature_stats()
+        self.assertEqual(stats["qk_gamma_q_match_layer0"], 1.0)
+        self.assertEqual(stats["qk_gamma_k_match_layer0"], 1.0)
+        self.assertAlmostEqual(stats["qk_gamma_q_rope_layer0"], 2.0)
+        self.assertAlmostEqual(stats["qk_gamma_k_rope_layer0"], 3.0)
+        self.assertAlmostEqual(
+            stats["qk_max_logit_bound_match"], module.head_dim ** 0.5
+        )
+        self.assertGreater(
+            stats["qk_max_logit_bound_rope"],
+            stats["qk_max_logit_bound_match"],
+        )
+        self.assertAlmostEqual(stats["barrier_speed_mps"], 30.0, places=4)
+        self.assertEqual(stats["barrier_lambda_initial"], 1.0)
+        self.assertEqual(stats["barrier_log_lambda"], 0.0)
+        self.assertEqual(stats["barrier_lambda"], 1.0)
+
+    def test_backend_keeps_v12_router_motion_head_and_learned_speed(self):
+        backend = FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend(
+            v12_1_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussian_count_cfg=v10_gaussian_count_cfg(),
+        )
+        self.assertIsInstance(
+            backend.temporal,
+            FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
+        )
+        self.assertIsInstance(backend.temporal.v_0, torch.nn.Parameter)
+        self.assertAlmostEqual(float(backend.temporal.v_max), 30.0, places=5)
+        self.assertIsInstance(
+            backend.temporal.log_barrier_lambda, torch.nn.Parameter
+        )
+        self.assertEqual(float(backend.temporal.barrier_lambda), 1.0)
+        self.assertIsInstance(backend.velocity_head, EmbeddedInitVelocityHead)
+        self.assertEqual(backend.gaussian_head.count_mode, "learned_gumbel")
+        self.assertAlmostEqual(backend.offset_bound, 0.4)
 
 
 class V11_2FinalFeatureBarrierAttentionTest(unittest.TestCase):

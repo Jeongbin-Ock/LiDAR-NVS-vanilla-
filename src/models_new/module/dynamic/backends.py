@@ -22,6 +22,7 @@ from .motion_proposals import (
 )
 from .temporal import (
     FinalFeatureBarrierCrossAttention,
+    FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
     GroupedGainBarrierCrossAttention,
     LayerWeightedDistanceBiasCrossAttention,
     LearnableMaxSpeedBarrierLayerWeightedCrossAttention,
@@ -930,6 +931,17 @@ class LearnableMaxSpeedBarrierVelocityGaussianBackend(
         )
 
 
+class FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend(
+    LearnableMaxSpeedBarrierVelocityGaussianBackend
+):
+    """V12.1: V12 with no learnable RMS gain on correspondence head 0."""
+
+    def _build_temporal(self, cfg):
+        return FixedMotionGainLearnableMaxSpeedBarrierCrossAttention(
+            cfg.temporal, self.dim
+        )
+
+
 class FinalFeatureBarrierVelocityGaussianBackend(
     MaxSpeedBarrierVelocityGaussianBackend
 ):
@@ -1507,6 +1519,7 @@ __all__ = [
     "AttentionInitializedVelocityGaussianBackend",
     "LayerMixtureMotionMixin",
     "LayerWeightedAttentionVelocityGaussianBackend",
+    "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend",
     "MaxSpeedBarrierVelocityGaussianBackend",
     "FinalFeatureBarrierVelocityGaussianBackend",

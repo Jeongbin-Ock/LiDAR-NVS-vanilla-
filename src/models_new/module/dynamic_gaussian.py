@@ -9,6 +9,8 @@ from .dynamic.common import SinusoidalScalarEncoder, _cfg_get
 from .dynamic.attention_matching import ConsensusAttentionMotionMatcher
 from .dynamic.temporal import (
     FinalFeatureBarrierCrossAttention,
+    FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
+    FixedMotionHeadRMSNorm,
     GroupedGainBarrierCrossAttention,
     GroupedHeadRMSNorm,
     LayerWeightedDistanceBiasCrossAttention,
@@ -39,6 +41,7 @@ from .dynamic.backends import (
     ConsensusAttentionVelocityGaussianBackend,
     DynamicGaussianBackend,
     FinalFeatureBarrierVelocityGaussianBackend,
+    FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
     LayerMixtureMotionMixin,
     LayerWeightedAttentionVelocityGaussianBackend,
     LearnableMaxSpeedBarrierVelocityGaussianBackend,
@@ -65,6 +68,9 @@ __all__ = [
     "FeatureOnlyVelocityOffsetHead",
     "FinalFeatureBarrierCrossAttention",
     "FinalFeatureBarrierVelocityGaussianBackend",
+    "FixedMotionGainLearnableMaxSpeedBarrierCrossAttention",
+    "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend",
+    "FixedMotionHeadRMSNorm",
     "GaussianAttributeHead",
     "GroupedGainBarrierCrossAttention",
     "GroupedHeadRMSNorm",

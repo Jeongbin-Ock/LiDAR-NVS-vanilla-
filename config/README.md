@@ -35,12 +35,13 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v11_2
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_3
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_4
 python main.py model.variant=dynamic_2dgs_attention_velocity_v12
+python main.py model.variant=dynamic_2dgs_attention_velocity_v12_1
 ```
 
 This `/4d` worktree defaults to `dynamic_2dgs_attention_velocity_v7_2` for a
 fresh run. `bbox_rigid_v1` is the historical box-routed model. V1 through V7.1,
-V8, V9, V10, V11, V11.1, V11.2, V11.3, V11.4, and V12 remain available for
-exact checkpoint reconstruction and controlled A/B runs.
+V8, V9, V10, V11, V11.1, V11.2, V11.3, V11.4, V12, and V12.1 remain available
+for exact checkpoint reconstruction and controlled A/B runs.
 V4/V5 reuse temporal cross-attention heads for velocity initialization. V6 does
 not: it adds an independent, time-free Siamese motion proposal before temporal
 cross-attention and uses the latter only for feature refinement. Its overlay
@@ -49,10 +50,10 @@ CLI-overridable runtime settings.
 
 Dynamic V1-V9, V11.1 and V11.3 emit a fixed number of Gaussians per occupied
 endpoint token -- one observed-medoid seed by default, and two range quantiles
-in V11.3; V10, V11, V11.2, V11.4 and V12 let a router select one to three
-range-quantile-seeded Gaussians instead. `p2g.grid_query` chooses between the
-two and sets the fixed count -- see "Gaussians per token" below. V3 through V6,
-V7.2, V8, V9, V10, V11, V11.2, V11.3, V11.4 and V12 embed
+in V11.3; V10, V11, V11.2, V11.4, V12 and V12.1 let a router select one to
+three range-quantile-seeded Gaussians instead. `p2g.grid_query` chooses between
+the two and sets the fixed count -- see "Gaussians per token" below. V3 through
+V6, V7.2, V8, V9, V10, V11, V11.2, V11.3, V11.4, V12 and V12.1 embed
 `time_coordinate = relative_seconds / time_reference_sec`, where
 `time_reference_sec=1.0` is fixed across samples. An irregular 0.8-second pair
 therefore supplies endpoint coordinates `[0, 0.8]`, rather than `[0, 1]`. Its
@@ -600,8 +601,8 @@ V12 deliberately uses the earlier `src/dataloader/nuscene.py` contract rather
 than V11.4's new random-duration loader. Its overlay inherits
 `data.dataset_name: nuscenes` and the fixed keyframe/window settings from
 `nuscene_train.yaml`, while setting `data.mode: bbox` and
-`data.bbox_json_path: null` exactly as the previous V11.4 overlay did. V12
-additionally sets `data.train_excluded_scenes: [scene-0757, scene-1094]`;
+`data.bbox_json_path: null` exactly as the previous V11.4 overlay did. V12 and
+V12.1 additionally set `data.train_excluded_scenes: [scene-0757, scene-1094]`;
 `nuscene.py` removes those complete scenes only when constructing the train
 split. Validation and test scenes remain unchanged. The key is
 checkpoint-protected sampling state, so a resume cannot silently put either
@@ -622,6 +623,38 @@ the reconstruction objective prefers broader matching. V12 intentionally adds
 neither a clamp nor a barrier-specific prior, so this remains the controlled
 difference from V11.4; add an explicit upper-bounded transform or a prior around
 `log(30)` in a separate variant if runaway control is required.
+
+**V12.1** keeps V12's learned `v_0`, adaptive-K router,
+initializer-conditioned offset head, losses, and `nuscene.py` data contract.
+Its barrier learns both the reachable radius and the penalty strength:
+
+```
+v_max = exp(v_0)                         # v_0 starts at log(30)
+lambda = exp(log_barrier_lambda)         # log_barrier_lambda starts at 0
+bias   = -lambda * relu(d / (v_max * |dt|) - 1)
+```
+
+`lambda` is one global scalar shared by all layers, directions, and samples.
+Keeping it positive prevents the supposed penalty from becoming a reward; its
+initial value one makes the fresh barrier identical to V12. The config records
+this as `barrier_lambda_init: 1.0`, while checkpoints store the learned
+`log_barrier_lambda`.
+
+V12.1 also changes the affine part of QK RMSNorm on exactly the motion/RoPE
+boundary:
+
+- Head 0 is normalized with an implicit fixed gain of one. No head-0 gamma is
+  registered as a parameter, so its Q/K vector scale cannot grow in training.
+- Heads 1-11 share one learned gamma vector for Q and one for K at each layer.
+  Those vectors are independent of head 0 and retain feature-head temperature
+  learning.
+
+The normalization statistic was already computed per head; "split" here means
+the gain contract. At initialization V12.1 reproduces V12 because every gain is
+one. Afterwards `qk_gamma_*_match_layer*` stays exactly one while the separately
+logged `qk_gamma_*_rope_layer*` may move. V12.1 also changes
+`p2g.head_offset_bound` from the shared 0.8 m default to 0.4 m, so each Gaussian
+position offset is `0.4 * tanh(raw_offset)` per axis.
 
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other
@@ -726,12 +759,12 @@ V11.3 emits that same 58,686 from its shipped `K_max: 2`.
 
 **Learned count (`count_mode: learned_gumbel`).** The refined token routes
 through the grid `GridSlotHead` and a hard Gumbel-Softmax over K={1,2,3} picks
-one K-specific joint head per token. Only V10, V11, V11.2, V11.4 and V12 may
-use it; asking any other variant for it is rejected at config time rather than
-silently ignored. V11.3 is rejected too, even though it shares V11's backend
-class, because its identity is the fixed count. The seed geometry it consumes
-is the K-specific candidate bank, not the padded fixed-count seed set, so the
-two contracts cannot be mixed.
+one K-specific joint head per token. Only V10, V11, V11.2, V11.4, V12 and V12.1
+may use it; asking any other variant for it is rejected at config time rather
+than silently ignored. V11.3 is rejected too, even though it shares V11's
+backend class, because its identity is the fixed count. The seed geometry it
+consumes is the K-specific candidate bank, not the padded fixed-count seed set,
+so the two contracts cannot be mixed.
 
 Both counts are structural: `p2g` is a checkpoint-protected root, so a resume or
 evaluation cannot change how many Gaussians a checkpoint's tokens produce.

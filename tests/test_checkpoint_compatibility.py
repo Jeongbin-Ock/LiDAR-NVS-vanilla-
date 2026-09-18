@@ -73,6 +73,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v12": (
         "LearnableMaxSpeedBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v12_1": (
+        "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend"
+    ),
 }
 
 _PROPOSAL_VARIANTS = {
@@ -151,6 +154,11 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v12": (
         "daea4e3817d9fe55886a", "15c9a7df0cb498389fa0"
     ),
+    # V12.1 replaces each shared RMS gain with one RoPE-group gain of the same
+    # width; head 0's fixed gain is absent and one learned log-lambda is added.
+    "dynamic_2dgs_attention_velocity_v12_1": (
+        "018ea06086c89eddba66", "7b477ca6c13d6632021a"
+    ),
 }
 
 
@@ -176,6 +184,9 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "DynamicGaussianBackend": "backends",
     "FinalFeatureBarrierCrossAttention": "temporal",
     "FinalFeatureBarrierVelocityGaussianBackend": "backends",
+    "FixedMotionGainLearnableMaxSpeedBarrierCrossAttention": "temporal",
+    "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend": "backends",
+    "FixedMotionHeadRMSNorm": "temporal",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention": "temporal",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend": "backends",
     "ConsensusAttentionMotionMatcher": "attention_matching",
@@ -263,6 +274,7 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
             "dynamic_2dgs_attention_velocity_v11",
             "dynamic_2dgs_attention_velocity_v11_2",
             "dynamic_2dgs_attention_velocity_v12",
+            "dynamic_2dgs_attention_velocity_v12_1",
         ):
             with self.subTest(variant=variant):
                 config, _source = compose_fresh_config(

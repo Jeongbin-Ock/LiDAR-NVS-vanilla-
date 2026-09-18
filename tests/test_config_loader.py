@@ -31,6 +31,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V11_3,
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V12,
+    DYNAMIC_VARIANT_V12_1,
     LEGACY_VARIANT,
     PHYSICAL_VELOCITY_VARIANTS,
     assert_model_variant_implemented,
@@ -600,6 +601,58 @@ class ConfigLoaderTest(unittest.TestCase):
             ROUTER_CAPABLE_DYNAMIC_VARIANTS,
         ):
             self.assertIn(DYNAMIC_VARIANT_V12, group)
+
+    def test_v12_1_changes_rms_lambda_and_offset_bound(self):
+        """The backend adds split gains and lambda; config changes its initials."""
+        v12, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V12}",
+        ]))
+        v12_1, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V12_1}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V12_1}.yaml", source)
+
+        left = OmegaConf.to_container(v12, resolve=False)
+        right = OmegaConf.to_container(v12_1, resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        self.assertEqual(left["p2g"].pop("head_offset_bound"), 0.8)
+        self.assertEqual(right["p2g"].pop("head_offset_bound"), 0.4)
+        left_temporal = left["dynamic_2dgs"]["temporal"]
+        right_temporal = right["dynamic_2dgs"]["temporal"]
+        self.assertNotIn("barrier_lambda_init", left_temporal)
+        self.assertEqual(right_temporal.pop("barrier_lambda_init"), 1.0)
+        self.assertEqual(left, right)
+
+        self.assertEqual(v12_1.data.dataset_name, "nuscenes")
+        self.assertEqual(v12_1.data.mode, "bbox")
+        self.assertIsNone(v12_1.data.bbox_json_path)
+        self.assertNotIn("dynamic_window", v12_1.data)
+        self.assertEqual(
+            list(v12_1.data.train_excluded_scenes),
+            ["scene-0757", "scene-1094"],
+        )
+        for group in (
+            ATTENTION_VELOCITY_VARIANTS,
+            BARRIER_MATCH_DYNAMIC_VARIANTS,
+            PHYSICAL_VELOCITY_VARIANTS,
+            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V12_1, group)
+
+        for value in (0.0, -1.0):
+            with self.subTest(barrier_lambda_init=value), self.assertRaises(
+                ValueError
+            ):
+                compose_fresh_config(OmegaConf.from_dotlist([
+                    f"model.variant={DYNAMIC_VARIANT_V12_1}",
+                    f"dynamic_2dgs.temporal.barrier_lambda_init={value}",
+                ]))
+
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V12_1}",
+                "data.train_excluded_scenes=[scene-0757,scene-0757]",
+            ]))
 
     def test_v11_3_head_is_seed_conditioned_at_three_channels_per_slot(self):
         """The router trunk's geometry input survives as head input columns."""
@@ -1260,6 +1313,25 @@ class ConfigLoaderTest(unittest.TestCase):
                 "data.dynamic_window.endpoint_max_sec=0.8",
             ])
             with self.assertRaisesRegex(ValueError, "data.dynamic_window"):
+                resolve_main_config(cli)
+
+    def test_legacy_train_scene_holdouts_are_immutable_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "epoch=1.ckpt"
+            stored, _ = compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V12_1}",
+            ]))
+            torch.save(
+                {"experiment_config": OmegaConf.to_container(stored, resolve=True)},
+                checkpoint,
+            )
+            cli = OmegaConf.from_dotlist([
+                f"train.ckpt_path={checkpoint}",
+                "data.train_excluded_scenes=[scene-0757]",
+            ])
+            with self.assertRaisesRegex(
+                ValueError, "data.train_excluded_scenes"
+            ):
                 resolve_main_config(cli)
 
     def test_pre_lora_checkpoint_config_stays_on_legacy_feature_path(self):
