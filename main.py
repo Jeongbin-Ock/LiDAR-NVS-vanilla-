@@ -84,12 +84,19 @@ def main(cfg, config_source="unspecified"):
         wandb_settings = wandb.Settings(
             x_disable_stats=not bool(getattr(cfg.logger, "system_metrics", False)),
         )
+        # Opt-in: continue an existing W&B run (e.g. on checkpoint resume)
+        # instead of opening a new run with the same name.
+        wandb_run_id = getattr(cfg.logger, "wandb_run_id", None)
+        wandb_resume = (
+            {"id": str(wandb_run_id), "resume": "must"} if wandb_run_id else {}
+        )
         logger = WandbLogger(
             project=cfg.project_name,
             name=cfg.exp_name,
             save_dir=cfg.logger.dir,
             config=OmegaConf.to_container(cfg, resolve=True),
             settings=wandb_settings,
+            **wandb_resume,
         )
 
         # On rank != 0, wandb.run is None.

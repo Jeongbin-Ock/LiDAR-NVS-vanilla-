@@ -820,6 +820,13 @@ with `allow_legacy_wandb_fallback=true`. Ray geometry and temporal-window fields
 under `data` are protected as structural semantics; dataset paths, splits, and
 worker counts remain runtime-overridable.
 
+`logger.*` is runtime-only. A checkpoint resume opens a new W&B run under the
+same name by default; pass `logger.wandb_run_id=<run id>` to continue that run
+instead (`resume="must"`, so a wrong id fails at start-up). Lightning keeps
+logging `trainer/global_step` from the checkpoint, so history the old run wrote
+after the checkpoint would overlap the resumed steps; rewind the run to the
+checkpoint's last `_step` first if that matters.
+
 ## Gaussians per token (`p2g.grid_query`)
 
 How many 2D Gaussians one occupied Utonia token becomes is a config decision,

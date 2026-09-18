@@ -83,6 +83,7 @@ logger:
   name: wandb
   dir: logs/${exp_name}
   system_metrics: false  # W&B System 탭의 CPU/GPU/RAM 시계열을 기록하지 않음
+  wandb_run_id: null  # 기존 W&B run id를 넣으면 새 run 대신 그 run에 이어서 기록 (resume="must")
 
 
 
