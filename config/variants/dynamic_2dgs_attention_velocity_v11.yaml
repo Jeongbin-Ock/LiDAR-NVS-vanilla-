@@ -59,8 +59,23 @@ p2g:
         range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
 
 data:
-  mode: bbox
+  dataset_name: nuscenes_dynamic_lidar4d
+  # Keep the legacy nominal pair only as the stable keyframe-start/compact-val
+  # address. The actual endpoint is sampled by nuscene_dynamic_lidar4d.py.
+  window_us: 1000000
+  sample_gap_us: 100000
+  gt_middle_count: 3
+  pair_mode: keyframe
+  pair_kf_stride: 2
+  mode: nvs
   bbox_json_path: null
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.2
+    eval_seed: 42
+    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside
+    # these train scenes. Hold out each complete scene to prevent overlap.
+    train_excluded_scenes: [scene-0757, scene-1094]
 
 dynamic_2dgs:
   temporal:

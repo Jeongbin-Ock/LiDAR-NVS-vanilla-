@@ -757,7 +757,62 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertNotIn("weight", prior)
         self.assertEqual(config.loss.w_chamfer, 0.02)
         self.assertEqual(config.loss.w_scale, 0.0)
+        self.assertEqual(config.data.dataset_name, "nuscenes_dynamic_lidar4d")
+        self.assertEqual(config.data.mode, "nvs")
+        self.assertAlmostEqual(config.data.dynamic_window.endpoint_min_sec, 0.2)
+        self.assertAlmostEqual(config.data.dynamic_window.endpoint_max_sec, 1.2)
+        self.assertEqual(config.data.gt_middle_count, 3)
         self.assertIn(f"{DYNAMIC_VARIANT_V11}.yaml", source)
+
+    def test_every_v11_family_config_selects_the_dynamic_loader(self):
+        for variant in (
+            DYNAMIC_VARIANT_V11,
+            DYNAMIC_VARIANT_V11_1,
+            DYNAMIC_VARIANT_V11_2,
+            DYNAMIC_VARIANT_V11_3,
+            DYNAMIC_VARIANT_V11_4,
+        ):
+            with self.subTest(variant=variant):
+                config, _source = compose_fresh_config(
+                    OmegaConf.from_dotlist([f"model.variant={variant}"])
+                )
+                self.assertEqual(
+                    config.data.dataset_name, "nuscenes_dynamic_lidar4d"
+                )
+                self.assertEqual(config.data.pair_mode, "keyframe")
+                self.assertEqual(config.data.sample_gap_us, 100_000)
+                self.assertEqual(config.data.gt_middle_count, 3)
+                self.assertEqual(config.data.mode, "nvs")
+                self.assertIsNone(config.data.bbox_json_path)
+                self.assertAlmostEqual(
+                    config.data.dynamic_window.endpoint_min_sec, 0.2
+                )
+                self.assertAlmostEqual(
+                    config.data.dynamic_window.endpoint_max_sec, 1.2
+                )
+                self.assertEqual(
+                    list(config.data.dynamic_window.train_excluded_scenes),
+                    ["scene-0757", "scene-1094"],
+                )
+
+    def test_v11_dynamic_loader_rejects_invalid_sampling_contracts(self):
+        invalid = (
+            (
+                "data.dynamic_window.endpoint_min_sec=1.3",
+                "0 < min <= max",
+            ),
+            ("data.dynamic_window.endpoint_max_sec=0", "0 < min <= max"),
+            ("data.sample_gap_us=75000", "multiple of 50000"),
+            ("data.pair_mode=sweep", "pair_mode=keyframe"),
+            ("data.mode=bbox", "mode=nvs"),
+        )
+        for override, message in invalid:
+            with self.subTest(override=override), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                compose_fresh_config(OmegaConf.from_dotlist([
+                    f"model.variant={DYNAMIC_VARIANT_V11}", override,
+                ]))
 
     def test_v11_validates_barrier_and_rope_contract(self):
         invalid = (
@@ -1125,6 +1180,40 @@ class ConfigLoaderTest(unittest.TestCase):
             config, source = load_checkpoint_config(checkpoint)
             self.assertEqual(config.train.batch_size, 9)
             self.assertIn("embedded checkpoint config", source)
+
+    def test_historical_v11_checkpoint_keeps_its_fixed_loader_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "epoch=1.ckpt"
+            stored, _ = compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V11}",
+            ]))
+            stored = OmegaConf.to_container(stored, resolve=True)
+            stored["data"]["dataset_name"] = "nuscenes"
+            stored["data"]["mode"] = "bbox"
+            stored["data"].pop("dynamic_window")
+            torch.save({"experiment_config": stored}, checkpoint)
+
+            config, _source = load_checkpoint_config(checkpoint)
+
+            self.assertEqual(config.data.dataset_name, "nuscenes")
+            self.assertNotIn("dynamic_window", config.data)
+
+    def test_dynamic_loader_sampling_contract_is_immutable_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "epoch=1.ckpt"
+            stored, _ = compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V11}",
+            ]))
+            torch.save(
+                {"experiment_config": OmegaConf.to_container(stored, resolve=True)},
+                checkpoint,
+            )
+            cli = OmegaConf.from_dotlist([
+                f"train.ckpt_path={checkpoint}",
+                "data.dynamic_window.endpoint_max_sec=0.8",
+            ])
+            with self.assertRaisesRegex(ValueError, "data.dynamic_window"):
+                resolve_main_config(cli)
 
     def test_pre_lora_checkpoint_config_stays_on_legacy_feature_path(self):
         with tempfile.TemporaryDirectory() as tmp:

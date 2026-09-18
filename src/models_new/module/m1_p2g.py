@@ -448,7 +448,14 @@ class Point2Gaus(nn.Module):
         and ``gt["timestamps"]``, which index the same target views. Only the
         viewpoint-conditioned count router consumes them.
         """
-        lidar_points = _input.get("lidar_points_sensor", _input["lidar_points"])
+        # Do not use ``dict.get(key, _input[legacy_key])`` here: Python eagerly
+        # evaluates that fallback and would force bbox-era loaders to retain a
+        # reference-frame point copy even when sensor-frame points are present.
+        lidar_points = (
+            _input["lidar_points_sensor"]
+            if "lidar_points_sensor" in _input
+            else _input["lidar_points"]
+        )
         offset = _input["offset"]
         point_batch_idx = _input["batch_idx"]
         pose = _input["pose"]

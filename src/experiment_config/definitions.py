@@ -227,6 +227,7 @@ _CHECKPOINT_STRUCTURAL_ROOTS = (
 )
 
 _CHECKPOINT_PROTECTED_PATHS = (
+    "data.dataset_name",
     "data.window_us",
     "data.sample_gap_us",
     "data.gt_middle_count",
@@ -241,6 +242,7 @@ _CHECKPOINT_PROTECTED_PATHS = (
     "data.image_width",
     "data.ring_to_elevation_deg",
     "data.ego_radius",
+    "data.dynamic_window",
 )
 
 _IMPLEMENTED_VARIANTS = {LEGACY_VARIANT, *DYNAMIC_VARIANTS}

@@ -16,7 +16,8 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 from src.config_loader import DYNAMIC_VARIANT, compose_fresh_config
-from src.dataloader.nuscene import NuScenesNVSDataset, multiframe_collate_fn
+from src.dataloader import dataset_dict
+from src.dataloader.nuscene import multiframe_collate_fn
 from src.model_wrapper import ModelWrapper
 
 
@@ -113,29 +114,55 @@ def render_objective_by_time(model, renders):
     gt_intensity = renders["gt_intensity_sh"].squeeze(2)
     gt_raydrop = renders["gt_raydrop"].squeeze(2)
     cfg = model.cfg.loss
+    view_mask = renders.get("view_mask")
+    if view_mask is None:
+        view_mask = torch.ones(
+            pred_depth.shape[:2], device=pred_depth.device, dtype=torch.bool
+        )
     objectives = []
-    for view in range(pred_depth.shape[1]):
-        valid = gt_depth[:, view] > 0
-        depth = F.l1_loss(pred_depth[:, view][valid], gt_depth[:, view][valid])
-        median = F.l1_loss(pred_median[:, view][valid], gt_depth[:, view][valid])
-        intensity = F.l1_loss(
-            pred_intensity[:, view][valid], gt_intensity[:, view][valid]
-        )
-        raydrop = F.binary_cross_entropy(
-            pred_raydrop[:, view].clamp(1.0e-7, 1.0 - 1.0e-7),
-            gt_raydrop[:, view],
-        )
-        objectives.append(
-            float(
+    endpoint_objectives = []
+    middle_objectives = []
+    for batch_index in range(pred_depth.shape[0]):
+        sample_objectives = []
+        valid_views = view_mask[batch_index].nonzero(as_tuple=True)[0].tolist()
+        for view in valid_views:
+            valid = gt_depth[batch_index, view] > 0
+            depth = F.l1_loss(
+                pred_depth[batch_index, view][valid],
+                gt_depth[batch_index, view][valid],
+            )
+            median = F.l1_loss(
+                pred_median[batch_index, view][valid],
+                gt_depth[batch_index, view][valid],
+            )
+            intensity = F.l1_loss(
+                pred_intensity[batch_index, view][valid],
+                gt_intensity[batch_index, view][valid],
+            )
+            raydrop = F.binary_cross_entropy(
+                pred_raydrop[batch_index, view].clamp(1.0e-7, 1.0 - 1.0e-7),
+                gt_raydrop[batch_index, view],
+            )
+            value = float(
                 cfg.w_depth * depth
                 + cfg.w_depth_median * median
                 + cfg.w_intensity * intensity
                 + cfg.w_raydrop * raydrop
             )
+            sample_objectives.append(value)
+            objectives.append(value)
+        endpoint_objectives.extend(
+            [sample_objectives[0], sample_objectives[-1]]
         )
-    endpoints = 0.5 * (objectives[0] + objectives[-1])
-    middle = sum(objectives[1:-1]) / max(len(objectives) - 2, 1)
-    return {"views": objectives, "endpoint_mean": endpoints, "middle_mean": middle}
+        middle_objectives.extend(sample_objectives[1:-1])
+    return {
+        "views": objectives,
+        "endpoint_mean": sum(endpoint_objectives) / len(endpoint_objectives),
+        "middle_mean": (
+            sum(middle_objectives) / len(middle_objectives)
+            if middle_objectives else 0.0
+        ),
+    }
 
 
 def parse_args():
@@ -194,12 +221,14 @@ def main():
         *args.override,
     ])
     cfg, _ = compose_fresh_config(cli)
-    dataset = NuScenesNVSDataset(cfg.data, split=args.split)
+    dataset_class = dataset_dict[cfg.data.dataset_name]
+    dataset = dataset_class(cfg.data, split=args.split)
     indices = args.indices or list(range(args.batch_size))
     if len(indices) != args.batch_size:
         raise ValueError("--indices must provide exactly --batch-size entries")
     items = [dataset[index] for index in indices]
-    batch = to_device(multiframe_collate_fn(items), device)
+    collate_fn = getattr(dataset_class, "collate_fn", multiframe_collate_fn)
+    batch = to_device(collate_fn(items), device)
 
     model = ModelWrapper(cfg).to(device).train()
     p2g = model.p2g_model
@@ -326,9 +355,8 @@ def main():
 
         with torch.no_grad():
             speeds = torch.cat([item["velocity"].norm(dim=-1) for item in gaussians])
-            middle_time = float(batch["gt"]["timestamps_sec"][0][
-                len(batch["gt"]["timestamps_sec"][0]) // 2
-            ])
+            cameras = batch["gt"]["cameras"][0]
+            middle_time = float(cameras[len(cameras) // 2].timestamp_sec)
             moved = model.g2p_model.get_means3D(gaussians[0], middle_time)
             displacement = (
                 moved - gaussians[0]["position"]

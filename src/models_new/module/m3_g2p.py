@@ -150,6 +150,21 @@ class GausRender(nn.Module):
             ])
         return selected
 
+    @staticmethod
+    def _pad_view_batches(items, max_views):
+        """Pad per-sample ``[V,...]`` tensors without inventing valid views."""
+        padded = []
+        for item in items:
+            missing = int(max_views) - int(item.shape[0])
+            if missing < 0:
+                raise ValueError("max_views is smaller than a rendered view batch")
+            if missing:
+                item = torch.cat(
+                    [item, item.new_zeros((missing, *item.shape[1:]))], dim=0
+                )
+            padded.append(item)
+        return torch.stack(padded, dim=0)
+
 
     def get_means3D(self, b_gs, t):
         position = b_gs["position"]
@@ -377,18 +392,35 @@ class GausRender(nn.Module):
             all_render_points.append(b_render_points)
             all_gt_points.append(b_gt_points)
 
+        # Dynamic-duration batches can contain 3, 4, or 5 supervised views per
+        # sample. Pad only the returned image tensors; ``view_mask`` tells the
+        # loss which rows are real, while point lists remain naturally ragged.
+        view_counts = [int(value.shape[0]) for value in all_depths]
+        if not view_counts or min(view_counts) <= 0:
+            raise ValueError("Every render sample must contain at least one target view")
+        max_views = max(view_counts)
+        view_mask = (
+            torch.arange(max_views, device=all_depths[0].device).unsqueeze(0)
+            < torch.tensor(
+                view_counts, device=all_depths[0].device, dtype=torch.long
+            ).unsqueeze(1)
+        )
+
         # 최종 딕셔너리 반환
         return {
             # 고정 차원 텐서 (Batch, Cam, H, W)
-            "depth": torch.stack(all_depths, dim=0),
-            "depth_median": torch.stack(all_depths_median, dim=0),
-            "intensity_sh": torch.stack(all_intensity_shs, dim=0),
-            "raydrop": torch.stack(all_raydrops, dim=0),
-            **({"alpha": torch.stack(all_alphas, dim=0)}
+            "depth": self._pad_view_batches(all_depths, max_views),
+            "depth_median": self._pad_view_batches(all_depths_median, max_views),
+            "intensity_sh": self._pad_view_batches(all_intensity_shs, max_views),
+            "raydrop": self._pad_view_batches(all_raydrops, max_views),
+            **({"alpha": self._pad_view_batches(all_alphas, max_views)}
                if all_alphas is not None else {}),
-            "gt_depth": torch.stack(all_gt_depths, dim=0),
-            "gt_intensity_sh": torch.stack(all_gt_intensity_shs, dim=0),
-            "gt_raydrop": torch.stack(all_gt_raydrops, dim=0),
+            "gt_depth": self._pad_view_batches(all_gt_depths, max_views),
+            "gt_intensity_sh": self._pad_view_batches(
+                all_gt_intensity_shs, max_views
+            ),
+            "gt_raydrop": self._pad_view_batches(all_gt_raydrops, max_views),
+            "view_mask": view_mask,
             
             # 가변 크기 가능 리스트 (중첩 리스트 형태: [Batch][Cam])
             "render_points": all_render_points,

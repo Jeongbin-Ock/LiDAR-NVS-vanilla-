@@ -37,16 +37,29 @@ torch.set_float32_matmul_precision("high")
 
 
 def print_run_summary(cfg):
+    dynamic_window = getattr(cfg.data, "dynamic_window", None)
+    dynamic_sampling = ""
+    if dynamic_window is not None:
+        dynamic_sampling = (
+            ", endpoint_sec="
+            f"[{float(dynamic_window.endpoint_min_sec):g},"
+            f"{float(dynamic_window.endpoint_max_sec):g}]"
+            f", novel_views={int(cfg.data.gt_middle_count)}"
+            ", train_excluded_scenes="
+            f"{list(dynamic_window.train_excluded_scenes)}"
+        )
     print(
         "Run: "
         f"mode={cfg.mode}, "
         f"variant={cfg.model.variant}, "
+        f"dataset={cfg.data.dataset_name}, "
         f"seed={cfg.seed}, "
         f"devices={list(cfg.device)}, "
         f"train_batch_size={cfg.train.batch_size}, "
         f"val_check_interval={cfg.train.val_check_interval}, "
         f"max_epochs={cfg.train.max_epochs}, "
         f"max_steps={cfg.train.max_steps}"
+        f"{dynamic_sampling}"
     )
 
 

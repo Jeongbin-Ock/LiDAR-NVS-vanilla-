@@ -692,6 +692,65 @@ fixed-count seed set, so the two contracts cannot be mixed.
 Both counts are structural: `p2g` is a checkpoint-protected root, so a resume or
 evaluation cannot change how many Gaussians a checkpoint's tokens produce.
 
+## V11 random-duration windows (`data.dataset_name=nuscenes_dynamic_lidar4d`)
+
+Fresh V11, V11.1, V11.2, V11.3, and V11.4 runs use
+`src/dataloader/nuscene_dynamic_lidar4d.py` instead of the legacy bbox-compatible
+`nuscene.py`. The new loader retains the old flat index's keyframe start sweep
+and 0.5-second sliding stride, but samples the actual second endpoint uniformly
+from the available 0.1-second-grid sweeps whose measured timestamp is between
+0.2 and 1.2 seconds after that start:
+
+```yaml
+data:
+  dataset_name: nuscenes_dynamic_lidar4d
+  sample_gap_us: 100000
+  gt_middle_count: 3
+  pair_mode: keyframe
+  pair_kf_stride: 2
+  mode: nvs
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.2
+    eval_seed: 42
+    train_excluded_scenes: [scene-0757, scene-1094]
+```
+
+A start near the end of a scene may not have a 1.2-second sweep. Its draw is
+uniform over the eligible endpoints that really exist; the loader does not
+clamp several draws onto the final sweep and does not drop a start that still
+has valid candidates. Training resamples the endpoint on every access using the
+worker-seeded Python RNG. Validation/test use a stable hash of the start anchor
+and `eval_seed`, so the pseudo-random endpoint and target views repeat exactly.
+
+The loader samples up to `gt_middle_count=3` distinct interior views. A normal
+0.2-second pair has one interior 0.1-second view, a 0.3-second pair has two, and
+any pair with at least three available interior sweeps samples exactly three.
+The chronological render-target list always includes the start and end sweeps,
+so both model inputs retain the same reconstruction loss as the novel views.
+
+Short pairs make the number of cameras ragged across a batch. The renderer pads
+only its returned image tensors and emits `view_mask`; `Loss` excludes padded
+rows from depth, median-depth, intensity, raydrop, and image metrics. It never
+duplicates a target view to make shapes match. Chamfer already consumes ragged
+per-sample point lists and needs no padding.
+
+The dynamic loader returns only sensor-frame endpoint XYZI, frame layout,
+endpoint poses/physical times, the minimal XYZI Utonia input, and GT `Camera`
+objects. It does not load boxes, assign point instance IDs, create raw
+reference-frame point copies, or collate redundant GT point tensors. Historical
+checkpoints keep the `data.dataset_name` embedded when they were saved, so an
+old fixed-duration V11 checkpoint still reconstructs with `nuscene.py`; the
+loader and dynamic-window block are checkpoint-protected sampling semantics.
+
+Two of the five LiDAR4D Table-S6 sequences are located in the official nuScenes
+train split: `seq_1600_1650` belongs to `scene-0757`, and `seq_3180_3230`
+belongs to `scene-1094`. The dynamic loader removes both complete scenes from
+its train scene set before constructing start anchors. Holding out only each
+five-second interval would still leak adjacent random-duration windows into the
+test segment. Validation, compact validation, and the three official val-split
+LiDAR4D sequences are not filtered by `train_excluded_scenes`.
+
 ## Compact validation (`data.compact_val`)
 
 Validation after every epoch runs the whole `val` split by default: 5,719
@@ -742,15 +801,20 @@ applied to windows it does not address; change any of those keys and rebuild:
 python tools/build_compact_val_windows.py --n-static 20 --n-dynamic 180
 ```
 
+For `nuscenes_dynamic_lidar4d`, that stored pair is a **nominal address only**: it
+selects the same legacy keyframe start anchor, while the actual endpoint comes
+from the stable validation draw described above. This lets the existing
+180-dynamic/20-static manifest retain the same start population even though
+V11's physical interval is now variable.
+
 `enable: false` restores full-split validation. `train`/`test` dataloaders are
 untouched.
 
-The Dynamic overlays deliberately keep `data.mode=bbox`; boxes are still loaded
-and collated for dataset compatibility, but the dynamic backend never consumes
-them. The dataloader exposes both normalized `timestamps` for attention and
-relative `timestamps_sec` plus `window_duration_sec` for physical transport.
-V3 and later use `timestamps_sec` for both time conditioning and physical
-transport; normalized timestamps remain for historical model contracts.
+Pre-V11 Dynamic overlays retain the shared bbox-compatible loader. The V11
+family selects `data.mode=nvs` and the minimal dynamic loader above. Both loader
+contracts expose relative `timestamps_sec` plus `window_duration_sec`; V3 and
+later use those physical values for time conditioning and transport. Normalized
+endpoint timestamps remain only as a small historical backend-API field.
 
 Only keys consumed by the implementation remain in each dynamic overlay.
 Attention geometry uses the shared Utonia-compatible `Rotary3D`; V3 and later

@@ -1,6 +1,8 @@
 """Static validation for composed and checkpoint experiment configs."""
 from __future__ import annotations
 
+import math
+
 from omegaconf import OmegaConf
 
 from .definitions import (
@@ -247,6 +249,80 @@ def _variant_label(variant: str) -> str:
     return variant
 
 
+def _validate_dynamic_window_loader(config, variant: str) -> None:
+    """Validate the random-duration data contract for fresh V11/V12 runs."""
+    dataset_name = str(OmegaConf.select(config, "data.dataset_name", default=""))
+    if dataset_name != "nuscenes_dynamic_lidar4d":
+        # Historical V11 checkpoints embed ``nuscenes`` and must remain
+        # reconstructable under their original fixed-duration loader.
+        return
+    if variant not in BARRIER_MATCH_DYNAMIC_VARIANTS:
+        raise ValueError(
+            "data.dataset_name=nuscenes_dynamic_lidar4d is reserved for the "
+            "V11/V12 family"
+        )
+    if str(OmegaConf.select(config, "data.pair_mode", default="")) != "keyframe":
+        raise ValueError("nuscenes_dynamic_lidar4d requires data.pair_mode=keyframe")
+    if str(OmegaConf.select(config, "data.mode", default="")) != "nvs":
+        raise ValueError("nuscenes_dynamic_lidar4d requires data.mode=nvs")
+
+    path = "data.dynamic_window"
+    if OmegaConf.select(config, path, default=None) is None:
+        raise ValueError("nuscenes_dynamic_lidar4d requires data.dynamic_window")
+    _reject_unknown_keys(
+        config,
+        path,
+        {
+            "endpoint_min_sec", "endpoint_max_sec", "eval_seed",
+            "train_excluded_scenes",
+        },
+    )
+    missing = [
+        name for name in (
+            "endpoint_min_sec", "endpoint_max_sec", "eval_seed",
+            "train_excluded_scenes",
+        )
+        if not _has_path(config, f"{path}.{name}")
+    ]
+    if missing:
+        raise ValueError(
+            "data.dynamic_window is missing keys: " + ", ".join(missing)
+        )
+    minimum = float(OmegaConf.select(config, f"{path}.endpoint_min_sec"))
+    maximum = float(OmegaConf.select(config, f"{path}.endpoint_max_sec"))
+    if not math.isfinite(minimum) or not math.isfinite(maximum):
+        raise ValueError("dynamic endpoint durations must be finite")
+    if not 0.0 < minimum <= maximum:
+        raise ValueError(
+            "dynamic endpoint durations must satisfy 0 < min <= max"
+        )
+    sample_gap_us = int(OmegaConf.select(config, "data.sample_gap_us"))
+    if sample_gap_us <= 0 or sample_gap_us % 50_000 != 0:
+        raise ValueError(
+            "nuscenes_dynamic_lidar4d sample_gap_us must be a positive multiple of 50000"
+        )
+    if int(OmegaConf.select(config, "data.gt_middle_count")) < 0:
+        raise ValueError(
+            "nuscenes_dynamic_lidar4d gt_middle_count must be non-negative"
+        )
+    if int(OmegaConf.select(config, "data.pair_kf_stride")) <= 0:
+        raise ValueError(
+            "nuscenes_dynamic_lidar4d pair_kf_stride must be positive"
+        )
+    int(OmegaConf.select(config, f"{path}.eval_seed"))
+    excluded_scenes = list(OmegaConf.select(
+        config, f"{path}.train_excluded_scenes"
+    ))
+    if not excluded_scenes:
+        raise ValueError(
+            "nuscenes_dynamic_lidar4d requires at least one held-out train scene"
+        )
+    if any(not str(scene).strip() for scene in excluded_scenes):
+        raise ValueError("train_excluded_scenes entries must be non-empty")
+    if len(excluded_scenes) != len(set(map(str, excluded_scenes))):
+        raise ValueError("train_excluded_scenes must not contain duplicates")
+
+
 def validate_experiment_config(config) -> None:
     missing = [key for key in _REQUIRED_ROOTS if key not in config]
     if missing:
@@ -258,6 +334,8 @@ def validate_experiment_config(config) -> None:
         raise ValueError(
             f"Unknown model.variant={variant!r}; expected one of: {allowed}"
         )
+
+    _validate_dynamic_window_loader(config, variant)
 
     lora_enabled = _validate_utonia_lora_config(config)
 

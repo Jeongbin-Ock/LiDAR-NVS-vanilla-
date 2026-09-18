@@ -372,8 +372,22 @@ class Loss(nn.Module):
             gt_intensity = gt_intensity.squeeze(2)
             pred_raydrop = pred_raydrop.squeeze(2)
             gt_raydrop = gt_raydrop.squeeze(2)
-        
-        valid = gt_depth > 0  # valid 마스크 (B, C, H, W)
+
+        view_mask = all_renders.get("view_mask")
+        if view_mask is None:
+            view_mask = torch.ones(
+                pred_depth.shape[:2], device=pred_depth.device, dtype=torch.bool
+            )
+        else:
+            view_mask = view_mask.to(device=pred_depth.device, dtype=torch.bool)
+            if tuple(view_mask.shape) != tuple(pred_depth.shape[:2]):
+                raise ValueError(
+                    "render view_mask must have shape [batch, views], got "
+                    f"{tuple(view_mask.shape)} for maps {tuple(pred_depth.shape)}"
+                )
+        all_views_valid = bool(view_mask.all())
+        valid_view_pixels = view_mask.unsqueeze(-1).unsqueeze(-1).expand_as(gt_depth)
+        valid = (gt_depth > 0) & valid_view_pixels
 
         # ----------------------------------------------------------
         # 1. 실제 학습에 쓰일 핵심 4가지 Loss 계산 (Backpropagation 타겟)
@@ -391,10 +405,21 @@ class Loss(nn.Module):
 
         # Raydrop Loss는 요청하신 대로 이진 분류를 처리하는 BCE Loss로 반영합니다.
         # 안전한 로그 연산을 위해 수치적 안정성이 잡힌 예측 맵을 클리핑 하거나 binary 형태로 계산합니다.
-        losses["loss_raydrop"] = F.binary_cross_entropy(
-            torch.clamp(pred_raydrop, 1e-7, 1.0 - 1e-7),
-            gt_raydrop
-        )
+        if all_views_valid:
+            # Preserve the fixed-view historical reduction exactly.
+            losses["loss_raydrop"] = F.binary_cross_entropy(
+                torch.clamp(pred_raydrop, 1e-7, 1.0 - 1e-7),
+                gt_raydrop,
+            )
+        elif bool(valid_view_pixels.any()):
+            losses["loss_raydrop"] = F.binary_cross_entropy(
+                torch.clamp(
+                    pred_raydrop[valid_view_pixels], 1e-7, 1.0 - 1e-7
+                ),
+                gt_raydrop[valid_view_pixels],
+            )
+        else:
+            losses["loss_raydrop"] = pred_raydrop.sum() * 0.0
 
         compute_chamfer = self.w_chamfer > 0.0 or metric_mode in {
             "val", "test", "eval"
@@ -446,6 +471,16 @@ class Loss(nn.Module):
                 gt_intensity,
                 valid,
             )
+            # Padded camera rows never enter a metric reduction. This keeps a
+            # short-duration sample's missing novel views genuinely absent,
+            # rather than treating zero padding as an easy synthetic frame.
+            flat_view_mask = view_mask.reshape(-1)
+            if not all_views_valid:
+                p_depth_2d = p_depth_2d[flat_view_mask]
+                g_depth_2d = g_depth_2d[flat_view_mask]
+                p_int_2d = p_int_2d[flat_view_mask]
+                g_int_2d = g_int_2d[flat_view_mask]
+                valid_2d = valid_2d[flat_view_mask]
 
         if compute_valid_metrics:
             # Diagnostic only: measure value quality on GT-hit support while
@@ -477,6 +512,9 @@ class Loss(nn.Module):
                 pred_depth_raydrop,
                 pred_intensity_raydrop,
             )
+            if not all_views_valid:
+                p_depth_raydrop_2d = p_depth_raydrop_2d[flat_view_mask]
+                p_int_raydrop_2d = p_int_raydrop_2d[flat_view_mask]
             losses["intensity_psnr_raydrop"] = self._calculate_psnr(
                 p_int_raydrop_2d, g_int_2d
             )

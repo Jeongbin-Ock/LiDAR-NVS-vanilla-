@@ -10,6 +10,10 @@ class DataModule(pl.LightningDataModule):
         self.dataset = dataset
         self.cfg = cfg  
 
+    def _collate_fn(self):
+        """Use a dataset-specific packing contract when one is declared."""
+        return getattr(self.dataset, "collate_fn", multiframe_collate_fn)
+
     def train_dataloader(self):
         return DataLoader(
             dataset=self.dataset(
@@ -20,7 +24,7 @@ class DataModule(pl.LightningDataModule):
             num_workers=self.cfg.data.num_workers,
             shuffle=True,
             pin_memory=True,
-            collate_fn = multiframe_collate_fn
+            collate_fn=self._collate_fn(),
         )
 
     def _compact_val_subset(self):
@@ -52,7 +56,7 @@ class DataModule(pl.LightningDataModule):
             num_workers=int(getattr(self.cfg.data, "eval_num_workers", 0)),
             shuffle=False,
             pin_memory=True,
-            collate_fn = multiframe_collate_fn
+            collate_fn=self._collate_fn(),
         )
 
     def test_dataloader(self):
@@ -65,5 +69,5 @@ class DataModule(pl.LightningDataModule):
             num_workers=int(getattr(self.cfg.data, "eval_num_workers", 0)),
             shuffle=False,
             pin_memory=True,
-            collate_fn = multiframe_collate_fn
+            collate_fn=self._collate_fn(),
         )
