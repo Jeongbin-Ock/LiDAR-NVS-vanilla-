@@ -396,7 +396,7 @@ contracts are inherited unchanged from V11.
   normalization. This is `mean(||v||^2) / 3`, three times weaker than a
   squared-norm prior at the same weight.
 - `final_group_l2` -- `mean(||v||_2^2)`. Same numerator as `final_l2` over one
-  count per Gaussian rather than per component.
+  count per token rather than per component.
 - `final_group_l1` -- `mean(||v||_2)`, which keeps a non-vanishing restoring
   force near zero.
 - `offset_l2` -- `final_l2` applied to the learned residual only, leaving the
@@ -413,6 +413,16 @@ contracts are inherited unchanged from V11.
 
 In every mode `loss_velocity_l2` is the raw term; the weighted contribution
 (`wc_velocity_l2`) is computed for the total but is not sent to wandb.
+
+Every mode, the `small_motion` prior, and the logged motion diagnostics
+(`velocity_speed_mean`, `velocity_init_norm_mean`, `p_unmatched_mean`, ...)
+average over tokens rather than Gaussians. A token's velocity is copied onto
+each of its Gaussians, so under the adaptive-K router a Gaussian mean would
+charge a K=3 token three times what a K=1 token pays for the same velocity.
+They keep one Gaussian per token (`gaussian_slot_index == 0`); with a fixed
+count that is exactly the Gaussian mean. Router checkpoints trained before this
+change optimized and logged the K-weighted means, so resuming one moves its
+`loss_velocity_l2*` and motion-diagnostic curves onto the token means.
 
 The three families fail in opposite directions, which is why V11 splits them.
 Charging the *sum* makes the cross term `2<v_init, v_offset>` payable by
@@ -463,11 +473,10 @@ carries no
 `p2g.grid_query` block, which means one Gaussian per occupied token at that
 token's observed medoid. There is no count predictor, no straight-through
 opacity gate, no per-K gradient balancing and no seed bank. Token count and
-Gaussian count become the same number, which also removes an index expansion
-that quietly weighted every per-token diagnostic and every per-token regularizer
-by that token's K: `velocity_l2` and the motion statistics are now plain token
-means. Measured peak memory is unchanged (31.1 GiB against V11's 31.4 at 12
-layers, `batch_size=2`).
+Gaussian count become the same number. At the time that also removed an index
+expansion which weighted every per-token diagnostic and regularizer by that
+token's K; the router variants now count each token once as well. Measured peak
+memory is unchanged (31.1 GiB against V11's 31.4 at 12 layers, `batch_size=2`).
 
 An **earlier V11.1 also gated the readout** by how much attention mass sat within
 `support_rho_m` of it, through a saturating ramp `clip((W - lo)/width, 0, 1)` with
@@ -502,8 +511,8 @@ per-slot parameter blocks separate the pair afterwards.
 Removing the router removes the count predictor, the straight-through opacity
 gate, the per-K gradient balancing and the candidate bank with it. Because the
 count is now the same for every token, a mean over Gaussians is exactly a mean
-over tokens, so `velocity_l2` and the motion diagnostics stop being silently
-K-weighted the way V11's routed mean of 1.638 made them.
+over tokens. V11's router (mean K 1.638) used to K-weight the velocity priors
+and motion diagnostics; they now count each token once there too.
 
 The **Gaussian head keeps the rest of what the router's decoder did**, so the
 count is the only thing that differs. V11's decoder is two layers around the

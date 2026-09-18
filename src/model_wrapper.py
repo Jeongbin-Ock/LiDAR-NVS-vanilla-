@@ -62,6 +62,24 @@ ADAPTIVE_BUDGET_LOG_KEYS = {
 }
 
 
+def _per_token_rows(item, field):
+    """``item[field]`` reduced to one row per source token.
+
+    Motion is predicted per token and copied onto each of that token's
+    Gaussians. A fixed count gives every token the same number of identical
+    copies, so a mean over Gaussians is already the token mean, in value and in
+    gradient. The adaptive-K router gives a token K={1,2,3} copies, and the same
+    mean would charge a K=3 token three times what a K=1 token pays for the
+    same velocity. Router items carry ``gaussian_slot_index``, and every token
+    owns exactly one slot-0 Gaussian, so keeping slot 0 counts each token once.
+    """
+    value = item[field]
+    slot = item.get("gaussian_slot_index")
+    if slot is None:
+        return value
+    return value[slot == 0]
+
+
 class ModelWrapper(LightningModule):
     def __init__(
         self,
@@ -343,11 +361,15 @@ class ModelWrapper(LightningModule):
     def _add_velocity_l2_prior(self, losses, gaussians, *, prefix):
         """Velocity magnitude prior selected by ``velocity_l2.mode``.
 
+        Every mode averages over tokens rather than Gaussians (see
+        ``_per_token_rows``), so a token's velocity costs the same whatever K
+        the router gave it.
+
         ``final_l2`` preserves the historical mean over squared components,
         which is ``mean(||v||^2) / 3`` and therefore three times weaker than a
         squared-norm prior at the same weight. ``final_group_l2`` is that
         squared-norm form, ``mean(||v||_2^2)``: the same numerator over one
-        count per Gaussian rather than per component. ``final_group_l1`` is
+        count per token rather than per component. ``final_group_l1`` is
         ``mean(||v||_2)``: an L1 penalty over velocity vectors that keeps a
         non-vanishing restoring force near zero. All three act on the rendered
         final velocity. ``offset_l2`` instead computes the mean squared
@@ -382,18 +404,18 @@ class ModelWrapper(LightningModule):
                         f"active item indices {missing}"
                     )
                 velocity = torch.cat([
-                    item["velocity_offset"] for item in active
+                    _per_token_rows(item, "velocity_offset") for item in active
                 ], dim=0)
             else:
                 velocity = torch.cat([
-                    item["velocity"] for item in active
+                    _per_token_rows(item, "velocity") for item in active
                 ], dim=0)
             if mode in ("final_l2", "offset_l2"):
                 local_sum = velocity.square().sum()
                 local_count = velocity.numel()
             elif mode in ("final_group_l2", "offset_group_l2"):
                 # Same squared numerator as final_l2 over one count per
-                # Gaussian: exactly mean(||v||^2), i.e. 3x final_l2 for a
+                # token: exactly mean(||v||^2), i.e. 3x final_l2 for a
                 # three-component velocity.
                 local_sum = velocity.square().sum()
                 local_count = velocity.shape[0]
@@ -457,7 +479,9 @@ class ModelWrapper(LightningModule):
                         f"active Gaussian item to provide {field}; missing at "
                         f"active item indices {missing}"
                     )
-                value = torch.cat([item[field] for item in active], dim=0)
+                value = torch.cat(
+                    [_per_token_rows(item, field) for item in active], dim=0
+                )
                 local_sum = value.square().sum()
                 local_count = value.shape[0]
             else:
@@ -490,7 +514,11 @@ class ModelWrapper(LightningModule):
 
     @torch.no_grad()
     def _log_velocity_statistics(self, gaussians, *, prefix: str) -> None:
-        """Motion-magnitude alarms; V3 diverged without these being visible."""
+        """Motion-magnitude alarms; V3 diverged without these being visible.
+
+        Like the velocity priors, every statistic counts each token once (see
+        ``_per_token_rows``), so the router's K does not weight it.
+        """
         active = self._active_motion_items(gaussians)
         if not active:
             # Unreachable during training: the renderer rejects a None batch and
@@ -498,7 +526,9 @@ class ModelWrapper(LightningModule):
             # sync_dist logging below together. This guard only covers callers
             # that hand in an empty list.
             return
-        velocity = torch.cat([item["velocity"] for item in active], dim=0)
+        velocity = torch.cat(
+            [_per_token_rows(item, "velocity") for item in active], dim=0
+        )
         speed = velocity.norm(dim=-1)
         statistics = {
             "velocity_speed_mean": speed.mean(),
@@ -529,7 +559,9 @@ class ModelWrapper(LightningModule):
         def _cat(name):
             if any(name not in item for item in active):
                 return None
-            return torch.cat([item[name] for item in active], dim=0).float()
+            return torch.cat(
+                [_per_token_rows(item, name) for item in active], dim=0
+            ).float()
 
         for field, label in (
             ("p_unmatched", "p_unmatched_mean"),
@@ -668,7 +700,7 @@ class ModelWrapper(LightningModule):
         return stats
 
     def _add_small_motion_prior(self, losses, gaussians, *, prefix):
-        """Optional robust prior on physical displacement over each window."""
+        """Optional robust prior on each token's displacement over its window."""
         cfg = getattr(getattr(self.dynamic_cfg, "regularization", None),
                       "small_motion", None)
         enabled = bool(getattr(cfg, "enabled", False)) if cfg else False
@@ -681,7 +713,8 @@ class ModelWrapper(LightningModule):
             raw_loss = reference * 0.0
         else:
             displacement = torch.cat([
-                item["velocity"] * item["window_duration_sec"].unsqueeze(-1)
+                _per_token_rows(item, "velocity")
+                * _per_token_rows(item, "window_duration_sec").unsqueeze(-1)
                 for item in active
             ], dim=0)
             epsilon = float(getattr(cfg, "epsilon_m", 1.0e-3)) if cfg else 1.0e-3

@@ -849,6 +849,167 @@ class DynamicGaussianTest(unittest.TestCase):
                 [torch.zeros(1, 3)], mode="offset_group_l2"
             )
 
+    @staticmethod
+    def _routed_items(token_fields, selected_k, sample_tokens):
+        """Adaptive-K items: every token copied once per selected slot."""
+        items = []
+        for tokens in sample_tokens:
+            anchor = torch.cat([
+                torch.full((selected_k[t],), t, dtype=torch.long)
+                for t in tokens
+            ])
+            slot = torch.cat([torch.arange(selected_k[t]) for t in tokens])
+            item = {
+                name: value[anchor] for name, value in token_fields.items()
+            }
+            item["gaussian_slot_index"] = slot
+            items.append(item)
+        return items
+
+    def test_velocity_priors_count_each_routed_token_once(self):
+        # Tokens 0/1 share one sample at K=1/K=3, token 2 has K=2 in another.
+        # A Gaussian mean would be (25 + 3*1 + 2*4) / 6 = 6.0.
+        velocity = torch.tensor(
+            [[3.0, 4.0, 0.0], [0.0, 0.0, 1.0], [0.0, 2.0, 0.0]],
+            requires_grad=True,
+        )
+        items = self._routed_items(
+            {"velocity": velocity}, [1, 3, 2], [[0, 1], [2]]
+        )
+        wrapper = SimpleNamespace(
+            _velocity_l2_cfg=OmegaConf.create({
+                "enabled": True, "weight": 0.05,
+                "warmup_steps": 0, "ramp_steps": 0,
+            }),
+            _velocity_l2_mode="final_group_l2",
+            global_step=0,
+            _active_motion_items=ModelWrapper._active_motion_items,
+        )
+        losses = {"total": torch.zeros(())}
+        ModelWrapper._add_velocity_l2_prior(
+            wrapper, losses, items, prefix="train"
+        )
+        self.assertAlmostEqual(
+            float(losses["loss_velocity_l2"]), (25.0 + 1.0 + 4.0) / 3.0,
+            places=5,
+        )
+        losses["total"].backward()
+        # d/dv [w * sum_t ||v_t||^2 / 3] = 2*w*v_t / 3 for every token,
+        # whatever its K.
+        torch.testing.assert_close(
+            velocity.grad, 2.0 * 0.05 * velocity.detach() / 3.0
+        )
+
+    def test_split_group_l2_counts_each_routed_token_once(self):
+        init = torch.tensor(
+            [[3.0, 4.0, 0.0], [0.0, 0.0, 1.0]], requires_grad=True
+        )
+        offset = torch.tensor(
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], requires_grad=True
+        )
+        items = self._routed_items(
+            {
+                "velocity": init + offset,
+                "velocity_init": init,
+                "velocity_offset": offset,
+            },
+            [1, 3],
+            [[0, 1]],
+        )
+        wrapper = SimpleNamespace(
+            _velocity_l2_cfg=OmegaConf.create({
+                "enabled": True, "mode": "split_group_l2",
+                "init_weight": 0.01, "offset_weight": 0.02,
+                "warmup_steps": 0, "ramp_steps": 0,
+            }),
+            _velocity_l2_mode="split_group_l2",
+            global_step=0,
+            _active_motion_items=ModelWrapper._active_motion_items,
+        )
+        wrapper._add_split_velocity_l2_prior = MethodType(
+            ModelWrapper._add_split_velocity_l2_prior, wrapper
+        )
+        losses = {"total": torch.zeros(())}
+        ModelWrapper._add_velocity_l2_prior(
+            wrapper, losses, items, prefix="train"
+        )
+        # Token means, where Gaussian means would be 7.0 and 3.0.
+        self.assertAlmostEqual(
+            float(losses["loss_velocity_l2_init"]), 13.0, places=5
+        )
+        self.assertAlmostEqual(
+            float(losses["loss_velocity_l2_offset"]), 2.0, places=5
+        )
+        losses["total"].backward()
+        torch.testing.assert_close(init.grad, 0.01 * init.detach())
+        torch.testing.assert_close(offset.grad, 0.02 * offset.detach())
+
+    def test_small_motion_prior_counts_each_routed_token_once(self):
+        velocity = torch.tensor(
+            [[3.0, 4.0, 0.0], [0.0, 0.0, 2.0]], requires_grad=True
+        )
+        items = self._routed_items(
+            {
+                "velocity": velocity,
+                "window_duration_sec": torch.tensor([0.5, 0.5]),
+            },
+            [3, 1],
+            [[0, 1]],
+        )
+        wrapper = SimpleNamespace(
+            dynamic_cfg=OmegaConf.create({"regularization": {"small_motion": {
+                "enabled": True, "weight": 0.1, "epsilon_m": 0.0,
+                "warmup_steps": 0, "ramp_steps": 0,
+            }}}),
+            global_step=0,
+            _active_motion_items=ModelWrapper._active_motion_items,
+        )
+        losses = {"total": torch.zeros(())}
+        ModelWrapper._add_small_motion_prior(
+            wrapper, losses, items, prefix="train"
+        )
+        # Displacements 2.5 m and 1.0 m: a token mean of 1.75 m, where the
+        # Gaussian mean would be (3 * 2.5 + 1.0) / 4 = 2.125 m.
+        self.assertAlmostEqual(
+            float(losses["loss_velocity_prior"]), 1.75, places=5
+        )
+        losses["total"].backward()
+        speed = velocity.detach().norm(dim=-1, keepdim=True)
+        torch.testing.assert_close(
+            velocity.grad, 0.1 * 0.5 * velocity.detach() / speed / 2.0
+        )
+
+    def test_velocity_statistics_count_each_routed_token_once(self):
+        velocity = torch.tensor([[3.0, 4.0, 0.0], [0.0, 0.0, 1.0]])
+        items = self._routed_items(
+            {
+                "velocity": velocity,
+                "velocity_init": velocity,
+                "velocity_offset": torch.zeros_like(velocity),
+            },
+            [3, 1],
+            [[0, 1]],
+        )
+        logged = {}
+
+        def log(name, value, **kwargs):
+            logged[name] = (float(value), kwargs["batch_size"])
+
+        wrapper = SimpleNamespace(
+            _active_motion_items=ModelWrapper._active_motion_items,
+            _motion_proposal_statistics=(
+                ModelWrapper._motion_proposal_statistics
+            ),
+            log=log,
+        )
+        ModelWrapper._log_velocity_statistics(wrapper, items, prefix="train")
+        # Speeds 5 and 1 m/s: a token mean of 3.0, where the Gaussian mean
+        # would be (3 * 5 + 1) / 4 = 4.0.
+        for name in ("velocity_speed_mean", "velocity_init_norm_mean"):
+            value, batch_size = logged[f"train/dynamic/{name}"]
+            self.assertAlmostEqual(value, 3.0, places=5)
+            self.assertEqual(batch_size, 2)
+
     def test_irregular_pair_keeps_normalized_and_physical_time(self):
         normalized, seconds, duration = relative_time_coordinates(
             [1_000_000, 1_400_000, 1_870_000],
