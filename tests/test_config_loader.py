@@ -34,6 +34,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V13,
+    DYNAMIC_VARIANT_V13_1,
     LEGACY_VARIANT,
     PHYSICAL_VELOCITY_VARIANTS,
     assert_model_variant_implemented,
@@ -710,6 +711,56 @@ class ConfigLoaderTest(unittest.TestCase):
                 compose_fresh_config(OmegaConf.from_dotlist([
                     f"model.variant={DYNAMIC_VARIANT_V13}", override,
                 ]))
+
+    def test_v13_1_differs_from_v13_only_by_fixed_k2_count(self):
+        v13, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V13}",
+        ]))
+        v13_1, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V13_1}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V13_1}.yaml", source)
+
+        left = OmegaConf.to_container(v13, resolve=False)
+        right = OmegaConf.to_container(v13_1, resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        left_count = left["p2g"].pop("grid_query")
+        right_count = right["p2g"].pop("grid_query")
+        self.assertEqual(left, right)
+        self.assertEqual(left_count["count_mode"], "learned_gumbel")
+        self.assertEqual(
+            left_count["learned_count"]["seed_mode"], "range_quantile"
+        )
+        self.assertEqual(right_count["count_mode"], "legacy")
+        self.assertEqual(right_count["K_max"], 2)
+        self.assertIsNone(right_count["exp"])
+        self.assertEqual(v13_1.p2g.head_offset_bound, 0.4)
+
+        for group in (
+            ATTENTION_VELOCITY_VARIANTS,
+            COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
+            PHYSICAL_VELOCITY_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V13_1, group)
+        self.assertNotIn(
+            DYNAMIC_VARIANT_V13_1, ROUTER_CAPABLE_DYNAMIC_VARIANTS
+        )
+        self.assertNotIn(DYNAMIC_VARIANT_V13_1, BARRIER_MATCH_DYNAMIC_VARIANTS)
+
+        with self.assertRaisesRegex(ValueError, "no count router"):
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V13_1}",
+                "p2g.grid_query.count_mode=learned_gumbel",
+                "p2g.grid_query.grad_balance=sqrt_k",
+                "p2g.grid_query.learned_count.K_max=3",
+                "p2g.grid_query.learned_count.tau=1.0",
+                "p2g.grid_query.learned_count.seed_mode=range_quantile",
+                "p2g.grid_query.learned_count.grad_balance_scope=token",
+                "p2g.grid_query.learned_count.budget.enable=false",
+                "p2g.grid_query.learned_count.logging.enable=true",
+                "p2g.grid_query.learned_count.logging.interval=20",
+                "p2g.grid_query.learned_count.logging.range_edges_m=[0,10]",
+            ]))
 
     def test_v11_3_head_is_seed_conditioned_at_three_channels_per_slot(self):
         """The router trunk's geometry input survives as head input columns."""

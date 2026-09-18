@@ -37,11 +37,12 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v11_4
 python main.py model.variant=dynamic_2dgs_attention_velocity_v12
 python main.py model.variant=dynamic_2dgs_attention_velocity_v12_1
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13
+python main.py model.variant=dynamic_2dgs_attention_velocity_v13_1
 ```
 
 This `/4d` worktree defaults to `dynamic_2dgs_attention_velocity_v7_2` for a
 fresh run. `bbox_rigid_v1` is the historical box-routed model. V1 through V7.1,
-V8, V9, V10, V11, V11.1, V11.2, V11.3, V11.4, V12, V12.1, and V13 remain
+V8, V9, V10, V11, V11.1, V11.2, V11.3, V11.4, V12, V12.1, V13, and V13.1 remain
 available for exact checkpoint reconstruction and controlled A/B runs.
 V4/V5 reuse temporal cross-attention heads for velocity initialization. V6 does
 not: it adds an independent, time-free Siamese motion proposal before temporal
@@ -49,12 +50,13 @@ cross-attention and uses the latter only for feature refinement. Its overlay
 defaults to `device=[0]` and `data.bbox_json_path=null`; both remain ordinary
 CLI-overridable runtime settings.
 
-Dynamic V1-V9, V11.1 and V11.3 emit a fixed number of Gaussians per occupied
-endpoint token -- one observed-medoid seed by default, and two range quantiles
-in V11.3; V10, V11, V11.2, V11.4, V12, V12.1 and V13 let a router select one to
-three range-quantile-seeded Gaussians instead. `p2g.grid_query` chooses between
-the two and sets the fixed count -- see "Gaussians per token" below. V3 through
-V6, V7.2, V8, V9, V10, V11, V11.2, V11.3, V11.4, V12, V12.1 and V13 embed
+Dynamic V1-V9, V11.1, V11.3 and V13.1 emit a fixed number of Gaussians per
+occupied endpoint token -- one observed-medoid seed by default, and two range
+quantiles in V11.3/V13.1; V10, V11, V11.2, V11.4, V12, V12.1 and V13 let a
+router select one to three range-quantile-seeded Gaussians instead.
+`p2g.grid_query` chooses between the two and sets the fixed count -- see
+"Gaussians per token" below. V3 through V6, V7.2, V8, V9, V10, V11, V11.2,
+V11.3, V11.4, V12, V12.1, V13 and V13.1 embed
 `time_coordinate = relative_seconds / time_reference_sec`, where
 `time_reference_sec=1.0` is fixed across samples. An irregular 0.8-second pair
 therefore supplies endpoint coordinates `[0, 0.8]`, rather than `[0, 1]`. Its
@@ -603,7 +605,7 @@ than V11.4's new random-duration loader. Its overlay inherits
 `data.dataset_name: nuscenes` and the fixed keyframe/window settings from
 `nuscene_train.yaml`, while setting `data.mode: bbox` and
 `data.bbox_json_path: null` exactly as the previous V11.4 overlay did. V12,
-V12.1 and V13 additionally set
+V12.1, V13 and V13.1 additionally set
 `data.train_excluded_scenes: [scene-0757, scene-1094]`; `nuscene.py` removes
 those complete scenes only when constructing the train split. Validation and
 test scenes remain unchanged. The key is checkpoint-protected sampling state,
@@ -702,6 +704,15 @@ V11-V12.1.
 V13's adaptive K={1,2,3} router uses the existing `GridSlotHead`, range-quantile
 candidate bank, hard Gumbel-Softmax STE, and `budget.enable=false` contract.
 
+**V13.1** is V13 with only the count mechanism changed. The router, count
+predictor, opacity STE gate and K-specific output heads are removed; every token
+emits exactly two Gaussians. `grid_query.K_max=2, exp=null` chooses the token's
+raw points at `floor(N/4)` and `floor(3N/4)`, exactly the adaptive bank's K=2
+range-quantile row. The fixed Gaussian decoder remains seed-conditioned, so the
+two slots see their six metric seed-delta channels. Temporal parameters,
+temperature, RoPE, motion head, data, losses and the 0.4 m offset bound are
+otherwise identical to V13.
+
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other
 weights shows a=0 to a=4 is decisive (mass beyond the radius 11.2% -> 0.85%,
@@ -767,22 +778,21 @@ exactly `K_max` Gaussians, which is required whenever the block is present.
 
 Seeds that coincide are not redundant: the Gaussian head owns one parameter
 block per slot, including the bounded position offset, so slots starting at the
-same coordinate learn independent geometry. V11.3 additionally feeds every
-slot's seed delta into that head, so its slots also differ by input and not only
-by parameters; every other fixed-count variant reads the token feature alone. Under `exp: null` a token holding
-fewer raw points than slots repeats observed points, the same way the
-learned-count candidate bank does.
+same coordinate learn independent geometry. V11.3 and V13.1 additionally feed
+every slot's seed delta into that head, so their slots also differ by input and
+not only by parameters; every other fixed-count variant reads the token feature
+alone. Under `exp: null` a token holding fewer raw points than slots repeats
+observed points, the same way the learned-count candidate bank does.
 
-Omitting the whole `p2g.grid_query` block means `K_max: 1, exp: 1`: one Gaussian
-per token at its medoid. That is what every fixed-count Dynamic variant except
-V11.3 (V1, V3-V9, V11.1) has always done, so their existing configs and
-checkpoints are
-unaffected. V11.3 ships the block explicitly at `K_max: 2, exp: null`. V1
-remains limited to `K_max: 1` because its seed-conditioned head
-refines features at token resolution; V3-V9, V11.1 and V11.3 support larger
-fixed counts. `points_per_gaussian` is read only by the grid *anchor* head, where K
-varies per token as `ceil(raw_count / points_per_gaussian)`; a fixed count never
-consults it.
+Omitting the whole `p2g.grid_query` block means `K_max: 1, exp: 1`: one
+Gaussian per token at its medoid. That is what every fixed-count Dynamic
+variant except V11.3/V13.1 (V1, V3-V9, V11.1) has always done, so their
+existing configs and checkpoints are unaffected. V11.3 and V13.1 ship the block
+explicitly at `K_max: 2, exp: null`. V1 remains limited to `K_max: 1` because
+its seed-conditioned head refines features at token resolution; V3-V9, V11.1,
+V11.3 and V13.1 support larger fixed counts. `points_per_gaussian` is read only
+by the grid *anchor* head, where K varies per token as
+`ceil(raw_count / points_per_gaussian)`; a fixed count never consults it.
 
 Because the count is fixed and identical for every token, a mean over Gaussians
 is exactly a mean over tokens. `velocity_l2` and the motion diagnostics stay
@@ -807,10 +817,10 @@ V11.3 emits that same 58,686 from its shipped `K_max: 2`.
 through the grid `GridSlotHead` and a hard Gumbel-Softmax over K={1,2,3} picks
 one K-specific joint head per token. Only V10, V11, V11.2, V11.4, V12, V12.1
 and V13 may use it; asking any other variant for it is rejected at config time
-rather than silently ignored. V11.3 is rejected too, even though it shares
-V11's backend class, because its identity is the fixed count. The seed geometry
-it consumes is the K-specific candidate bank, not the padded fixed-count seed
-set, so the two contracts cannot be mixed.
+rather than silently ignored. V11.3 and V13.1 are rejected too because their
+identities are the fixed count. The seed geometry it consumes is the K-specific
+candidate bank, not the padded fixed-count seed set, so the two contracts
+cannot be mixed.
 
 Both counts are structural: `p2g` is a checkpoint-protected root, so a resume or
 evaluation cannot change how many Gaussians a checkpoint's tokens produce.

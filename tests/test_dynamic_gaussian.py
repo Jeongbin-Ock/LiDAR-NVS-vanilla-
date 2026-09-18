@@ -45,6 +45,7 @@ from src.models_new.module.dynamic_gaussian import (
     GroupedHeadRMSNorm,
     GroupedGainBarrierCrossAttention,
     SingleGaussianBarrierVelocityGaussianBackend,
+    SeedConditionedCosineRoPEVelocityGaussianBackend,
     PhysicalVelocityGaussianBackend,
     PostAttentionProposalVelocityGaussianBackend,
     ProjectedDenseMotionProposal,
@@ -4080,6 +4081,56 @@ class V13CosineRoPEAttentionTest(unittest.TestCase):
             self.assertGreater(
                 float(module.k_proj[layer].weight.grad.abs().sum()), 0.0
             )
+
+    def test_v13_and_v13_1_backends_differ_only_in_count_path(self):
+        adaptive = CosineRoPEVelocityGaussianBackend(
+            v13_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussian_count_cfg=v10_gaussian_count_cfg(),
+        )
+        fixed = SeedConditionedCosineRoPEVelocityGaussianBackend(
+            v13_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussians_per_token=2,
+        ).eval()
+        for backend in (adaptive, fixed):
+            self.assertIsInstance(
+                backend.temporal, CosineRoPELayerWeightedCrossAttention
+            )
+            self.assertIsInstance(backend.velocity_head, EmbeddedInitVelocityHead)
+        self.assertAlmostEqual(adaptive.offset_bound, 0.4)
+        self.assertAlmostEqual(fixed.gaussian_head.offset_bound, 0.4)
+        self.assertTrue(adaptive.adaptive_count)
+        self.assertEqual(adaptive.gaussian_head.count_mode, "learned_gumbel")
+        self.assertFalse(fixed.adaptive_count)
+        self.assertEqual(fixed.gaussians_per_token, 2)
+        self.assertTrue(fixed.seed_conditioned_head)
+        self.assertIsInstance(fixed.gaussian_head, GaussianAttributeHead)
+        self.assertFalse(hasattr(fixed.gaussian_head, "count_predictor"))
+
+        tokens = 6
+        first = 3
+        feature = torch.randn(tokens, 24)
+        position = torch.randn(tokens, 3)
+        delta = torch.tensor([[-0.1, 0.0, 0.0], [0.1, 0.0, 0.0]])
+        seed_delta = delta.unsqueeze(0).expand(tokens, -1, -1).clone()
+        seed = position.unsqueeze(1) + seed_delta
+        output = fixed(
+            feature,
+            position,
+            seed,
+            torch.tensor([first, tokens]),
+            torch.tensor([0, 0]),
+            [torch.eye(4).repeat(2, 1, 1)],
+            [torch.tensor([0.0, 1.0])],
+            [torch.tensor([0.0, 0.8])],
+            torch.tensor([0.8]),
+            seed_delta_sensor=seed_delta,
+        )
+        item = output["batch_gaussians"][0]
+        self.assertEqual(item["position"].shape[0], 2 * tokens)
+        shared_velocity = item["velocity"].reshape(tokens, 2, 3)
+        torch.testing.assert_close(
+            shared_velocity, shared_velocity[:, :1].expand_as(shared_velocity)
+        )
 
 
 class V11_2FinalFeatureBarrierAttentionTest(unittest.TestCase):

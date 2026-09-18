@@ -2186,7 +2186,7 @@ class CosineRoPELayerWeightedCrossAttention(
 
         if self.qk_norm:
             self._build_qk_norm(True)
-        # V13 intentionally registers no q_norm/k_norm modules.
+        # V13/V13.1 intentionally register no q_norm/k_norm modules.
         self._build_transformer_layers(cfg)
         self.layer_logits = nn.Parameter(torch.zeros(self.n_layers))
 

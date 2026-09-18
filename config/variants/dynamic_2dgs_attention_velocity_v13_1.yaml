@@ -1,0 +1,95 @@
+# Dynamic 2DGS V13.1: V13 with a fixed K=2 Gaussian count.
+#
+# The temporal matcher, all-head FlashAttention/RoPE path, head-0 cosine
+# temperature, data contract, motion head, losses, and 0.4 m offset bound are
+# identical to V13. Only the adaptive K={1,2,3} router is removed. Each token
+# emits exactly two Gaussians at its own range-quantile seeds.
+model:
+  variant: dynamic_2dgs_attention_velocity_v13_1
+
+device: [0]
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  anchor_mode: grid
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  # Inactive compatibility values; V13.1 validation requires LoRA above.
+  agg_mlp:
+    hidden_dim: 1024
+    hidden_layers: 2
+    out_dim: 576
+  joint_refiner:
+    num_heads: 12
+    rope_base: 10.0
+    rope_position_scale: 4.0
+  # exp: null is the fixed range-quantile rule. For K=2 the raw-point ranks are
+  # floor(N/4) and floor(3N/4), exactly the adaptive router's K=2 candidate row.
+  grid_query:
+    count_mode: legacy
+    K_max: 2
+    exp: null
+
+data:
+  mode: bbox
+  bbox_json_path: null
+  train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: rope_all_heads
+
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: false
+    motion_temperature: 0.03
+    layer_scale_init: 0.1
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    small_motion:
+      enabled: false
+      weight: 0.005
+      epsilon_m: 0.001
+      warmup_steps: 300
+      ramp_steps: 1700
+
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+loss:
+  w_chamfer: 0.02
+  w_scale: 0.0

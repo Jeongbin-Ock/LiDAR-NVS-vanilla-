@@ -989,6 +989,9 @@ class SeedConditionedBarrierVelocityGaussianBackend(
       candidates.
     """
 
+    #: Subclasses keep the same fixed-count decoder under another temporal stack.
+    fixed_variant_label = "V11.3"
+
     #: ``Point2Gaus`` reads this to decide whether to send the seed deltas.
     seed_conditioned_head = True
 
@@ -996,7 +999,8 @@ class SeedConditionedBarrierVelocityGaussianBackend(
                              gaussian_count_cfg):
         if gaussian_count_cfg is not None:
             raise ValueError(
-                "V11.3 emits a fixed number of Gaussians per token and cannot "
+                f"{self.fixed_variant_label} emits a fixed number of Gaussians "
+                "per token and cannot "
                 "use p2g.grid_query.count_mode=learned_gumbel"
             )
         return GaussianAttributeHead(
@@ -1013,10 +1017,24 @@ class SeedConditionedBarrierVelocityGaussianBackend(
         seed_delta_ref = geometry.get("seed_delta_ref")
         if seed_delta_ref is None:
             raise ValueError(
-                "V11.3 requires the transformed per-slot seed deltas; "
+                f"{self.fixed_variant_label} requires the transformed per-slot "
+                "seed deltas; "
                 "Point2Gaus must pass seed_delta_sensor"
             )
         return self.gaussian_head(refined, seed_delta_ref)
+
+
+class SeedConditionedCosineRoPEVelocityGaussianBackend(
+    SeedConditionedBarrierVelocityGaussianBackend
+):
+    """V13.1: V13 temporal matching with fixed K=2 seed conditioning."""
+
+    fixed_variant_label = "V13.1"
+
+    def _build_temporal(self, cfg):
+        return CosineRoPELayerWeightedCrossAttention(
+            cfg.temporal, self.dim
+        )
 
 
 class SingleGaussianBarrierVelocityGaussianBackend(
@@ -1536,6 +1554,8 @@ __all__ = [
     "LearnableMaxSpeedBarrierVelocityGaussianBackend",
     "MaxSpeedBarrierVelocityGaussianBackend",
     "FinalFeatureBarrierVelocityGaussianBackend",
+    "SeedConditionedBarrierVelocityGaussianBackend",
+    "SeedConditionedCosineRoPEVelocityGaussianBackend",
     "SingleGaussianBarrierVelocityGaussianBackend",
     "ConsensusAttentionVelocityGaussianBackend",
     "ProposalInitializedVelocityGaussianBackend",

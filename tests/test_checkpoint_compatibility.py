@@ -79,6 +79,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v13": (
         "CosineRoPEVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v13_1": (
+        "SeedConditionedCosineRoPEVelocityGaussianBackend"
+    ),
 }
 
 _PROPOSAL_VARIANTS = {
@@ -162,9 +165,14 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v12_1": (
         "018ea06086c89eddba66", "7b477ca6c13d6632021a"
     ),
-    # V13 removes every temporal QK gain and both barrier scalars.
+    # V13 removes every temporal QK gain and both barrier scalars. V13.1 keeps
+    # that temporal schema but replaces the adaptive router with the fixed K=2
+    # seed-conditioned decoder.
     "dynamic_2dgs_attention_velocity_v13": (
         "080ce3c67577b3ee8594", "92153e92839df09bd2f3"
+    ),
+    "dynamic_2dgs_attention_velocity_v13_1": (
+        "90b35c80dbc62899965c", "aa231a6fe40641f9f90a"
     ),
 }
 
@@ -198,6 +206,7 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "FixedMotionHeadRMSNorm": "temporal",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention": "temporal",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend": "backends",
+    "SeedConditionedCosineRoPEVelocityGaussianBackend": "backends",
     "ConsensusAttentionMotionMatcher": "attention_matching",
     "GaussianAttributeHead": "heads",
     "StraightThroughTop4MotionProposal": "motion_proposals",
