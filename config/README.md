@@ -40,13 +40,14 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v13
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13_1
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13_2
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13_3
+python main.py model.variant=dynamic_2dgs_attention_velocity_v13_4
 ```
 
 This `/4d` worktree defaults to `dynamic_2dgs_attention_velocity_v7_2` for a
 fresh run. `bbox_rigid_v1` is the historical box-routed model. V1 through V7.1,
 V8, V9, V10, V11, V11.1, V11.2, V11.3, V11.4, V12, V12.1, V13, V13.1, V13.2,
-and V13.3 remain available for exact checkpoint reconstruction and controlled
-A/B runs.
+V13.3, and V13.4 remain available for exact checkpoint reconstruction and
+controlled A/B runs.
 V4/V5 reuse temporal cross-attention heads for velocity initialization. V6 does
 not: it adds an independent, time-free Siamese motion proposal before temporal
 cross-attention and uses the latter only for feature refinement. Its overlay
@@ -55,11 +56,11 @@ CLI-overridable runtime settings.
 
 Dynamic V1-V9, V11.1, V11.3 and V13.1 emit a fixed number of Gaussians per
 occupied endpoint token -- one observed-medoid seed by default, and two range
-quantiles in V11.3/V13.1; V10, V11, V11.2, V11.4, V12, V12.1, V13, V13.2 and
-V13.3 let a router select one to three range-quantile-seeded Gaussians instead.
-`p2g.grid_query` chooses between the two and sets the fixed count -- see
-"Gaussians per token" below. V3 through V6, V7.2, V8, V9, V10, V11, V11.2,
-V11.3, V11.4, V12, V12.1, V13, V13.1, V13.2 and V13.3 embed
+quantiles in V11.3/V13.1; V10, V11, V11.2, V11.4, V12, V12.1, V13, V13.2, V13.3
+and V13.4 let a router select one to three range-quantile-seeded Gaussians
+instead. `p2g.grid_query` chooses between the two and sets the fixed count --
+see "Gaussians per token" below. V3 through V6, V7.2, V8, V9, V10, V11, V11.2,
+V11.3, V11.4, V12, V12.1, V13, V13.1, V13.2, V13.3 and V13.4 embed
 `time_coordinate = relative_seconds / time_reference_sec`, where
 `time_reference_sec=1.0` is fixed across samples. An irregular 0.8-second pair
 therefore supplies endpoint coordinates `[0, 0.8]`, rather than `[0, 1]`. Its
@@ -608,7 +609,7 @@ than V11.4's new random-duration loader. Its overlay inherits
 `data.dataset_name: nuscenes` and the fixed keyframe/window settings from
 `nuscene_train.yaml`, while setting `data.mode: bbox` and
 `data.bbox_json_path: null` exactly as the previous V11.4 overlay did. V12,
-V12.1, V13, V13.1, V13.2 and V13.3 additionally set
+V12.1, V13, V13.1, V13.2, V13.3 and V13.4 additionally set
 `data.train_excluded_scenes: [scene-0757, scene-1094]`; `nuscene.py` removes
 those complete scenes only when constructing the train split. Validation and
 test scenes remain unchanged. The key is checkpoint-protected sampling state,
@@ -754,6 +755,25 @@ V13.2's `nuscene.py` data contract and train-only `scene-0757`/`scene-1094`
 holdouts, and sets `p2g.head_offset_bound=0.4`. All other model and loss values
 remain those of V11.4.
 
+**V13.4** is V13.3 with 3D RoPE removed from correspondence head 0 only:
+
+```
+head 0:     score_ij = dot(RMSNorm(q_i),
+                           RMSNorm(k_j)) / sqrt(head_dim)
+heads 1-11: score_ij = dot(RoPE(RMSNorm(q_i)),
+                           RoPE(RMSNorm(k_j))) / sqrt(head_dim)
+```
+
+All heads retain their per-layer Q/K RMSNorm modules and shared learned gain
+contract. Head 0 still carries opposite-frame xyz in V and supplies every
+per-layer coordinate expectation. Selectively skipping RoPE requires no split
+attention kernel: Q/K are transformed per head first, then all twelve heads use
+the same packed varlen FlashAttention call. V13.4 therefore differs from V13.3
+only in `temporal.position_encoding=rope_except_head0`; adaptive K, time
+conditioning, layer mixture, motion head, regularizers, losses,
+`head_offset_bound=0.4`, and the `nuscene.py` scene-holdout contract are
+identical. It has no distance bias, barrier, or separate temperature.
+
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other
 weights shows a=0 to a=4 is decisive (mass beyond the radius 11.2% -> 0.85%,
@@ -857,11 +877,11 @@ V11.3 emits that same 58,686 from its shipped `K_max: 2`.
 **Learned count (`count_mode: learned_gumbel`).** The refined token routes
 through the grid `GridSlotHead` and a hard Gumbel-Softmax over K={1,2,3} picks
 one K-specific joint head per token. Only V10, V11, V11.2, V11.4, V12, V12.1,
-V13, V13.2 and V13.3 may use it; asking any other variant for it is rejected at
-config time rather than silently ignored. V11.3 and V13.1 are rejected too
-because their identities are the fixed count. The seed geometry it consumes is
-the K-specific candidate bank, not the padded fixed-count seed set, so the two
-contracts cannot be mixed.
+V13, V13.2, V13.3 and V13.4 may use it; asking any other variant for it is
+rejected at config time rather than silently ignored. V11.3 and V13.1 are
+rejected too because their identities are the fixed count. The seed geometry it
+consumes is the K-specific candidate bank, not the padded fixed-count seed set,
+so the two contracts cannot be mixed.
 
 Both counts are structural: `p2g` is a checkpoint-protected root, so a resume or
 evaluation cannot change how many Gaussians a checkpoint's tokens produce.

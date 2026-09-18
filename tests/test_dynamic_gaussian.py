@@ -52,6 +52,8 @@ from src.models_new.module.dynamic_gaussian import (
     ProposalInitializedVelocityGaussianBackend,
     RawQKRoPELayerWeightedCrossAttention,
     RawQKRoPEVelocityGaussianBackend,
+    RMSNormFeatureRoPELayerWeightedCrossAttention,
+    RMSNormFeatureRoPEVelocityGaussianBackend,
     RMSNormRoPELayerWeightedCrossAttention,
     RMSNormRoPEVelocityGaussianBackend,
     SparseMotionProposal,
@@ -433,6 +435,18 @@ def v13_3_temporal_cfg(dim=24, heads=4, layers=3):
 def v13_3_backend_cfg(dim=24):
     cfg = v13_backend_cfg(dim=dim)
     cfg.temporal = v13_3_temporal_cfg(dim=dim)
+    return cfg
+
+
+def v13_4_temporal_cfg(dim=24, heads=4, layers=3):
+    cfg = v13_3_temporal_cfg(dim=dim, heads=heads, layers=layers)
+    cfg.position_encoding = "rope_except_head0"
+    return cfg
+
+
+def v13_4_backend_cfg(dim=24):
+    cfg = v13_backend_cfg(dim=dim)
+    cfg.temporal = v13_4_temporal_cfg(dim=dim)
     return cfg
 
 
@@ -4380,6 +4394,115 @@ class V13_3RMSNormRoPEAttentionTest(unittest.TestCase):
         )
         self.assertIsInstance(
             backend.temporal, RMSNormRoPELayerWeightedCrossAttention
+        )
+        self.assertTrue(backend.adaptive_count)
+        self.assertEqual(backend.gaussian_head.count_mode, "learned_gumbel")
+        self.assertAlmostEqual(backend.offset_bound, 0.4)
+
+
+class V13_4RMSNormFeatureRoPEAttentionTest(unittest.TestCase):
+    """V13.4 removes 3D RoPE from RMS-normalized match head 0 only."""
+
+    def test_head0_is_unrotated_and_feature_heads_keep_rope(self):
+        torch.manual_seed(136)
+        module = RMSNormFeatureRoPELayerWeightedCrossAttention(
+            v13_4_temporal_cfg(heads=4, layers=2), dim=24
+        )
+        self.assertTrue(module.qk_norm)
+        self.assertEqual(module.position_encoding, "rope_except_head0")
+        self.assertEqual(len(module.q_norm), 2)
+        self.assertEqual(len(module.k_norm), 2)
+        for removed in (
+            "barrier_speed_mps", "v_0", "log_barrier_lambda",
+            "distance_bias_speed_mps", "motion_temperature",
+        ):
+            self.assertFalse(hasattr(module, removed))
+
+        query = torch.randn(3, 4, 6)
+        key = torch.randn(5, 4, 6)
+        query_angles = module.rope.angles(torch.randn(3, 3) * 4.0)
+        key_angles = module.rope.angles(torch.randn(5, 3) * 4.0)
+        normalized_query = module.q_norm[0](query)
+        normalized_key = module.k_norm[0](key)
+        encoded_query, encoded_key = module._encode_qk(
+            normalized_query, normalized_key, query_angles, key_angles
+        )
+
+        torch.testing.assert_close(
+            encoded_query[:, 0], normalized_query[:, 0].float()
+        )
+        torch.testing.assert_close(
+            encoded_key[:, 0], normalized_key[:, 0].float()
+        )
+        torch.testing.assert_close(
+            encoded_query[:, 1:],
+            module.rope.rotate(
+                normalized_query[:, 1:].float(),
+                query_angles[:, None, :, :],
+            ),
+        )
+        torch.testing.assert_close(
+            encoded_key[:, 1:],
+            module.rope.rotate(
+                normalized_key[:, 1:].float(),
+                key_angles[:, None, :, :],
+            ),
+        )
+
+        actual_head0_score = (
+            encoded_query[:, 0] @ encoded_key[:, 0].transpose(0, 1)
+        ) * module.scale
+        expected_head0_score = (
+            normalized_query[:, 0].float()
+            @ normalized_key[:, 0].float().transpose(0, 1)
+        ) / math.sqrt(module.head_dim)
+        torch.testing.assert_close(actual_head0_score, expected_head0_score)
+        self.assertEqual(
+            module.attention_temperature_stats()["qk_norm_enabled"], 1.0
+        )
+
+    def test_v13_4_keeps_one_all_head_call_and_v13_3_backend_contract(self):
+        torch.manual_seed(137)
+        module = RMSNormFeatureRoPELayerWeightedCrossAttention(
+            v13_4_temporal_cfg(heads=4, layers=2), dim=24
+        ).eval()
+        calls = []
+
+        def capture_flash(query, key, value, q_counts, k_counts,
+                          *, flash_dtype=None):
+            calls.append((query.shape, key.shape, value.shape, flash_dtype))
+            return module._sdpa_attention(
+                query, key, value, q_counts, k_counts
+            )
+
+        module._use_flash = lambda _value: True
+        module._flash_attention = capture_flash
+        feature = torch.randn(8, 24, requires_grad=True)
+        position = torch.randn(8, 3)
+        time = torch.tensor([0.0] * 4 + [0.8] * 4)
+        refined, fields = module(
+            feature,
+            position,
+            torch.tensor([4, 8]),
+            torch.tensor([0, 0]),
+            time,
+            torch.full((8,), 0.8),
+        )
+        self.assertEqual(len(calls), 2)
+        for query_shape, key_shape, value_shape, flash_dtype in calls:
+            self.assertEqual(tuple(query_shape[1:]), (4, 16))
+            self.assertEqual(tuple(key_shape[1:]), (4, 16))
+            self.assertEqual(tuple(value_shape[1:]), (4, 16))
+            self.assertIs(flash_dtype, torch.float16)
+        (refined.square().mean() + fields["matched_position"].square().mean()).backward()
+        self.assertGreater(float(feature.grad.abs().sum()), 0.0)
+
+        backend = RMSNormFeatureRoPEVelocityGaussianBackend(
+            v13_4_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussian_count_cfg=v10_gaussian_count_cfg(),
+        )
+        self.assertIsInstance(
+            backend.temporal, RMSNormFeatureRoPELayerWeightedCrossAttention
         )
         self.assertTrue(backend.adaptive_count)
         self.assertEqual(backend.gaussian_head.count_mode, "learned_gumbel")

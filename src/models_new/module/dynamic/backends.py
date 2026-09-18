@@ -30,6 +30,7 @@ from .temporal import (
     MaxSpeedBarrierLayerWeightedCrossAttention,
     ParallelBidirectionalCrossAttention, TimeConditionedParallelCrossAttention,
     RawQKRoPELayerWeightedCrossAttention,
+    RMSNormFeatureRoPELayerWeightedCrossAttention,
     RMSNormRoPELayerWeightedCrossAttention,
 )
 
@@ -978,6 +979,17 @@ class RMSNormRoPEVelocityGaussianBackend(
         )
 
 
+class RMSNormFeatureRoPEVelocityGaussianBackend(
+    RMSNormRoPEVelocityGaussianBackend
+):
+    """V13.4 adaptive-K backend with no 3D RoPE on match head 0."""
+
+    def _build_temporal(self, cfg):
+        return RMSNormFeatureRoPELayerWeightedCrossAttention(
+            cfg.temporal, self.dim
+        )
+
+
 class FinalFeatureBarrierVelocityGaussianBackend(
     MaxSpeedBarrierVelocityGaussianBackend
 ):
@@ -1575,6 +1587,7 @@ __all__ = [
     "LayerWeightedAttentionVelocityGaussianBackend",
     "CosineRoPEVelocityGaussianBackend",
     "RawQKRoPEVelocityGaussianBackend",
+    "RMSNormFeatureRoPEVelocityGaussianBackend",
     "RMSNormRoPEVelocityGaussianBackend",
     "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend",

@@ -2187,7 +2187,8 @@ class CosineRoPELayerWeightedCrossAttention(
         if self.qk_norm:
             self._build_qk_norm(True)
         # V13/V13.1/V13.2 intentionally register no q_norm/k_norm modules.
-        # V13.3 instead builds the same per-layer affine RMSNorm pair as V11.4.
+        # V13.3/V13.4 instead build the same per-layer affine RMSNorm pair as
+        # V11.4.
         self._build_transformer_layers(cfg)
         self.layer_logits = nn.Parameter(torch.zeros(self.n_layers))
 
@@ -2520,6 +2521,54 @@ class RMSNormRoPELayerWeightedCrossAttention(
         return stats
 
 
+class RMSNormFeatureRoPELayerWeightedCrossAttention(
+    RMSNormRoPELayerWeightedCrossAttention
+):
+    """V13.4: V13.3 with 3D RoPE removed from match head 0 only.
+
+    Q and K are still RMS-normalized on every head. Head 0 then enters the
+    shared FlashAttention call unchanged, while heads 1..H-1 receive the same
+    metric 3D RoPE as V13.3. The packed head-0 V payload and learned layer
+    mixture are inherited unchanged, and no additive distance term is added.
+    """
+
+    _REQUIRED_POSITION_ENCODING = "rope_except_head0"
+    _VARIANT_LABEL = "V13.4"
+
+    def __init__(self, cfg, dim: int):
+        super().__init__(cfg, dim)
+        if self.num_heads < 2:
+            raise ValueError(
+                "V13.4 requires one unrotated match head and at least one "
+                "3D-RoPE feature head"
+            )
+
+    def _encode_qk(self, query, key, query_angles, key_angles):
+        """Leave head 0 unchanged and rotate every remaining head."""
+        expected_query = (query.shape[0], self.num_heads, self.head_dim)
+        expected_key = (key.shape[0], self.num_heads, self.head_dim)
+        if tuple(query.shape) != expected_query or tuple(key.shape) != expected_key:
+            raise ValueError(
+                "V13.4 Q/K must have shape (tokens, num_heads, head_dim)"
+            )
+        query = query.float()
+        key = key.float()
+        return (
+            torch.cat([
+                query[:, :1],
+                self.rope.rotate(
+                    query[:, 1:], query_angles[:, None, :, :]
+                ),
+            ], dim=1),
+            torch.cat([
+                key[:, :1],
+                self.rope.rotate(
+                    key[:, 1:], key_angles[:, None, :, :]
+                ),
+            ], dim=1),
+        )
+
+
 class GroupedGainBarrierCrossAttention(
     MaxSpeedBarrierLayerWeightedCrossAttention
 ):
@@ -2601,6 +2650,7 @@ __all__ = [
     "CosineRoPELayerWeightedCrossAttention",
     "RawQKRoPELayerWeightedCrossAttention",
     "RMSNormRoPELayerWeightedCrossAttention",
+    "RMSNormFeatureRoPELayerWeightedCrossAttention",
     "FixedMotionGainLearnableMaxSpeedBarrierCrossAttention",
     "FixedMotionHeadRMSNorm",
     "GroupedHeadRMSNorm",

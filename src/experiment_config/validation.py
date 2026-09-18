@@ -19,6 +19,7 @@ from .definitions import (
     DYNAMIC_VARIANT_V10,
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANTS,
+    FEATURE_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
     FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
     LEARNED_COUNT_MODES,
     LEGACY_COUNT_MODE,
@@ -593,12 +594,17 @@ def validate_experiment_config(config) -> None:
                         f"{label} requires dynamic_2dgs.temporal."
                         "use_time_embedding=true"
                     )
+                expected_position_encoding = (
+                    "rope_except_head0"
+                    if variant in FEATURE_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS
+                    else "rope_all_heads"
+                )
                 if str(OmegaConf.select(
                     config, f"{temporal_path}.position_encoding"
-                )).lower() != "rope_all_heads":
+                )).lower() != expected_position_encoding:
                     raise ValueError(
                         f"{label} temporal.position_encoding must be "
-                        "'rope_all_heads'"
+                        f"'{expected_position_encoding}'"
                     )
                 qk_norm = OmegaConf.select(
                     config, f"{temporal_path}.qk_norm", default=None

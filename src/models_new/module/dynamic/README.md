@@ -35,6 +35,7 @@ Config variant names in the table omit their shared `dynamic_2dgs_` prefix.
 | `attention_velocity_v13_1` | `SeedConditionedCosineRoPEVelocityGaussianBackend` | V13 cosine/RoPE matcher | `EmbeddedInitVelocityHead` | fixed K=2, range-quantile seeds |
 | `attention_velocity_v13_2` | `RawQKRoPEVelocityGaussianBackend` | all-head RoPE/Flash with raw QK / sqrt(d) on every head | `EmbeddedInitVelocityHead` | learned K=1..3, range-quantile seeds |
 | `attention_velocity_v13_3` | `RMSNormRoPEVelocityGaussianBackend` | all-head RMSNorm + 3D RoPE in one Flash call; no distance bias | `EmbeddedInitVelocityHead` | learned K=1..3, range-quantile seeds |
+| `attention_velocity_v13_4` | `RMSNormFeatureRoPEVelocityGaussianBackend` | RMSNorm on all heads, 3D RoPE only on heads 1-11, one Flash call | `EmbeddedInitVelocityHead` | learned K=1..3, range-quantile seeds |
 
 Checkpoint compatibility depends on the registered module tree, parameter
 assignment order, and tensor shapes. The split adds no `nn.Module` wrappers and

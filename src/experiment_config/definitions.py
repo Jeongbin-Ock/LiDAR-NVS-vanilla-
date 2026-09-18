@@ -30,6 +30,7 @@ DYNAMIC_VARIANT_V13 = "dynamic_2dgs_attention_velocity_v13"
 DYNAMIC_VARIANT_V13_1 = "dynamic_2dgs_attention_velocity_v13_1"
 DYNAMIC_VARIANT_V13_2 = "dynamic_2dgs_attention_velocity_v13_2"
 DYNAMIC_VARIANT_V13_3 = "dynamic_2dgs_attention_velocity_v13_3"
+DYNAMIC_VARIANT_V13_4 = "dynamic_2dgs_attention_velocity_v13_4"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
 # explicit constant for each predecessor so checkpoint semantics stay exact.
 DYNAMIC_VARIANT = DYNAMIC_VARIANT_V7_2
@@ -58,6 +59,7 @@ ATTENTION_VELOCITY_VARIANTS = (
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,
     DYNAMIC_VARIANT_V13_3,
+    DYNAMIC_VARIANT_V13_4,
 )
 # Variants whose backend owns the learned_gumbel K={1,2,3} grid Gaussian head,
 # and can therefore let a router decide how many Gaussians each token becomes.
@@ -76,6 +78,7 @@ ROUTER_CAPABLE_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_2,
     DYNAMIC_VARIANT_V13_3,
+    DYNAMIC_VARIANT_V13_4,
 )
 # Historical public name retained for scripts and configs that imported it.
 # The tuple describes backend capability; the selected count mode still comes
@@ -88,10 +91,11 @@ COSINE_ROPE_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
 )
-# V13.3 restores V11.4's per-layer Q/K RMSNorm and applies 3D RoPE to every
-# head.
+# V13.3/V13.4 restore V11.4's per-layer Q/K RMSNorm. V13.3 applies 3D RoPE to
+# every head; V13.4 leaves head 0 unrotated while heads 1..H-1 keep RoPE.
 RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13_3,
+    DYNAMIC_VARIANT_V13_4,
 )
 # V13-family variants in this group use all-head 3D RoPE and one Flash call.
 # V13/V13.1 specialize head 0 with cosine temperature; V13.2 leaves every
@@ -102,10 +106,16 @@ ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13_2,
     DYNAMIC_VARIANT_V13_3,
 )
+# V13.4 still runs one all-head FlashAttention call, but applies 3D RoPE only
+# to feature heads 1..H-1. Match head 0 uses RMS-normalized content alone.
+FEATURE_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS = (
+    DYNAMIC_VARIANT_V13_4,
+)
 # Shared single-Flash packed coordinate-readout family. Position encoding and
 # Q/K normalization remain variant-specific contracts inside this group.
 FLASH_ROPE_MATCH_DYNAMIC_VARIANTS = (
     *ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
+    *FEATURE_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
 )
 # Variants whose correspondence runs under the max-speed barrier. In V11 and
 # V11.1 head 0 carries it at every layer while every other head keeps 3D RoPE,
@@ -152,6 +162,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,
     DYNAMIC_VARIANT_V13_3,
+    DYNAMIC_VARIANT_V13_4,
 )
 
 # V3 and later share the physical-time contract. V4/V5 add attention-derived
@@ -179,6 +190,7 @@ PHYSICAL_VELOCITY_VARIANTS = (
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,
     DYNAMIC_VARIANT_V13_3,
+    DYNAMIC_VARIANT_V13_4,
 )
 
 WARPED_PROPOSAL_VELOCITY_VARIANTS = (
@@ -272,6 +284,9 @@ VARIANT_CONFIG_PATHS = {
     ),
     DYNAMIC_VARIANT_V13_3: (
         REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13_3}.yaml"
+    ),
+    DYNAMIC_VARIANT_V13_4: (
+        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13_4}.yaml"
     ),
 }
 

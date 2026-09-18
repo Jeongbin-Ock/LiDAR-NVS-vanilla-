@@ -211,6 +211,7 @@ class Point2Gaus(nn.Module):
                 DYNAMIC_VARIANT_V13_1,
                 DYNAMIC_VARIANT_V13_2,
                 DYNAMIC_VARIANT_V13_3,
+                DYNAMIC_VARIANT_V13_4,
             )
             from .dynamic_gaussian import (
                 AttentionInitializedVelocityGaussianBackend,
@@ -227,6 +228,7 @@ class Point2Gaus(nn.Module):
                 PostAttentionProposalVelocityGaussianBackend,
                 ProposalInitializedVelocityGaussianBackend,
                 RawQKRoPEVelocityGaussianBackend,
+                RMSNormFeatureRoPEVelocityGaussianBackend,
                 RMSNormRoPEVelocityGaussianBackend,
                 SeedConditionedBarrierVelocityGaussianBackend,
                 SeedConditionedCosineRoPEVelocityGaussianBackend,
@@ -266,6 +268,8 @@ class Point2Gaus(nn.Module):
             # use the same raw QK/sqrt(d) score as every feature head. V13.3
             # restores V11.4's Q/K RMSNorm, removes the barrier, and gives
             # every head 3D RoPE so the complete stack stays on FlashAttention.
+            # V13.4 keeps that stack and RMSNorm but leaves match head 0
+            # unrotated.
             backend_cls = {
                 DYNAMIC_VARIANT_V1: DynamicGaussianBackend,
                 DYNAMIC_VARIANT_V3: PhysicalVelocityGaussianBackend,
@@ -308,6 +312,9 @@ class Point2Gaus(nn.Module):
                 ),
                 DYNAMIC_VARIANT_V13_2: RawQKRoPEVelocityGaussianBackend,
                 DYNAMIC_VARIANT_V13_3: RMSNormRoPEVelocityGaussianBackend,
+                DYNAMIC_VARIANT_V13_4: (
+                    RMSNormFeatureRoPEVelocityGaussianBackend
+                ),
             }.get(self.dynamic_variant)
             if backend_cls is None:
                 raise ValueError(
