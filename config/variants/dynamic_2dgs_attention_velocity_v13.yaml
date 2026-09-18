@@ -1,0 +1,122 @@
+# Dynamic 2DGS V13 with all-head 3D RoPE and cosine motion attention.
+#
+# V13 keeps V12.1's legacy nuscene.py data contract, adaptive K={1,2,3}
+# Gaussian router, embedded-init velocity offset, losses, and 0.4 m Gaussian
+# offset bound. The temporal score changes as follows:
+#
+# 1. No cross-attention head uses RMSNorm. Heads 1-11 use the raw projected
+#    Q/K vectors with the ordinary 1/sqrt(head_dim) attention scale.
+# 2. Motion head 0 alone L2-normalizes Q/K. Its score is cosine/temperature
+#    with a fixed temperature of 0.03, a maximum absolute content logit of
+#    1/0.03 = 33.3. Over ~6.7k opposite-frame keys one key needs a logit gap
+#    of ln(N) ~ 8.8 to hold half the mass: a cosine gap of 0.27 here, 0.63 at
+#    the earlier matchers' 0.07, which was chosen for 4-16 candidate pools.
+# 3. The max-speed distance barrier and its learned V12/V12.1 scalars are gone.
+#    Every head, including head 0, receives the same metric 3D RoPE.
+# 4. All twelve heads run in one varlen FlashAttention call per layer. Head 0's
+#    V payload additionally carries opposite-frame xyz, so its compact output
+#    remains the coordinate expectation used for v_init.
+model:
+  variant: dynamic_2dgs_attention_velocity_v13
+
+device: [0]
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  anchor_mode: grid
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  # Inactive compatibility values; V13 validation requires LoRA above.
+  agg_mlp:
+    hidden_dim: 1024
+    hidden_layers: 2
+    out_dim: 576
+  joint_refiner:
+    num_heads: 12
+    rope_base: 10.0
+    rope_position_scale: 4.0
+  # Adaptive K={1,2,3}; every candidate row is seeded from the token's own
+  # raw points at deterministic range quantiles. No budget loss is used.
+  grid_query:
+    count_mode: learned_gumbel
+    grad_balance: sqrt_k
+    learned_count:
+      K_max: 3
+      tau: 1.0
+      seed_mode: range_quantile
+      grad_balance_scope: token
+      budget:
+        enable: false
+      logging:
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+
+# Keep V12.1's fixed-window loader and complete-scene train holdouts.
+data:
+  mode: bbox
+  bbox_json_path: null
+  train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: rope_all_heads
+
+    # Applied to all twelve heads. 2*pi/scale = 5 m for the shortest 3D RoPE
+    # wavelength, matching the feature-head geometry used since V11.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    # Explicitly records that no Q/K RMSNorm module is constructed. Head 0 uses
+    # parameter-free L2 normalization and cosine/temperature instead.
+    qk_norm: false
+    motion_temperature: 0.03
+    layer_scale_init: 0.1
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    small_motion:
+      enabled: false
+      weight: 0.005
+      epsilon_m: 0.001
+      warmup_steps: 300
+      ramp_steps: 1700
+
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+loss:
+  w_chamfer: 0.02
+  w_scale: 0.0

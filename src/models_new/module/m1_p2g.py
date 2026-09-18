@@ -207,10 +207,12 @@ class Point2Gaus(nn.Module):
                 DYNAMIC_VARIANT_V11_4,
                 DYNAMIC_VARIANT_V12,
                 DYNAMIC_VARIANT_V12_1,
+                DYNAMIC_VARIANT_V13,
             )
             from .dynamic_gaussian import (
                 AttentionInitializedVelocityGaussianBackend,
                 ConsensusAttentionVelocityGaussianBackend,
+                CosineRoPEVelocityGaussianBackend,
                 DynamicGaussianBackend,
                 FinalFeatureBarrierVelocityGaussianBackend,
                 FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
@@ -250,7 +252,9 @@ class Point2Gaus(nn.Module):
             # differs by dynamic_2dgs.temporal config alone. V12 keeps V11.4's
             # complete path and swaps in one learned log-space barrier speed.
             # V12.1 fixes only head 0's RMS gain while the RoPE heads retain
-            # their own shared learned gain.
+            # their own shared learned gain. V13 removes every QK RMSNorm and
+            # the barrier, L2-normalizes only head 0 at a fixed temperature,
+            # and runs all RoPE heads in one FlashAttention call.
             backend_cls = {
                 DYNAMIC_VARIANT_V1: DynamicGaussianBackend,
                 DYNAMIC_VARIANT_V3: PhysicalVelocityGaussianBackend,
@@ -287,6 +291,7 @@ class Point2Gaus(nn.Module):
                 DYNAMIC_VARIANT_V12_1: (
                     FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend
                 ),
+                DYNAMIC_VARIANT_V13: CosineRoPEVelocityGaussianBackend,
             }.get(self.dynamic_variant)
             if backend_cls is None:
                 raise ValueError(

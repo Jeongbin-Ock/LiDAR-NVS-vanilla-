@@ -26,15 +26,16 @@ DYNAMIC_VARIANT_V11_3 = "dynamic_2dgs_attention_velocity_v11_3"
 DYNAMIC_VARIANT_V11_4 = "dynamic_2dgs_attention_velocity_v11_4"
 DYNAMIC_VARIANT_V12 = "dynamic_2dgs_attention_velocity_v12"
 DYNAMIC_VARIANT_V12_1 = "dynamic_2dgs_attention_velocity_v12_1"
+DYNAMIC_VARIANT_V13 = "dynamic_2dgs_attention_velocity_v13"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
 # explicit constant for each predecessor so checkpoint semantics stay exact.
 DYNAMIC_VARIANT = DYNAMIC_VARIANT_V7_2
 # V4/V5 use a dense coordinate expectation from selected attention heads. V8
 # reuses selected final-layer heads with a consensus readout; V10 reads every
 # head at every layer and therefore has no `motion_head_count` config key. V11
-# reads head 0 at every layer, as does V11.3; V11.2 gives every layer head RoPE
-# and reads one dedicated head after refinement. In every case the match head is
-# fixed rather than configured.
+# reads head 0 at every layer, as do V11.3 and the V13 family; V11.2 gives every
+# layer head RoPE and reads one dedicated head after refinement. In every case
+# the match head is fixed rather than configured.
 _SELECTED_HEAD_ATTENTION_VELOCITY_VARIANTS = (
     DYNAMIC_VARIANT_V4,
     DYNAMIC_VARIANT_V5,
@@ -50,6 +51,7 @@ ATTENTION_VELOCITY_VARIANTS = (
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
+    DYNAMIC_VARIANT_V13,
 )
 # Variants whose backend owns the learned_gumbel K={1,2,3} grid Gaussian head,
 # and can therefore let a router decide how many Gaussians each token becomes.
@@ -65,11 +67,28 @@ ROUTER_CAPABLE_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
+    DYNAMIC_VARIANT_V13,
 )
 # Historical public name retained for scripts and configs that imported it.
 # The tuple describes backend capability; the selected count mode still comes
 # from p2g.grid_query.
 ADAPTIVE_COUNT_DYNAMIC_VARIANTS = ROUTER_CAPABLE_DYNAMIC_VARIANTS
+# V13-family correspondence reads head 0 at every temporal layer, but unlike
+# the barrier family all heads carry 3D RoPE and share one FlashAttention call.
+# Head 0 is L2-normalized and temperature-scaled.
+COSINE_ROPE_MATCH_DYNAMIC_VARIANTS = (
+    DYNAMIC_VARIANT_V13,
+)
+# V13-family variants in this group use all-head 3D RoPE and one Flash call.
+# V13 specializes head 0 with cosine temperature.
+ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS = (
+    *COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
+)
+# Shared single-Flash packed coordinate-readout family. Position encoding and
+# Q/K normalization remain variant-specific contracts inside this group.
+FLASH_ROPE_MATCH_DYNAMIC_VARIANTS = (
+    *ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
+)
 # Variants whose correspondence runs under the max-speed barrier. In V11 and
 # V11.1 head 0 carries it at every layer while every other head keeps 3D RoPE,
 # and V11.1 additionally splits the QK-Norm gain along that head boundary.
@@ -111,6 +130,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
+    DYNAMIC_VARIANT_V13,
 )
 
 # V3 and later share the physical-time contract. V4/V5 add attention-derived
@@ -134,6 +154,7 @@ PHYSICAL_VELOCITY_VARIANTS = (
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
+    DYNAMIC_VARIANT_V13,
 )
 
 WARPED_PROPOSAL_VELOCITY_VARIANTS = (
@@ -215,6 +236,9 @@ VARIANT_CONFIG_PATHS = {
     ),
     DYNAMIC_VARIANT_V12_1: (
         REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V12_1}.yaml"
+    ),
+    DYNAMIC_VARIANT_V13: (
+        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13}.yaml"
     ),
 }
 

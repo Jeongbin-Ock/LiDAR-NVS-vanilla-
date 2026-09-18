@@ -8,6 +8,7 @@ from __future__ import annotations
 from .dynamic.common import SinusoidalScalarEncoder, _cfg_get
 from .dynamic.attention_matching import ConsensusAttentionMotionMatcher
 from .dynamic.temporal import (
+    CosineRoPELayerWeightedCrossAttention,
     FinalFeatureBarrierCrossAttention,
     FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
     FixedMotionHeadRMSNorm,
@@ -39,6 +40,7 @@ from .dynamic.motion_proposals import (
 from .dynamic.backends import (
     AttentionInitializedVelocityGaussianBackend,
     ConsensusAttentionVelocityGaussianBackend,
+    CosineRoPEVelocityGaussianBackend,
     DynamicGaussianBackend,
     FinalFeatureBarrierVelocityGaussianBackend,
     FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
@@ -61,6 +63,8 @@ __all__ = [
     "ChunkedDenseMotionProposal",
     "ConsensusAttentionMotionMatcher",
     "ConsensusAttentionVelocityGaussianBackend",
+    "CosineRoPELayerWeightedCrossAttention",
+    "CosineRoPEVelocityGaussianBackend",
     "DynamicGaussianBackend",
     "DynamicGausTemp",
     "EmbeddedInitDurationVelocityHead",

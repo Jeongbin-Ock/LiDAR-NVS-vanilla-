@@ -7,6 +7,7 @@ from omegaconf import ListConfig, OmegaConf
 
 from .definitions import (
     BARRIER_MATCH_DYNAMIC_VARIANTS,
+    COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
     DURATION_OFFSET_VELOCITY_VARIANTS,
     DYNAMIC_VARIANT_V1,
     DYNAMIC_VARIANT_V5,
@@ -18,6 +19,7 @@ from .definitions import (
     DYNAMIC_VARIANT_V10,
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANTS,
+    FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
     LEARNED_COUNT_MODES,
     LEGACY_COUNT_MODE,
     PHYSICAL_VELOCITY_VARIANTS,
@@ -362,7 +364,9 @@ def validate_experiment_config(config) -> None:
         if str(OmegaConf.select(config, "p2g.anchor_mode", default="")) != "grid":
             raise ValueError(f"{variant} requires p2g.anchor_mode=grid")
         if variant in (
-            *ROUTER_CAPABLE_DYNAMIC_VARIANTS, *BARRIER_MATCH_DYNAMIC_VARIANTS,
+            *ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+            *BARRIER_MATCH_DYNAMIC_VARIANTS,
+            *FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
         ) and not lora_enabled:
             raise ValueError(
                 f"{_variant_label(variant)} requires p2g.utonia_lora.enable=true"
@@ -424,6 +428,16 @@ def validate_experiment_config(config) -> None:
                     "position_encoding", "distance_bias_speed_mps", "qk_norm",
                     "layer_weight_hidden_dim", "layer_scale_init",
                 }
+            elif variant in FLASH_ROPE_MATCH_DYNAMIC_VARIANTS:
+                temporal_keys = {
+                    "implementation", "layers", "num_heads", "mlp_ratio",
+                    "use_time_embedding", "time_frequencies",
+                    "time_embedding_dim", "time_reference_sec",
+                    "position_encoding", "rope_base", "rope_position_scale",
+                    "qk_norm", "layer_scale_init",
+                }
+                if variant in COSINE_ROPE_MATCH_DYNAMIC_VARIANTS:
+                    temporal_keys.add("motion_temperature")
             elif variant in BARRIER_MATCH_DYNAMIC_VARIANTS:
                 temporal_keys = {
                     "implementation", "layers", "num_heads", "mlp_ratio",
@@ -568,6 +582,43 @@ def validate_experiment_config(config) -> None:
                     config, f"{temporal_path}.layer_weight_hidden_dim",
                     kind=int,
                 )
+            elif variant in FLASH_ROPE_MATCH_DYNAMIC_VARIANTS:
+                label = _variant_label(variant)
+                temporal_path = "dynamic_2dgs.temporal"
+                if not bool(OmegaConf.select(
+                    config, f"{temporal_path}.use_time_embedding"
+                )):
+                    raise ValueError(
+                        f"{label} requires dynamic_2dgs.temporal."
+                        "use_time_embedding=true"
+                    )
+                if str(OmegaConf.select(
+                    config, f"{temporal_path}.position_encoding"
+                )).lower() != "rope_all_heads":
+                    raise ValueError(
+                        f"{label} temporal.position_encoding must be "
+                        "'rope_all_heads'"
+                    )
+                qk_norm = OmegaConf.select(
+                    config, f"{temporal_path}.qk_norm", default=None
+                )
+                if qk_norm is None or bool(qk_norm):
+                    raise ValueError(f"{label} requires temporal.qk_norm=false")
+                if variant in COSINE_ROPE_MATCH_DYNAMIC_VARIANTS:
+                    temperature_value = OmegaConf.select(
+                        config, f"{temporal_path}.motion_temperature"
+                    )
+                    if temperature_value is None:
+                        raise ValueError(
+                            f"{label} temporal.motion_temperature must be "
+                            "positive and finite"
+                        )
+                    temperature = float(temperature_value)
+                    if not math.isfinite(temperature) or temperature <= 0.0:
+                        raise ValueError(
+                            f"{label} temporal.motion_temperature must be "
+                            "positive and finite"
+                        )
             elif variant in BARRIER_MATCH_DYNAMIC_VARIANTS:
                 label = _variant_label(variant)
                 temporal_path = "dynamic_2dgs.temporal"
@@ -853,8 +904,11 @@ def validate_experiment_config(config) -> None:
                 DYNAMIC_VARIANT_V10,
             ):
                 motion_keys.add("residual_hidden_dim")
-            elif variant in BARRIER_MATCH_DYNAMIC_VARIANTS:
-                # Barrier-match offset heads embed v_init the way V8's does.
+            elif variant in (
+                *BARRIER_MATCH_DYNAMIC_VARIANTS,
+                *FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
+            ):
+                # Layer-matched offset heads embed v_init the way V8's does.
                 motion_keys.update({
                     "residual_hidden_dim", "velocity_embedding_dim",
                     "detach_init_condition",
@@ -889,6 +943,7 @@ def validate_experiment_config(config) -> None:
                     DYNAMIC_VARIANT_V8,
                     DYNAMIC_VARIANT_V10,
                     *BARRIER_MATCH_DYNAMIC_VARIANTS,
+                    *FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
                 )
                 and _has_path(config, "dynamic_2dgs.motion.residual_hidden_dim")
             ):

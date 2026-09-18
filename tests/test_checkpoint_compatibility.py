@@ -76,6 +76,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v12_1": (
         "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v13": (
+        "CosineRoPEVelocityGaussianBackend"
+    ),
 }
 
 _PROPOSAL_VARIANTS = {
@@ -159,6 +162,10 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v12_1": (
         "018ea06086c89eddba66", "7b477ca6c13d6632021a"
     ),
+    # V13 removes every temporal QK gain and both barrier scalars.
+    "dynamic_2dgs_attention_velocity_v13": (
+        "080ce3c67577b3ee8594", "92153e92839df09bd2f3"
+    ),
 }
 
 
@@ -181,6 +188,8 @@ def _load_dynamic_module_without_renderer():
 
 _DYNAMIC = _load_dynamic_module_without_renderer()
 _SEMANTIC_MODULE_BY_EXPORT = {
+    "CosineRoPELayerWeightedCrossAttention": "temporal",
+    "CosineRoPEVelocityGaussianBackend": "backends",
     "DynamicGaussianBackend": "backends",
     "FinalFeatureBarrierCrossAttention": "temporal",
     "FinalFeatureBarrierVelocityGaussianBackend": "backends",
@@ -275,6 +284,7 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
             "dynamic_2dgs_attention_velocity_v11_2",
             "dynamic_2dgs_attention_velocity_v12",
             "dynamic_2dgs_attention_velocity_v12_1",
+            "dynamic_2dgs_attention_velocity_v13",
         ):
             with self.subTest(variant=variant):
                 config, _source = compose_fresh_config(

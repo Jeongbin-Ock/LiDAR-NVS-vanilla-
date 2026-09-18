@@ -21,6 +21,7 @@ from .motion_proposals import (
     StraightThroughTop4MotionProposal,
 )
 from .temporal import (
+    CosineRoPELayerWeightedCrossAttention,
     FinalFeatureBarrierCrossAttention,
     FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
     GroupedGainBarrierCrossAttention,
@@ -524,15 +525,15 @@ class LayerMixtureMotionMixin:
     The temporal module returns a coordinate-readout displacement beside the
     refined feature. Dividing it by the signed endpoint interval turns both
     source frames into one forward-time ``v_init``, and the variant's offset
-    head corrects it. V10/V11/V11.1 mix layer maps; V11.2 replaces only that
-    readout with a final-feature map.
+    head corrects it. V10/V11/V11.1/V13 mix layer maps; V11.2 replaces only
+    that readout with a final-feature map.
     """
 
     def _velocity_offset(self, refined, velocity_init):
         """The additive correction applied on top of ``v_init``.
 
-        V10's offset head reads only the refined token; V11, V11.1, and V11.2
-        embed the initializer they are correcting, because head 0's attended
+        V10's offset head reads only the refined token; V11-family and V13
+        heads embed the initializer they are correcting, because head 0's attended
         feature channels never carry the metric coordinate expectation itself.
         The head declares which it is, so no backend has to restate it.
         """
@@ -574,7 +575,7 @@ class LayerMixtureMotionMixin:
             "velocity_init": velocity_init,
             "velocity_offset": velocity_offset,
         }
-        # V10/V11/V11.1 genuinely use the layer mixture and keep their exact
+        # V10/V11/V11.1/V13 genuinely use the layer mixture and keep their exact
         # diagnostics. V11.2 reads correspondence from final f' instead, so it
         # deliberately publishes neither a dormant logit nor a misleading
         # layer-weight chart.
@@ -938,6 +939,17 @@ class FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend(
 
     def _build_temporal(self, cfg):
         return FixedMotionGainLearnableMaxSpeedBarrierCrossAttention(
+            cfg.temporal, self.dim
+        )
+
+
+class CosineRoPEVelocityGaussianBackend(
+    MaxSpeedBarrierVelocityGaussianBackend
+):
+    """V13 adaptive-K backend with all-head RoPE cosine correspondence."""
+
+    def _build_temporal(self, cfg):
+        return CosineRoPELayerWeightedCrossAttention(
             cfg.temporal, self.dim
         )
 
@@ -1519,6 +1531,7 @@ __all__ = [
     "AttentionInitializedVelocityGaussianBackend",
     "LayerMixtureMotionMixin",
     "LayerWeightedAttentionVelocityGaussianBackend",
+    "CosineRoPEVelocityGaussianBackend",
     "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend",
     "MaxSpeedBarrierVelocityGaussianBackend",

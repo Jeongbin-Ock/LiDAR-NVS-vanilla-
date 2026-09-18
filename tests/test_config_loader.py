@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from src.config_loader import (
     ATTENTION_VELOCITY_VARIANTS,
     BARRIER_MATCH_DYNAMIC_VARIANTS,
+    COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
     DYNAMIC_VARIANT,
     DYNAMIC_VARIANT_V1,
@@ -32,6 +33,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
+    DYNAMIC_VARIANT_V13,
     LEGACY_VARIANT,
     PHYSICAL_VELOCITY_VARIANTS,
     assert_model_variant_implemented,
@@ -653,6 +655,61 @@ class ConfigLoaderTest(unittest.TestCase):
                 f"model.variant={DYNAMIC_VARIANT_V12_1}",
                 "data.train_excluded_scenes=[scene-0757,scene-0757]",
             ]))
+
+    def test_v13_uses_all_head_rope_cosine_and_adaptive_range_quantiles(self):
+        config, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V13}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V13}.yaml", source)
+        temporal = config.dynamic_2dgs.temporal
+        self.assertEqual(temporal.position_encoding, "rope_all_heads")
+        self.assertFalse(temporal.qk_norm)
+        self.assertAlmostEqual(temporal.motion_temperature, 0.03)
+        self.assertEqual(temporal.rope_base, 100.0)
+        self.assertAlmostEqual(
+            temporal.rope_position_scale, 2.0 * math.pi / 5.0
+        )
+        for removed in (
+            "barrier_speed_mps", "barrier_weight", "barrier_exponent",
+            "barrier_lambda_init", "match_chunk_size",
+            "distance_bias_speed_mps", "layer_weight_hidden_dim",
+        ):
+            self.assertNotIn(removed, temporal)
+
+        self.assertEqual(config.p2g.head_offset_bound, 0.4)
+        count = config.p2g.grid_query
+        self.assertEqual(count.count_mode, "learned_gumbel")
+        self.assertEqual(count.learned_count.K_max, 3)
+        self.assertEqual(count.learned_count.seed_mode, "range_quantile")
+        self.assertFalse(count.learned_count.budget.enable)
+        self.assertEqual(config.data.dataset_name, "nuscenes")
+        self.assertEqual(
+            list(config.data.train_excluded_scenes),
+            ["scene-0757", "scene-1094"],
+        )
+        for group in (
+            ATTENTION_VELOCITY_VARIANTS,
+            COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
+            PHYSICAL_VELOCITY_VARIANTS,
+            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V13, group)
+        self.assertNotIn(DYNAMIC_VARIANT_V13, BARRIER_MATCH_DYNAMIC_VARIANTS)
+
+        for override, message in (
+            ("dynamic_2dgs.temporal.qk_norm=true", "qk_norm=false"),
+            ("dynamic_2dgs.temporal.motion_temperature=0", "motion_temperature"),
+            (
+                "dynamic_2dgs.temporal.position_encoding=barrier_rope_split",
+                "rope_all_heads",
+            ),
+        ):
+            with self.subTest(override=override), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                compose_fresh_config(OmegaConf.from_dotlist([
+                    f"model.variant={DYNAMIC_VARIANT_V13}", override,
+                ]))
 
     def test_v11_3_head_is_seed_conditioned_at_three_channels_per_slot(self):
         """The router trunk's geometry input survives as head input columns."""

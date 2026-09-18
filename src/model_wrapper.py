@@ -309,12 +309,10 @@ class ModelWrapper(LightningModule):
         self._log_attention_temperature(prefix=prefix)
 
     def _log_attention_temperature(self, *, prefix: str) -> None:
-        """Softmax-temperature alarm for the motion attention (V5 QK-Norm).
+        """Log the active motion-attention scale without building probabilities.
 
-        Under QK-Norm ``|q| = gamma * sqrt(head_dim)`` exactly, so the norm gains
-        alone bound the logit and no attention probabilities have to be built to
-        watch for saturation. V4 collapsed to a hard argmax by epoch 2-9 with
-        nothing logged; this is that missing alarm.
+        QK-Norm variants report their learned gain bounds. V13 reports its fixed
+        head-0 cosine temperature and bound.
         """
         temporal = getattr(
             getattr(self.p2g_model, "dynamic_backend", None), "temporal", None

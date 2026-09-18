@@ -24,6 +24,8 @@ from src.models_new.module.dynamic_gaussian import (
     AttentionInitializedVelocityGaussianBackend,
     ConsensusAttentionMotionMatcher,
     ConsensusAttentionVelocityGaussianBackend,
+    CosineRoPELayerWeightedCrossAttention,
+    CosineRoPEVelocityGaussianBackend,
     EmbeddedInitDurationVelocityHead,
     EmbeddedInitVelocityHead,
     FeatureOnlyVelocityOffsetHead,
@@ -370,6 +372,38 @@ def v12_1_temporal_cfg(dim=24, heads=4, layers=3, match_chunk_size=2):
 def v12_1_backend_cfg(dim=24):
     cfg = v12_backend_cfg(dim=dim)
     cfg.temporal = v12_1_temporal_cfg(dim=dim)
+    return cfg
+
+
+def v13_temporal_cfg(dim=24, heads=4, layers=3):
+    del dim
+    return OmegaConf.create({
+        "implementation": "auto",
+        "layers": layers,
+        "num_heads": heads,
+        "mlp_ratio": 2,
+        "use_time_embedding": True,
+        "time_embedding_dim": 8,
+        "time_frequencies": 4,
+        "time_reference_sec": 1.0,
+        "position_encoding": "rope_all_heads",
+        "rope_base": 100.0,
+        "rope_position_scale": 2.0 * math.pi / 5.0,
+        "qk_norm": False,
+        "motion_temperature": 0.07,
+        "layer_scale_init": 0.1,
+    })
+
+
+def v13_backend_cfg(dim=24):
+    cfg = backend_cfg(dim=dim)
+    cfg.temporal = v13_temporal_cfg(dim=dim)
+    cfg.motion = OmegaConf.create({
+        "zero_init": True,
+        "residual_hidden_dim": 8,
+        "velocity_embedding_dim": 8,
+        "detach_init_condition": True,
+    })
     return cfg
 
 
@@ -3925,6 +3959,127 @@ class V12_1FixedMotionGainAttentionTest(unittest.TestCase):
         self.assertIsInstance(backend.velocity_head, EmbeddedInitVelocityHead)
         self.assertEqual(backend.gaussian_head.count_mode, "learned_gumbel")
         self.assertAlmostEqual(backend.offset_bound, 0.4)
+
+
+class V13CosineRoPEAttentionTest(unittest.TestCase):
+    """V13 removes QK RMSNorm/barriers and fuses all RoPE heads."""
+
+    @staticmethod
+    def _forward_args(feature, position, first_frame_tokens, duration=0.8):
+        return V11MaxSpeedBarrierAttentionTest._forward_args(
+            feature, position, first_frame_tokens, duration
+        )
+
+    def test_only_head0_is_l2_normalized_at_temperature_007(self):
+        torch.manual_seed(130)
+        module = CosineRoPELayerWeightedCrossAttention(
+            v13_temporal_cfg(heads=4, layers=2), dim=24
+        )
+        self.assertFalse(hasattr(module, "q_norm"))
+        self.assertFalse(hasattr(module, "k_norm"))
+        self.assertFalse(any(
+            isinstance(child, torch.nn.RMSNorm) for child in module.modules()
+        ))
+        for removed in (
+            "barrier_speed_mps", "v_0", "log_barrier_lambda",
+            "distance_bias_speed_mps",
+        ):
+            self.assertFalse(hasattr(module, removed))
+
+        query = torch.randn(3, 4, 6)
+        key = torch.randn(5, 4, 6)
+        query_angles = module.rope.angles(torch.randn(3, 3))
+        key_angles = module.rope.angles(torch.randn(5, 3))
+        encoded_query, encoded_key = module._encode_qk(
+            query, key, query_angles, key_angles
+        )
+
+        unit_query = module.rope.rotate(
+            F.normalize(query[:, :1].float(), dim=-1),
+            query_angles[:, None, :, :],
+        )
+        unit_key = module.rope.rotate(
+            F.normalize(key[:, :1].float(), dim=-1),
+            key_angles[:, None, :, :],
+        )
+        actual_motion_score = (
+            encoded_query[:, 0] @ encoded_key[:, 0].transpose(0, 1)
+        ) * module.scale
+        expected_motion_score = (
+            unit_query[:, 0] @ unit_key[:, 0].transpose(0, 1)
+        ) / 0.07
+        torch.testing.assert_close(
+            actual_motion_score, expected_motion_score,
+            atol=2.0e-5, rtol=2.0e-5,
+        )
+
+        raw_query_rope = module.rope.rotate(
+            query.float(), query_angles[:, None, :, :]
+        )
+        raw_key_rope = module.rope.rotate(
+            key.float(), key_angles[:, None, :, :]
+        )
+        torch.testing.assert_close(encoded_query[:, 1:], raw_query_rope[:, 1:])
+        torch.testing.assert_close(encoded_key[:, 1:], raw_key_rope[:, 1:])
+        stats = module.attention_temperature_stats()
+        self.assertEqual(stats["qk_norm_enabled"], 0.0)
+        self.assertAlmostEqual(stats["motion_temperature"], 0.07)
+        self.assertAlmostEqual(
+            stats["motion_max_abs_content_logit"], 1.0 / 0.07
+        )
+
+    def test_every_head_uses_one_attention_call_per_layer(self):
+        torch.manual_seed(131)
+        module = CosineRoPELayerWeightedCrossAttention(
+            v13_temporal_cfg(heads=4, layers=3), dim=24
+        )
+        calls = []
+
+        def capture_flash(query, key, value, q_counts, k_counts,
+                          *, flash_dtype=None):
+            calls.append((
+                query.detach().clone(), key.detach().clone(),
+                value.detach().clone(), flash_dtype,
+            ))
+            return module._sdpa_attention(
+                query, key, value, q_counts, k_counts
+            )
+
+        module._use_flash = lambda _value: True
+        module._flash_attention = capture_flash
+        feature = torch.randn(9, 24, requires_grad=True)
+        position = torch.randn(9, 3) * 4.0
+        refined, fields = module(
+            *self._forward_args(feature, position, 4)
+        )
+        self.assertEqual(len(calls), 3)
+        for query, key, value, flash_dtype in calls:
+            self.assertEqual(tuple(query.shape[1:]), (4, 16))
+            self.assertEqual(tuple(key.shape[1:]), (4, 16))
+            self.assertEqual(tuple(value.shape[1:]), (4, 16))
+            self.assertIs(flash_dtype, torch.float16)
+            torch.testing.assert_close(query[..., 6:], torch.zeros_like(query[..., 6:]))
+            torch.testing.assert_close(key[..., 6:], torch.zeros_like(key[..., 6:]))
+            # Only head 0 carries the three xyz readout channels.
+            torch.testing.assert_close(
+                value[:, 1:, 6:], torch.zeros_like(value[:, 1:, 6:])
+            )
+        self.assertEqual(tuple(refined.shape), (9, 24))
+        self.assertEqual(tuple(fields["motion_layer_weights"].shape), (9, 3))
+        torch.testing.assert_close(
+            fields["motion_layer_weights"], torch.full((9, 3), 1.0 / 3.0)
+        )
+        self.assertTrue(bool(torch.isfinite(fields["matched_position"]).all()))
+
+        (refined.square().mean() + fields["matched_position"].square().mean()).backward()
+        self.assertGreater(float(feature.grad.abs().sum()), 0.0)
+        for layer in range(module.n_layers):
+            self.assertGreater(
+                float(module.q_proj[layer].weight.grad.abs().sum()), 0.0
+            )
+            self.assertGreater(
+                float(module.k_proj[layer].weight.grad.abs().sum()), 0.0
+            )
 
 
 class V11_2FinalFeatureBarrierAttentionTest(unittest.TestCase):
