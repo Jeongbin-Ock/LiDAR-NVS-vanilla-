@@ -1007,7 +1007,10 @@ class FinalFeatureBarrierVelocityGaussianBackend(
 class SeedConditionedBarrierVelocityGaussianBackend(
     MaxSpeedBarrierVelocityGaussianBackend
 ):
-    """V11.3: V11's temporal stack and correspondence with a fixed count.
+    """V11.3/V11.5: V11's temporal stack and correspondence with a fixed count.
+
+    V11.5 shares this class under V11.4's linear-hinge temporal config, the
+    same way V11.4 shares V11's class.
 
     The adaptive-K router is gone, so ``p2g.grid_query`` fixes how many
     Gaussians every token emits. What the router's decoder did beyond routing
@@ -1026,7 +1029,7 @@ class SeedConditionedBarrierVelocityGaussianBackend(
     """
 
     #: Subclasses keep the same fixed-count decoder under another temporal stack.
-    fixed_variant_label = "V11.3"
+    fixed_variant_label = "V11.3/V11.5"
 
     #: ``Point2Gaus`` reads this to decide whether to send the seed deltas.
     seed_conditioned_head = True

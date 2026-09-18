@@ -35,6 +35,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V11_2,
     DYNAMIC_VARIANT_V11_3,
     DYNAMIC_VARIANT_V11_4,
+    DYNAMIC_VARIANT_V11_5,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V13,
@@ -565,6 +566,76 @@ class ConfigLoaderTest(unittest.TestCase):
                     f"model.variant={DYNAMIC_VARIANT_V11_4}",
                     f"dynamic_2dgs.temporal.barrier_exponent={value}",
                 ]))
+
+    def test_v11_5_is_v11_4_with_fixed_k2_and_legacy_scene_holdouts(self):
+        """V11.4's model with V11.3's count, a 0.4 m bound and V12's data."""
+        v11_3, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_3}",
+        ]))
+        v11_4, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_4}",
+        ]))
+        v12, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V12}",
+        ]))
+        v11_5, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_5}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V11_5}.yaml", source)
+
+        left = OmegaConf.to_container(v11_4, resolve=False)
+        right = OmegaConf.to_container(v11_5, resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        left_count = left["p2g"].pop("grid_query")
+        right_count = right["p2g"].pop("grid_query")
+        left.pop("data")
+        right_data = right.pop("data")
+        # The bound is explicit in V11.5 rather than inherited from the base.
+        self.assertEqual(right["p2g"].pop("head_offset_bound"), 0.4)
+        left["p2g"].pop("head_offset_bound")
+        self.assertEqual(left, right)
+
+        self.assertEqual(left_count["count_mode"], "learned_gumbel")
+        self.assertEqual(
+            right_count, OmegaConf.to_container(v11_3.p2g.grid_query)
+        )
+        self.assertEqual(right_count["count_mode"], "legacy")
+        self.assertEqual(right_count["K_max"], 2)
+        self.assertIsNone(right_count["exp"])
+
+        temporal = v11_5.dynamic_2dgs.temporal
+        self.assertEqual(temporal.barrier_weight, 1.0)
+        self.assertEqual(temporal.barrier_exponent, 1)
+        self.assertEqual(temporal, v11_4.dynamic_2dgs.temporal)
+
+        self.assertEqual(right_data["dataset_name"], "nuscenes")
+        self.assertEqual(right_data["mode"], "bbox")
+        self.assertIsNone(right_data["bbox_json_path"])
+        self.assertNotIn("dynamic_window", right_data)
+        self.assertEqual(
+            list(right_data["train_excluded_scenes"]),
+            ["scene-0757", "scene-1094"],
+        )
+        self.assertEqual(
+            OmegaConf.to_container(v11_5.data, resolve=True),
+            OmegaConf.to_container(v12.data, resolve=True),
+        )
+
+        for group in (
+            ATTENTION_VELOCITY_VARIANTS,
+            BARRIER_MATCH_DYNAMIC_VARIANTS,
+            PHYSICAL_VELOCITY_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V11_5, group)
+        self.assertNotIn(DYNAMIC_VARIANT_V11_5, ROUTER_CAPABLE_DYNAMIC_VARIANTS)
+
+        with self.assertRaises(ValueError) as raised:
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V11_5}",
+                "p2g.grid_query.count_mode=learned_gumbel",
+            ]))
+        self.assertIn("V11.5", str(raised.exception))
+        self.assertIn("count router", str(raised.exception))
 
     def test_v12_keeps_v11_4_model_but_uses_the_legacy_loader(self):
         """Only learnable speed and the requested data loader differ."""

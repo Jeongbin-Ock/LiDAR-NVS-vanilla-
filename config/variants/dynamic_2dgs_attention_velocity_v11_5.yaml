@@ -1,0 +1,146 @@
+# Bbox-free Dynamic 2DGS V11.5.
+#
+# V11.4 with the adaptive-K router replaced by a fixed count of two Gaussians
+# per occupied token. Correspondence, the temporal stack, the offset head and
+# every loss weight are V11.4's without modification; what changes is:
+#
+# 1. Gaussian count. The K={1,2,3} Gumbel router is gone and every token emits
+#    exactly two Gaussians, seeded at its own range quantiles. This is V11.3's
+#    fixed-count, seed-conditioned decoder, so V11.5 is also V11.3 with V11.4's
+#    linear hinge:
+#
+#        V11.3   -4 * relu(||dp|| / (v_max * |dt|) - 1)^2
+#        V11.5   -1 * relu(||dp|| / (v_max * |dt|) - 1)
+#
+# 2. p2g.head_offset_bound is set to 0.4 m per axis here, independent of the
+#    shared base config.
+#
+# 3. Data follows V12/V13: the legacy src/dataloader/nuscene.py loader with the
+#    complete train scenes scene-0757 and scene-1094 held out, rather than
+#    V11.4's random-duration nuscenes_dynamic_lidar4d loader.
+#
+# Unchanged from V11.4:
+# - Position encoding is split across heads. Head 0 is the sole correspondence
+#   head and carries no RoPE; its logit is biased by the linear max-speed soft
+#   barrier above at v_max = 30 m/s. Heads 1-11 keep metric 3D RoPE at base=100
+#   and 1.2566 rad/m (2*pi/5 m).
+# - v_init averages the twelve head-0 attention maps under softmax over twelve
+#   plain learned scalars.
+# - One v_init + v_offset per token is shared by that token's Gaussians. With a
+#   fixed count that sharing is a plain index expansion by two.
+model:
+  variant: dynamic_2dgs_attention_velocity_v11_5
+
+device: [0]
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  anchor_mode: grid
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  # Inactive compatibility values; V11.5 validation requires LoRA above.
+  agg_mlp:
+    hidden_dim: 1024
+    hidden_layers: 2
+    out_dim: 576
+  joint_refiner:
+    num_heads: 12
+    rope_base: 10.0
+    rope_position_scale: 4.0
+  # exp: null is the fixed range-quantile rule. For K=2 the raw-point ranks are
+  # floor(N/4) and floor(3N/4), exactly the adaptive router's K=2 candidate row.
+  # This variant has no count router, so count_mode=learned_gumbel is rejected
+  # rather than ignored -- run V11.4 itself for the routed count.
+  grid_query:
+    count_mode: legacy
+    K_max: 2
+    exp: null
+
+# ``dataset_name: nuscenes`` is inherited from nuscene_train.yaml and selects
+# src/dataloader/nuscene.py, the loader V11.4 was originally trained with.
+data:
+  mode: bbox
+  bbox_json_path: null
+  # Hold out the complete nuScenes train scenes containing LiDAR4D test clips.
+  train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    # V5 physical endpoint-time conditioning before layer one, as in V9/V10.
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # V11.4's linear hinge. R = 30 m at the nominal 1.0 s endpoint interval;
+    # the penalty is 0 inside R, then 0.5 logits at 1.5R, 1 at 2R and 2 at 3R.
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    # Query rows per explicit head-0 softmax chunk. Each chunk is recomputed in
+    # backward, so this trades peak N_q x N_k score memory against kernel-launch
+    # and chunk-boundary overhead; it never changes the result.
+    match_chunk_size: 4096
+
+    # Heads 1-11 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    layer_scale_init: 0.1
+
+  gaussian_head:
+    # Output priors for both slots of the seed-conditioned fixed-count head.
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    # The offset head is conditioned on the initializer it corrects:
+    #   e_v = Linear(3,32) -> SiLU -> Linear(32,32)
+    #   v_offset = Linear(96,3)(SiLU(Linear(432+32,96)([LN(f'), e_v])))
+    # The zero output initialization starts a fresh run at v_total = v_init.
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    # The conditioning copy is detached, so v_init + v_offset stays the only
+    # route from the offset loss back into correspondence.
+    detach_init_condition: true
+
+  regularization:
+    small_motion:
+      enabled: false
+      weight: 0.005
+      epsilon_m: 0.001
+      warmup_steps: 300
+      ramp_steps: 1700
+
+    velocity_l2:
+      enabled: true
+      # w_i * mean(||v_init||_2^2) + w_o * mean(||v_offset||_2^2), charged
+      # independently. With a fixed two Gaussians per token these means are
+      # plain token means; under V11.4's router they were K-weighted.
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+# Keep the requested reconstruction/scale objective explicit in this variant.
+loss:
+  w_chamfer: 0.02
+  w_scale: 0.0

@@ -70,6 +70,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v11_4": (
         "MaxSpeedBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v11_5": (
+        "SeedConditionedBarrierVelocityGaussianBackend"
+    ),
     "dynamic_2dgs_attention_velocity_v12": (
         "LearnableMaxSpeedBarrierVelocityGaussianBackend"
     ),
@@ -163,6 +166,11 @@ _PRE_REFACTOR_MANIFEST = {
     # them apart is the config embedded in the checkpoint.
     "dynamic_2dgs_attention_velocity_v11_4": (
         "a7f420bb2b15d7023d1f", "b72527798ae7652e170c"
+    ),
+    # V11.5 is V11.3's fixed K=2 decoder under V11.4's linear hinge. Neither
+    # the hinge nor the offset bound is a parameter, so its digests are V11.3's.
+    "dynamic_2dgs_attention_velocity_v11_5": (
+        "27b61a7e5c78bec30446", "274e243c1107ab2fa1b0"
     ),
     # V12 appends one scalar v_0 parameter to V11.4's temporal module. Its
     # checkpoint stores v_0 itself, so the learned speed restores exactly.
@@ -342,6 +350,20 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
                 )
                 self.assertTrue(backend.adaptive_count)
                 self.assertEqual(backend.gaussian_head.k_max, 3)
+
+    def test_v11_5_builds_the_v11_3_decoder_under_the_v11_4_hinge(self):
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v11_5")
+        self.assertIs(
+            type(backend), _DYNAMIC.SeedConditionedBarrierVelocityGaussianBackend
+        )
+        self.assertFalse(backend.adaptive_count)
+        self.assertEqual(backend.gaussians_per_token, 2)
+        self.assertTrue(backend.seed_conditioned_head)
+        self.assertEqual(backend.gaussian_head.seed_dim, 6)
+        self.assertAlmostEqual(backend.gaussian_head.offset_bound, 0.4)
+        self.assertEqual(backend.temporal.barrier_exponent, 1)
+        self.assertEqual(backend.temporal.barrier_weight, 1.0)
+        self.assertEqual(backend.temporal.barrier_speed_mps, 30.0)
 
     def test_single_seed_slot_preserves_the_legacy_geometry_transform(self):
         """The new explicit slot axis must preserve legacy (N, 3) inputs."""
