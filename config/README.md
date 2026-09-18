@@ -598,9 +598,10 @@ seed-conditioned trunk head included, so its parameter names and shapes are
 V11.3's exactly. Neither the hinge nor the offset bound is a parameter, so what
 keeps the two checkpoints apart is the embedded config.
 
-Two further settings differ from V11.4's overlay. `p2g.head_offset_bound` is
-set to 0.4 m in the V11.5 overlay itself rather than inherited from the shared
-base. The data contract is V12's rather than V11.4's random-duration loader:
+`p2g.head_offset_bound` is pinned to 0.4 m in the V11.5 overlay itself. The
+shared base now defaults to 0.4 m as well, but V11.4 checkpoints trained under
+the earlier 0.8 m default embed that value. The data contract is V12's rather
+than V11.4's random-duration loader:
 the inherited `dataset_name: nuscenes` (legacy `nuscene.py`), `data.mode: bbox`,
 `data.bbox_json_path: null`, and train-only whole-scene holdouts
 `data.train_excluded_scenes: [scene-0757, scene-1094]`.
@@ -680,9 +681,10 @@ boundary:
 The normalization statistic was already computed per head; "split" here means
 the gain contract. At initialization V12.1 reproduces V12 because every gain is
 one. Afterwards `qk_gamma_*_match_layer*` stays exactly one while the separately
-logged `qk_gamma_*_rope_layer*` may move. V12.1 also changes
-`p2g.head_offset_bound` from the shared 0.8 m default to 0.4 m, so each Gaussian
-position offset is `0.4 * tanh(raw_offset)` per axis.
+logged `qk_gamma_*_rope_layer*` may move. V12.1 also pins
+`p2g.head_offset_bound` to 0.4 m, so each Gaussian position offset is
+`0.4 * tanh(raw_offset)` per axis. That is now the shared default too; V12
+checkpoints trained under the earlier 0.8 m default keep it.
 
 **V13** keeps V12.1's fixed-window `nuscene.py` data contract, complete-scene
 train holdouts, embedded-init offset head, split velocity regularizer,

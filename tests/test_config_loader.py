@@ -683,8 +683,8 @@ class ConfigLoaderTest(unittest.TestCase):
         ):
             self.assertIn(DYNAMIC_VARIANT_V12, group)
 
-    def test_v12_1_changes_rms_lambda_and_offset_bound(self):
-        """The backend adds split gains and lambda; config changes its initials."""
+    def test_v12_1_adds_lambda_and_pins_the_offset_bound(self):
+        """The backend adds split gains and lambda; config adds its initial."""
         v12, _source = compose_fresh_config(OmegaConf.from_dotlist([
             f"model.variant={DYNAMIC_VARIANT_V12}",
         ]))
@@ -696,8 +696,9 @@ class ConfigLoaderTest(unittest.TestCase):
         left = OmegaConf.to_container(v12, resolve=False)
         right = OmegaConf.to_container(v12_1, resolve=False)
         left["model"]["variant"] = right["model"]["variant"]
-        self.assertEqual(left["p2g"].pop("head_offset_bound"), 0.8)
-        self.assertEqual(right["p2g"].pop("head_offset_bound"), 0.4)
+        # V12 inherits the shared 0.4 m bound; V12.1 pins the same value.
+        self.assertEqual(left["p2g"]["head_offset_bound"], 0.4)
+        self.assertEqual(right["p2g"]["head_offset_bound"], 0.4)
         left_temporal = left["dynamic_2dgs"]["temporal"]
         right_temporal = right["dynamic_2dgs"]["temporal"]
         self.assertNotIn("barrier_lambda_init", left_temporal)

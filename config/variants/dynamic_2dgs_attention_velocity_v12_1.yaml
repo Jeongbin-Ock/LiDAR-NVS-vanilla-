@@ -6,8 +6,8 @@
 #     v_max = exp(v_0)
 #     R_i = v_max * |dt_i|
 #
-# It changes the Q/K RMS gain contract, barrier strength, and Gaussian offset
-# bound:
+# It changes the Q/K RMS gain contract and barrier strength, and pins the
+# Gaussian offset bound:
 #
 # 1. Head 0 is the motion/correspondence head. Its RMS normalization is
 #    non-affine: gamma is the fixed constant one and is not a Parameter.
@@ -15,7 +15,8 @@
 #    for Q and one for K at each layer, independent of head 0.
 # 3. A global positive lambda scales the soft-barrier penalty. It is represented
 #    by learnable log(lambda), starts at lambda=1, and is shared everywhere.
-# 4. p2g.head_offset_bound is 0.4 m instead of the shared 0.8 m default.
+# 4. p2g.head_offset_bound is pinned to 0.4 m. The shared default is 0.4 m too
+#    now, while V12 checkpoints trained under the earlier 0.8 m default keep it.
 model:
   variant: dynamic_2dgs_attention_velocity_v12_1
 
