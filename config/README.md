@@ -34,12 +34,13 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v11_1
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_2
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_3
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_4
+python main.py model.variant=dynamic_2dgs_attention_velocity_v12
 ```
 
 This `/4d` worktree defaults to `dynamic_2dgs_attention_velocity_v7_2` for a
 fresh run. `bbox_rigid_v1` is the historical box-routed model. V1 through V7.1,
-V8, V9, V10, V11, V11.1, V11.2, V11.3, and V11.4 remain available for exact
-checkpoint reconstruction and controlled A/B runs.
+V8, V9, V10, V11, V11.1, V11.2, V11.3, V11.4, and V12 remain available for
+exact checkpoint reconstruction and controlled A/B runs.
 V4/V5 reuse temporal cross-attention heads for velocity initialization. V6 does
 not: it adds an independent, time-free Siamese motion proposal before temporal
 cross-attention and uses the latter only for feature refinement. Its overlay
@@ -48,10 +49,10 @@ CLI-overridable runtime settings.
 
 Dynamic V1-V9, V11.1 and V11.3 emit a fixed number of Gaussians per occupied
 endpoint token -- one observed-medoid seed by default, and two range quantiles
-in V11.3; V10, V11, V11.2 and V11.4 let a router select one to three
-range-quantile-seeded Gaussians instead. `p2g.grid_query`
-chooses between the two and sets the fixed count -- see "Gaussians per token"
-below. V3 through V6, V7.2, V8, V9, V10, V11, V11.2 and V11.3 embed
+in V11.3; V10, V11, V11.2, V11.4 and V12 let a router select one to three
+range-quantile-seeded Gaussians instead. `p2g.grid_query` chooses between the
+two and sets the fixed count -- see "Gaussians per token" below. V3 through V6,
+V7.2, V8, V9, V10, V11, V11.2, V11.3, V11.4 and V12 embed
 `time_coordinate = relative_seconds / time_reference_sec`, where
 `time_reference_sec=1.0` is fixed across samples. An irregular 0.8-second pair
 therefore supplies endpoint coordinates `[0, 0.8]`, rather than `[0, 1]`. Its
@@ -579,6 +580,49 @@ V11's parameter names and shapes exactly. The two are weight-compatible and
 behaviourally different; what keeps a checkpoint's identity is the config
 embedded in it.
 
+**V12** is V11.4 with only that fixed max-speed scalar made learnable. The
+temporal module registers one scalar parameter shared by every layer, both
+endpoint directions, and all samples:
+
+```
+v_0   = Parameter(log(30.0))
+v_max = exp(v_0)
+R_i   = v_max * |dt_i|
+```
+
+`barrier_speed_mps: 30.0` in the overlay is therefore an initialization value,
+not the speed used as a fixed hyperparameter after construction. The learned
+`v_0` is part of the checkpoint and the ordinary optimizer parameter list.
+`attention_temperature_stats` logs `barrier_v_0`, the current learned value as
+`barrier_speed_mps`, and the initialization as `barrier_speed_initial_mps`.
+
+V12 deliberately uses the earlier `src/dataloader/nuscene.py` contract rather
+than V11.4's new random-duration loader. Its overlay inherits
+`data.dataset_name: nuscenes` and the fixed keyframe/window settings from
+`nuscene_train.yaml`, while setting `data.mode: bbox` and
+`data.bbox_json_path: null` exactly as the previous V11.4 overlay did. V12
+additionally sets `data.train_excluded_scenes: [scene-0757, scene-1094]`;
+`nuscene.py` removes those complete scenes only when constructing the train
+split. Validation and test scenes remain unchanged. The key is
+checkpoint-protected sampling state, so a resume cannot silently put either
+held-out scene back.
+
+The QK RMSNorm path is exactly V11.4's: each layer has one Q gain vector and one
+K gain vector, and each is broadcast across all twelve heads. V12 does not use
+V11.1's separate match/RoPE gain rows. To let the reconstruction objective train
+the radius, V12 keeps pairwise source-coordinate distances detached but retains
+the scalar radius in the barrier graph; converting the radius to a Python float
+or wrapping the complete barrier in `no_grad` would silently freeze `v_0`.
+
+Log-space parameterization guarantees only `v_max > 0` and makes changes to the
+parameter act multiplicatively on speed. It is **not an upper bound** and does
+not by itself prevent the learned radius from growing: increasing `v_max`
+removes more keys from the penalized region and can become an escape route if
+the reconstruction objective prefers broader matching. V12 intentionally adds
+neither a clamp nor a barrier-specific prior, so this remains the controlled
+difference from V11.4; add an explicit upper-bounded transform or a prior around
+`log(30)` in a separate variant if runaway control is required.
+
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other
 weights shows a=0 to a=4 is decisive (mass beyond the radius 11.2% -> 0.85%,
@@ -682,12 +726,12 @@ V11.3 emits that same 58,686 from its shipped `K_max: 2`.
 
 **Learned count (`count_mode: learned_gumbel`).** The refined token routes
 through the grid `GridSlotHead` and a hard Gumbel-Softmax over K={1,2,3} picks
-one K-specific joint head per token. Only V10, V11, V11.2 and V11.4 may use it;
-asking any other variant for it is rejected at config time rather than silently
-ignored. V11.3 is rejected too, even though it shares V11's backend class,
-because its identity is the fixed count.
-The seed geometry it consumes is the K-specific candidate bank, not the padded
-fixed-count seed set, so the two contracts cannot be mixed.
+one K-specific joint head per token. Only V10, V11, V11.2, V11.4 and V12 may
+use it; asking any other variant for it is rejected at config time rather than
+silently ignored. V11.3 is rejected too, even though it shares V11's backend
+class, because its identity is the fixed count. The seed geometry it consumes
+is the K-specific candidate bank, not the padded fixed-count seed set, so the
+two contracts cannot be mixed.
 
 Both counts are structural: `p2g` is a checkpoint-protected root, so a resume or
 evaluation cannot change how many Gaussians a checkpoint's tokens produce.

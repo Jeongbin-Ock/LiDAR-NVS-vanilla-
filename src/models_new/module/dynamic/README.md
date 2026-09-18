@@ -29,6 +29,7 @@ Config variant names in the table omit their shared `dynamic_2dgs_` prefix.
 | `attention_velocity_v11_2` | `FinalFeatureBarrierVelocityGaussianBackend` | `FinalFeatureBarrierCrossAttention` | `EmbeddedInitVelocityHead` | learned K=1..3 by default; fixed available by config |
 | `attention_velocity_v11_3` | `SeedConditionedBarrierVelocityGaussianBackend` | `MaxSpeedBarrierLayerWeightedCrossAttention` | `EmbeddedInitVelocityHead` | fixed at K=2 by default |
 | `attention_velocity_v11_4` | `MaxSpeedBarrierVelocityGaussianBackend` | linear-hinge `MaxSpeedBarrierLayerWeightedCrossAttention` | `EmbeddedInitVelocityHead` | learned K=1..3 by default; fixed available by config |
+| `attention_velocity_v12` | `LearnableMaxSpeedBarrierVelocityGaussianBackend` | `LearnableMaxSpeedBarrierLayerWeightedCrossAttention`, one global `v_max=exp(v_0)` | `EmbeddedInitVelocityHead` | learned K=1..3 by default; fixed available by config |
 
 Checkpoint compatibility depends on the registered module tree, parameter
 assignment order, and tensor shapes. The split adds no `nn.Module` wrappers and

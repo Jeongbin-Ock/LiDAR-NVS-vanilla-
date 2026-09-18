@@ -70,6 +70,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v11_4": (
         "MaxSpeedBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v12": (
+        "LearnableMaxSpeedBarrierVelocityGaussianBackend"
+    ),
 }
 
 _PROPOSAL_VARIANTS = {
@@ -143,6 +146,11 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v11_4": (
         "a7f420bb2b15d7023d1f", "b72527798ae7652e170c"
     ),
+    # V12 appends one scalar v_0 parameter to V11.4's temporal module. Its
+    # checkpoint stores v_0 itself, so the learned speed restores exactly.
+    "dynamic_2dgs_attention_velocity_v12": (
+        "daea4e3817d9fe55886a", "15c9a7df0cb498389fa0"
+    ),
 }
 
 
@@ -168,6 +176,8 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "DynamicGaussianBackend": "backends",
     "FinalFeatureBarrierCrossAttention": "temporal",
     "FinalFeatureBarrierVelocityGaussianBackend": "backends",
+    "LearnableMaxSpeedBarrierLayerWeightedCrossAttention": "temporal",
+    "LearnableMaxSpeedBarrierVelocityGaussianBackend": "backends",
     "ConsensusAttentionMotionMatcher": "attention_matching",
     "GaussianAttributeHead": "heads",
     "StraightThroughTop4MotionProposal": "motion_proposals",
@@ -252,6 +262,7 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
             "dynamic_2dgs_attention_velocity_v10",
             "dynamic_2dgs_attention_velocity_v11",
             "dynamic_2dgs_attention_velocity_v11_2",
+            "dynamic_2dgs_attention_velocity_v12",
         ):
             with self.subTest(variant=variant):
                 config, _source = compose_fresh_config(

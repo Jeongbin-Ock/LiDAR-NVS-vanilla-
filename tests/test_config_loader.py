@@ -30,6 +30,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V11_2,
     DYNAMIC_VARIANT_V11_3,
     DYNAMIC_VARIANT_V11_4,
+    DYNAMIC_VARIANT_V12,
     LEGACY_VARIANT,
     PHYSICAL_VELOCITY_VARIANTS,
     assert_model_variant_implemented,
@@ -553,6 +554,52 @@ class ConfigLoaderTest(unittest.TestCase):
                     f"model.variant={DYNAMIC_VARIANT_V11_4}",
                     f"dynamic_2dgs.temporal.barrier_exponent={value}",
                 ]))
+
+    def test_v12_keeps_v11_4_model_but_uses_the_legacy_loader(self):
+        """Only learnable speed and the requested data loader differ."""
+        v11_4, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_4}",
+        ]))
+        v12, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V12}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V12}.yaml", source)
+
+        left = OmegaConf.to_container(v11_4, resolve=False)
+        right = OmegaConf.to_container(v12, resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        left_data = left.pop("data")
+        right_data = right.pop("data")
+        self.assertEqual(left, right)
+
+        self.assertEqual(left_data["dataset_name"], "nuscenes_dynamic_lidar4d")
+        self.assertEqual(right_data["dataset_name"], "nuscenes")
+        self.assertEqual(right_data["mode"], "bbox")
+        self.assertIsNone(right_data["bbox_json_path"])
+        self.assertNotIn("dynamic_window", right_data)
+        self.assertEqual(
+            list(right_data["train_excluded_scenes"]),
+            ["scene-0757", "scene-1094"],
+        )
+        for key in (
+            "window_us", "sample_gap_us", "gt_middle_count", "pair_mode",
+            "pair_kf_stride",
+        ):
+            self.assertEqual(left_data[key], right_data[key])
+
+        temporal = v12.dynamic_2dgs.temporal
+        self.assertEqual(temporal.barrier_speed_mps, 30.0)
+        self.assertEqual(temporal.barrier_weight, 1.0)
+        self.assertEqual(temporal.barrier_exponent, 1)
+        self.assertTrue(temporal.qk_norm)
+        self.assertEqual(v12.p2g.grid_query.count_mode, "learned_gumbel")
+        for group in (
+            ATTENTION_VELOCITY_VARIANTS,
+            BARRIER_MATCH_DYNAMIC_VARIANTS,
+            PHYSICAL_VELOCITY_VARIANTS,
+            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V12, group)
 
     def test_v11_3_head_is_seed_conditioned_at_three_channels_per_slot(self):
         """The router trunk's geometry input survives as head input columns."""

@@ -205,6 +205,7 @@ class Point2Gaus(nn.Module):
                 DYNAMIC_VARIANT_V11_2,
                 DYNAMIC_VARIANT_V11_3,
                 DYNAMIC_VARIANT_V11_4,
+                DYNAMIC_VARIANT_V12,
             )
             from .dynamic_gaussian import (
                 AttentionInitializedVelocityGaussianBackend,
@@ -212,6 +213,7 @@ class Point2Gaus(nn.Module):
                 DynamicGaussianBackend,
                 FinalFeatureBarrierVelocityGaussianBackend,
                 LayerWeightedAttentionVelocityGaussianBackend,
+                LearnableMaxSpeedBarrierVelocityGaussianBackend,
                 MaxSpeedBarrierVelocityGaussianBackend,
                 SingleGaussianBarrierVelocityGaussianBackend,
                 PhysicalVelocityGaussianBackend,
@@ -243,7 +245,8 @@ class Point2Gaus(nn.Module):
             # count, and rebuilds the seed conditioning the router's trunk
             # used to supply on the plain Gaussian head. V11.4 is V11 with
             # only the hinge shape changed, so it shares V11's class and
-            # differs by dynamic_2dgs.temporal config alone.
+            # differs by dynamic_2dgs.temporal config alone. V12 keeps V11.4's
+            # complete path and swaps in one learned log-space barrier speed.
             backend_cls = {
                 DYNAMIC_VARIANT_V1: DynamicGaussianBackend,
                 DYNAMIC_VARIANT_V3: PhysicalVelocityGaussianBackend,
@@ -274,6 +277,9 @@ class Point2Gaus(nn.Module):
                     SeedConditionedBarrierVelocityGaussianBackend
                 ),
                 DYNAMIC_VARIANT_V11_4: MaxSpeedBarrierVelocityGaussianBackend,
+                DYNAMIC_VARIANT_V12: (
+                    LearnableMaxSpeedBarrierVelocityGaussianBackend
+                ),
             }.get(self.dynamic_variant)
             if backend_cls is None:
                 raise ValueError(

@@ -1,0 +1,129 @@
+# Dynamic 2DGS V12 with the legacy nuscene.py loader.
+#
+# V12 is V11.4 with one and only one model change: the linear barrier's global
+# max speed is learned. The module registers
+#
+#     v_0 = Parameter(log(30))
+#     v_max = exp(v_0)
+#     R_i = v_max * |dt_i|
+#
+# so all twelve layers, both endpoint directions, and every sample share one
+# positive scalar speed. ``barrier_speed_mps`` below supplies only its initial
+# value. There is intentionally no upper clamp or barrier-specific prior on
+# v_0; the run's ordinary optimizer settings still apply to every parameter.
+#
+# QK RMSNorm is unchanged from V11.4: each layer's Q gain and K gain is shared
+# by all twelve heads. This is not V11.1's separate match/RoPE gain scheme.
+model:
+  variant: dynamic_2dgs_attention_velocity_v12
+
+device: [0]
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  anchor_mode: grid
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  # Inactive compatibility values; V12 validation requires LoRA above.
+  agg_mlp:
+    hidden_dim: 1024
+    hidden_layers: 2
+    out_dim: 576
+  joint_refiner:
+    num_heads: 12
+    rope_base: 10.0
+    rope_position_scale: 4.0
+  # V11.4's adaptive K={1,2,3} router, unchanged.
+  grid_query:
+    count_mode: learned_gumbel
+    grad_balance: sqrt_k
+    learned_count:
+      K_max: 3
+      tau: 1.0
+      seed_mode: range_quantile
+      grad_balance_scope: token
+      budget:
+        enable: false
+      logging:
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+
+# Keep the pre-random-window loader used by the earlier Dynamic variants.
+# ``dataset_name: nuscenes`` is inherited from nuscene_train.yaml and selects
+# src/dataloader/nuscene.py. These two values match V11.4's previous contract.
+data:
+  mode: bbox
+  bbox_json_path: null
+  # Hold out the complete nuScenes train scenes containing LiDAR4D test clips.
+  train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    # V5 physical endpoint-time conditioning before layer one, as in V11.4.
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # The V11.4 linear hinge is unchanged:
+    #   bias_ij = -relu(d_ij / (exp(v_0) * |dt|) - 1).
+    # In V12 this 30 m/s value initializes v_0=log(30); after construction the
+    # active max speed comes from exp(v_0), not directly from the config value.
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+
+    # Heads 1-11 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    layer_scale_init: 0.1
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    # V11.4's v_init-conditioned, zero-initialized residual head, unchanged.
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    small_motion:
+      enabled: false
+      weight: 0.005
+      epsilon_m: 0.001
+      warmup_steps: 300
+      ramp_steps: 1700
+
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+# Keep V11.4's reconstruction/scale objective unchanged.
+loss:
+  w_chamfer: 0.02
+  w_scale: 0.0

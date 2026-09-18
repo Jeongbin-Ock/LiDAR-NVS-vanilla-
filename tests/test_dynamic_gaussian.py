@@ -33,6 +33,8 @@ from src.models_new.module.dynamic_gaussian import (
     InitConditionedVelocityHead,
     LayerWeightedAttentionVelocityGaussianBackend,
     LayerWeightedDistanceBiasCrossAttention,
+    LearnableMaxSpeedBarrierLayerWeightedCrossAttention,
+    LearnableMaxSpeedBarrierVelocityGaussianBackend,
     MaxSpeedBarrierLayerWeightedCrossAttention,
     MaxSpeedBarrierVelocityGaussianBackend,
     GroupedHeadRMSNorm,
@@ -334,6 +336,22 @@ def v11_backend_cfg(dim=24):
         "zero_init": True,
         "residual_hidden_dim": 8,
     })
+    return cfg
+
+
+def v12_temporal_cfg(dim=24, heads=4, layers=3, match_chunk_size=2):
+    cfg = v11_temporal_cfg(
+        dim=dim, heads=heads, layers=layers,
+        match_chunk_size=match_chunk_size,
+    )
+    cfg.barrier_weight = 1.0
+    cfg.barrier_exponent = 1
+    return cfg
+
+
+def v12_backend_cfg(dim=24):
+    cfg = v11_backend_cfg(dim=dim)
+    cfg.temporal = v12_temporal_cfg(dim=dim)
     return cfg
 
 
@@ -3621,6 +3639,121 @@ class V11MaxSpeedBarrierAttentionTest(unittest.TestCase):
             )
         speed = float(fields["delta_p_init"][0].norm() / duration)
         self.assertLess(speed, 30.0)
+
+
+class V12LearnableMaxSpeedBarrierAttentionTest(unittest.TestCase):
+    """V12 changes only V11.4's fixed global barrier speed."""
+
+    @staticmethod
+    def _forward_args(feature, position, first_frame_tokens, duration=0.8):
+        return V11MaxSpeedBarrierAttentionTest._forward_args(
+            feature, position, first_frame_tokens, duration
+        )
+
+    def test_v0_starts_at_log_30_and_is_the_only_new_parameter(self):
+        module = LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+            v12_temporal_cfg(layers=2), dim=24
+        )
+        self.assertIsInstance(module.v_0, torch.nn.Parameter)
+        self.assertTrue(module.v_0.requires_grad)
+        self.assertEqual(tuple(module.v_0.shape), ())
+        self.assertAlmostEqual(float(module.v_0), math.log(30.0), places=6)
+        self.assertAlmostEqual(float(module.v_max), 30.0, places=5)
+
+        reference = MaxSpeedBarrierLayerWeightedCrossAttention(
+            v12_temporal_cfg(layers=2), dim=24
+        )
+        new_names = set(dict(module.named_parameters())) - set(
+            dict(reference.named_parameters())
+        )
+        self.assertEqual(new_names, {"v_0"})
+
+    def test_qk_rms_gamma_remains_shared_across_every_head(self):
+        module = LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+            v12_temporal_cfg(heads=4, layers=2), dim=24
+        )
+        for layer in range(module.n_layers):
+            for norm in (module.q_norm[layer], module.k_norm[layer]):
+                self.assertIsInstance(norm, torch.nn.RMSNorm)
+                # One head_dim vector broadcasts over the head axis. There is
+                # no per-head or V11.1-style match/RoPE group dimension.
+                self.assertEqual(tuple(norm.weight.shape), (module.head_dim,))
+
+    def test_initial_forward_matches_v11_4(self):
+        cfg = v12_temporal_cfg(layers=2, match_chunk_size=2)
+        torch.manual_seed(120)
+        reference = MaxSpeedBarrierLayerWeightedCrossAttention(
+            cfg, dim=24
+        ).eval()
+        torch.manual_seed(120)
+        module = LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+            cfg, dim=24
+        ).eval()
+
+        feature = torch.randn(7, 24)
+        position = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [8.0, 1.0, 0.0],
+            [24.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [20.0, 1.0, 0.0],
+            [36.0, -1.0, 0.0],
+            [70.0, 2.0, 0.0],
+        ])
+        args = self._forward_args(feature, position, 3, duration=0.8)
+        with torch.no_grad():
+            refined, fields = module(*args)
+            expected_refined, expected_fields = reference(*args)
+        torch.testing.assert_close(
+            refined, expected_refined, atol=2.0e-6, rtol=2.0e-6
+        )
+        for name in (
+            "delta_p_match", "delta_p_init", "matched_position",
+            "motion_layer_logits", "motion_layer_weights",
+        ):
+            torch.testing.assert_close(
+                fields[name], expected_fields[name], atol=2.0e-6, rtol=2.0e-6
+            )
+
+    def test_full_checkpointed_readout_backpropagates_to_v0(self):
+        torch.manual_seed(121)
+        module = LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+            v12_temporal_cfg(layers=1, match_chunk_size=1), dim=24
+        ).train()
+        feature = torch.randn(3, 24)
+        # For the origin query, one key is inside R and one is outside R. Its
+        # coordinate expectation therefore changes continuously with v_max.
+        position = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [20.0, 0.0, 0.0],
+            [60.0, 0.0, 0.0],
+        ])
+        _refined, fields = module(
+            *self._forward_args(feature, position, 1, duration=1.0)
+        )
+        fields["matched_position"][0, 0].backward()
+        self.assertIsNotNone(module.v_0.grad)
+        self.assertTrue(torch.isfinite(module.v_0.grad))
+        self.assertGreater(float(module.v_0.grad.abs()), 0.0)
+
+    def test_backend_and_stats_expose_one_current_global_speed(self):
+        backend = LearnableMaxSpeedBarrierVelocityGaussianBackend(
+            v12_backend_cfg(), _gs_params(), dim=24, offset_bound=0.8,
+            gaussian_count_cfg=v10_gaussian_count_cfg(),
+        )
+        self.assertIsInstance(
+            backend.temporal,
+            LearnableMaxSpeedBarrierLayerWeightedCrossAttention,
+        )
+        self.assertIsInstance(backend.velocity_head, EmbeddedInitVelocityHead)
+        self.assertEqual(backend.gaussian_head.count_mode, "learned_gumbel")
+
+        with torch.no_grad():
+            backend.temporal.v_0.copy_(torch.tensor(math.log(42.0)))
+        stats = backend.temporal.attention_temperature_stats()
+        self.assertAlmostEqual(stats["barrier_speed_initial_mps"], 30.0)
+        self.assertAlmostEqual(stats["barrier_v_0"], math.log(42.0), places=5)
+        self.assertAlmostEqual(stats["barrier_speed_mps"], 42.0, places=4)
 
 
 class V11_2FinalFeatureBarrierAttentionTest(unittest.TestCase):

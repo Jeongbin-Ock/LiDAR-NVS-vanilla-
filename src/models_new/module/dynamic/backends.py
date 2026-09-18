@@ -24,6 +24,7 @@ from .temporal import (
     FinalFeatureBarrierCrossAttention,
     GroupedGainBarrierCrossAttention,
     LayerWeightedDistanceBiasCrossAttention,
+    LearnableMaxSpeedBarrierLayerWeightedCrossAttention,
     MaxSpeedBarrierLayerWeightedCrossAttention,
     ParallelBidirectionalCrossAttention, TimeConditionedParallelCrossAttention,
 )
@@ -918,6 +919,17 @@ class MaxSpeedBarrierVelocityGaussianBackend(
         return EmbeddedInitVelocityHead(cfg.motion, self.dim)
 
 
+class LearnableMaxSpeedBarrierVelocityGaussianBackend(
+    MaxSpeedBarrierVelocityGaussianBackend
+):
+    """V12: V11.4 with only its global barrier speed made learnable."""
+
+    def _build_temporal(self, cfg):
+        return LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+            cfg.temporal, self.dim
+        )
+
+
 class FinalFeatureBarrierVelocityGaussianBackend(
     MaxSpeedBarrierVelocityGaussianBackend
 ):
@@ -1495,6 +1507,7 @@ __all__ = [
     "AttentionInitializedVelocityGaussianBackend",
     "LayerMixtureMotionMixin",
     "LayerWeightedAttentionVelocityGaussianBackend",
+    "LearnableMaxSpeedBarrierVelocityGaussianBackend",
     "MaxSpeedBarrierVelocityGaussianBackend",
     "FinalFeatureBarrierVelocityGaussianBackend",
     "SingleGaussianBarrierVelocityGaussianBackend",
@@ -1503,4 +1516,4 @@ __all__ = [
     "WarpedProposalVelocityGaussianBackend",
     "StraightThroughProposalVelocityGaussianBackend",
     "PostAttentionProposalVelocityGaussianBackend",
- ]
+]
