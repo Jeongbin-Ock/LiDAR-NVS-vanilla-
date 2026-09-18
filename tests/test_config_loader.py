@@ -9,6 +9,7 @@ import torch
 from omegaconf import OmegaConf
 
 from src.config_loader import (
+    ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
     ATTENTION_VELOCITY_VARIANTS,
     BARRIER_MATCH_DYNAMIC_VARIANTS,
     COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
@@ -35,6 +36,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
+    DYNAMIC_VARIANT_V13_2,
     LEGACY_VARIANT,
     PHYSICAL_VELOCITY_VARIANTS,
     assert_model_variant_implemented,
@@ -760,6 +762,52 @@ class ConfigLoaderTest(unittest.TestCase):
                 "p2g.grid_query.learned_count.logging.enable=true",
                 "p2g.grid_query.learned_count.logging.interval=20",
                 "p2g.grid_query.learned_count.logging.range_edges_m=[0,10]",
+            ]))
+
+    def test_v13_2_changes_only_head0_from_cosine_to_raw_qk(self):
+        v13, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V13}",
+        ]))
+        v13_2, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V13_2}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V13_2}.yaml", source)
+
+        left = OmegaConf.to_container(v13, resolve=False)
+        right = OmegaConf.to_container(v13_2, resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        self.assertEqual(
+            left["dynamic_2dgs"]["temporal"].pop("motion_temperature"),
+            0.03,
+        )
+        self.assertEqual(left, right)
+
+        temporal = v13_2.dynamic_2dgs.temporal
+        self.assertEqual(temporal.position_encoding, "rope_all_heads")
+        self.assertFalse(temporal.qk_norm)
+        self.assertNotIn("motion_temperature", temporal)
+        self.assertEqual(v13_2.p2g.head_offset_bound, 0.4)
+        count = v13_2.p2g.grid_query
+        self.assertEqual(count.count_mode, "learned_gumbel")
+        self.assertEqual(count.learned_count.seed_mode, "range_quantile")
+        self.assertFalse(count.learned_count.budget.enable)
+
+        for group in (
+            ATTENTION_VELOCITY_VARIANTS,
+            ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
+            PHYSICAL_VELOCITY_VARIANTS,
+            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V13_2, group)
+        self.assertNotIn(
+            DYNAMIC_VARIANT_V13_2, COSINE_ROPE_MATCH_DYNAMIC_VARIANTS
+        )
+        self.assertNotIn(DYNAMIC_VARIANT_V13_2, BARRIER_MATCH_DYNAMIC_VARIANTS)
+
+        with self.assertRaisesRegex(ValueError, "motion_temperature"):
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V13_2}",
+                "dynamic_2dgs.temporal.motion_temperature=0.03",
             ]))
 
     def test_v11_3_head_is_seed_conditioned_at_three_channels_per_slot(self):

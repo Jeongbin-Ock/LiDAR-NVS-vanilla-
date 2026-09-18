@@ -50,6 +50,8 @@ from src.models_new.module.dynamic_gaussian import (
     PostAttentionProposalVelocityGaussianBackend,
     ProjectedDenseMotionProposal,
     ProposalInitializedVelocityGaussianBackend,
+    RawQKRoPELayerWeightedCrossAttention,
+    RawQKRoPEVelocityGaussianBackend,
     SparseMotionProposal,
     StraightThroughProposalVelocityGaussianBackend,
     StraightThroughTop4MotionProposal,
@@ -405,6 +407,18 @@ def v13_backend_cfg(dim=24):
         "velocity_embedding_dim": 8,
         "detach_init_condition": True,
     })
+    return cfg
+
+
+def v13_2_temporal_cfg(dim=24, heads=4, layers=3):
+    cfg = v13_temporal_cfg(dim=dim, heads=heads, layers=layers)
+    del cfg.motion_temperature
+    return cfg
+
+
+def v13_2_backend_cfg(dim=24):
+    cfg = v13_backend_cfg(dim=dim)
+    cfg.temporal = v13_2_temporal_cfg(dim=dim)
     return cfg
 
 
@@ -4131,6 +4145,107 @@ class V13CosineRoPEAttentionTest(unittest.TestCase):
         torch.testing.assert_close(
             shared_velocity, shared_velocity[:, :1].expand_as(shared_velocity)
         )
+
+
+class V13_2RawQKRoPEAttentionTest(unittest.TestCase):
+    """V13.2 gives head 0 the same raw QK score as every other head."""
+
+    def test_all_heads_keep_raw_qk_and_shared_sqrt_d_scale(self):
+        torch.manual_seed(132)
+        module = RawQKRoPELayerWeightedCrossAttention(
+            v13_2_temporal_cfg(heads=4, layers=2), dim=24
+        )
+        self.assertFalse(hasattr(module, "q_norm"))
+        self.assertFalse(hasattr(module, "k_norm"))
+        self.assertFalse(hasattr(module, "motion_temperature"))
+        self.assertFalse(hasattr(module, "motion_qk_scale"))
+        self.assertFalse(any(
+            isinstance(child, torch.nn.RMSNorm) for child in module.modules()
+        ))
+
+        query = torch.randn(3, 4, 6)
+        key = torch.randn(5, 4, 6)
+        query_angles = module.rope.angles(torch.randn(3, 3))
+        key_angles = module.rope.angles(torch.randn(5, 3))
+        encoded_query, encoded_key = module._encode_qk(
+            query, key, query_angles, key_angles
+        )
+        expected_query = module.rope.rotate(
+            query.float(), query_angles[:, None, :, :]
+        )
+        expected_key = module.rope.rotate(
+            key.float(), key_angles[:, None, :, :]
+        )
+        torch.testing.assert_close(encoded_query, expected_query)
+        torch.testing.assert_close(encoded_key, expected_key)
+
+        actual_motion_score = (
+            encoded_query[:, 0] @ encoded_key[:, 0].transpose(0, 1)
+        ) * module.scale
+        expected_motion_score = (
+            expected_query[:, 0] @ expected_key[:, 0].transpose(0, 1)
+        ) / math.sqrt(module.head_dim)
+        torch.testing.assert_close(actual_motion_score, expected_motion_score)
+
+        scaled_query = query.clone()
+        scaled_query[:, 0] *= 3.0
+        scaled_encoded, _ = module._encode_qk(
+            scaled_query, key, query_angles, key_angles
+        )
+        torch.testing.assert_close(
+            scaled_encoded[:, 0], 3.0 * encoded_query[:, 0]
+        )
+        stats = module.attention_temperature_stats()
+        self.assertEqual(stats["qk_norm_enabled"], 0.0)
+        self.assertAlmostEqual(stats["motion_score_scale"], 1.0 / math.sqrt(6))
+        self.assertNotIn("motion_temperature", stats)
+
+    def test_v13_2_keeps_one_all_head_call_and_v13_adaptive_backend(self):
+        torch.manual_seed(133)
+        module = RawQKRoPELayerWeightedCrossAttention(
+            v13_2_temporal_cfg(heads=4, layers=2), dim=24
+        )
+        calls = []
+
+        def capture_flash(query, key, value, q_counts, k_counts,
+                          *, flash_dtype=None):
+            calls.append((query.shape, key.shape, value.shape, flash_dtype))
+            return module._sdpa_attention(
+                query, key, value, q_counts, k_counts
+            )
+
+        module._use_flash = lambda _value: True
+        module._flash_attention = capture_flash
+        feature = torch.randn(8, 24, requires_grad=True)
+        position = torch.randn(8, 3)
+        time = torch.tensor([0.0] * 4 + [0.8] * 4)
+        refined, fields = module(
+            feature,
+            position,
+            torch.tensor([4, 8]),
+            torch.tensor([0, 0]),
+            time,
+            torch.full((8,), 0.8),
+        )
+        self.assertEqual(len(calls), 2)
+        for query_shape, key_shape, value_shape, flash_dtype in calls:
+            self.assertEqual(tuple(query_shape[1:]), (4, 16))
+            self.assertEqual(tuple(key_shape[1:]), (4, 16))
+            self.assertEqual(tuple(value_shape[1:]), (4, 16))
+            self.assertIs(flash_dtype, torch.float16)
+        (refined.square().mean() + fields["matched_position"].square().mean()).backward()
+        self.assertGreater(float(feature.grad.abs().sum()), 0.0)
+
+        backend = RawQKRoPEVelocityGaussianBackend(
+            v13_2_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussian_count_cfg=v10_gaussian_count_cfg(),
+        )
+        self.assertIsInstance(
+            backend.temporal, RawQKRoPELayerWeightedCrossAttention
+        )
+        self.assertTrue(backend.adaptive_count)
+        self.assertEqual(backend.gaussian_head.count_mode, "learned_gumbel")
+        self.assertAlmostEqual(backend.offset_bound, 0.4)
 
 
 class V11_2FinalFeatureBarrierAttentionTest(unittest.TestCase):

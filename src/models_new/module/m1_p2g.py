@@ -209,6 +209,7 @@ class Point2Gaus(nn.Module):
                 DYNAMIC_VARIANT_V12_1,
                 DYNAMIC_VARIANT_V13,
                 DYNAMIC_VARIANT_V13_1,
+                DYNAMIC_VARIANT_V13_2,
             )
             from .dynamic_gaussian import (
                 AttentionInitializedVelocityGaussianBackend,
@@ -224,6 +225,7 @@ class Point2Gaus(nn.Module):
                 PhysicalVelocityGaussianBackend,
                 PostAttentionProposalVelocityGaussianBackend,
                 ProposalInitializedVelocityGaussianBackend,
+                RawQKRoPEVelocityGaussianBackend,
                 SeedConditionedBarrierVelocityGaussianBackend,
                 SeedConditionedCosineRoPEVelocityGaussianBackend,
                 StraightThroughProposalVelocityGaussianBackend,
@@ -258,7 +260,8 @@ class Point2Gaus(nn.Module):
             # the barrier, L2-normalizes only head 0 at a fixed temperature,
             # and runs all RoPE heads in one FlashAttention call. V13.1 keeps
             # that matcher but replaces adaptive K with fixed range-quantile
-            # K=2.
+            # K=2. V13.2 instead keeps V13's adaptive count and makes head 0
+            # use the same raw QK/sqrt(d) score as every feature head.
             backend_cls = {
                 DYNAMIC_VARIANT_V1: DynamicGaussianBackend,
                 DYNAMIC_VARIANT_V3: PhysicalVelocityGaussianBackend,
@@ -299,6 +302,7 @@ class Point2Gaus(nn.Module):
                 DYNAMIC_VARIANT_V13_1: (
                     SeedConditionedCosineRoPEVelocityGaussianBackend
                 ),
+                DYNAMIC_VARIANT_V13_2: RawQKRoPEVelocityGaussianBackend,
             }.get(self.dynamic_variant)
             if backend_cls is None:
                 raise ValueError(

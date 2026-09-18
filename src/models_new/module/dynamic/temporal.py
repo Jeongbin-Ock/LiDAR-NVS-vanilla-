@@ -2186,7 +2186,7 @@ class CosineRoPELayerWeightedCrossAttention(
 
         if self.qk_norm:
             self._build_qk_norm(True)
-        # V13/V13.1 intentionally register no q_norm/k_norm modules.
+        # V13/V13.1/V13.2 intentionally register no q_norm/k_norm modules.
         self._build_transformer_layers(cfg)
         self.layer_logits = nn.Parameter(torch.zeros(self.n_layers))
 
@@ -2438,6 +2438,48 @@ class CosineRoPELayerWeightedCrossAttention(
         }
 
 
+class RawQKRoPELayerWeightedCrossAttention(
+    CosineRoPELayerWeightedCrossAttention
+):
+    """V13.2: V13 with ordinary raw-QK scoring on head 0.
+
+    No head uses RMSNorm or L2 normalization. Head 0 therefore follows exactly
+    the same score contract as heads 1..H-1,
+
+    ``dot(RoPE(q), RoPE(k)) / sqrt(head_dim)``.
+
+    The inherited padding keeps opposite-frame xyz in head 0's V payload, so
+    all heads still run in one FlashAttention call and the layer-wise coordinate
+    readout is unchanged apart from the score itself.
+    """
+
+    _USES_COSINE_MOTION_SCORE = False
+    _VARIANT_LABEL = "V13.2"
+
+    @torch.no_grad()
+    def attention_temperature_stats(self):
+        """Raw Q/K norms are data-dependent, so no finite bound is reported."""
+        return {
+            "qk_motion_head_count": 1.0,
+            "qk_norm_enabled": 0.0,
+            "motion_score_scale": self.scale,
+        }
+
+    def _encode_qk(self, query, key, query_angles, key_angles):
+        """Apply 3D RoPE without normalizing or rescaling any head."""
+        expected_query = (query.shape[0], self.num_heads, self.head_dim)
+        expected_key = (key.shape[0], self.num_heads, self.head_dim)
+        if tuple(query.shape) != expected_query or tuple(key.shape) != expected_key:
+            raise ValueError(
+                f"{self._VARIANT_LABEL} Q/K must have shape "
+                "(tokens, num_heads, head_dim)"
+            )
+        return (
+            self.rope.rotate(query.float(), query_angles[:, None, :, :]),
+            self.rope.rotate(key.float(), key_angles[:, None, :, :]),
+        )
+
+
 class GroupedGainBarrierCrossAttention(
     MaxSpeedBarrierLayerWeightedCrossAttention
 ):
@@ -2517,6 +2559,7 @@ __all__ = [
     "MaxSpeedBarrierLayerWeightedCrossAttention",
     "FinalFeatureBarrierCrossAttention",
     "CosineRoPELayerWeightedCrossAttention",
+    "RawQKRoPELayerWeightedCrossAttention",
     "FixedMotionGainLearnableMaxSpeedBarrierCrossAttention",
     "FixedMotionHeadRMSNorm",
     "GroupedHeadRMSNorm",

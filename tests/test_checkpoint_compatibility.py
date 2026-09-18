@@ -82,6 +82,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v13_1": (
         "SeedConditionedCosineRoPEVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v13_2": (
+        "RawQKRoPEVelocityGaussianBackend"
+    ),
 }
 
 _PROPOSAL_VARIANTS = {
@@ -174,6 +177,11 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v13_1": (
         "90b35c80dbc62899965c", "aa231a6fe40641f9f90a"
     ),
+    # V13.2 changes only parameter-free score arithmetic, so its checkpoint and
+    # optimizer schemas are exactly V13's.
+    "dynamic_2dgs_attention_velocity_v13_2": (
+        "080ce3c67577b3ee8594", "92153e92839df09bd2f3"
+    ),
 }
 
 
@@ -206,6 +214,8 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "FixedMotionHeadRMSNorm": "temporal",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention": "temporal",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend": "backends",
+    "RawQKRoPELayerWeightedCrossAttention": "temporal",
+    "RawQKRoPEVelocityGaussianBackend": "backends",
     "SeedConditionedCosineRoPEVelocityGaussianBackend": "backends",
     "ConsensusAttentionMotionMatcher": "attention_matching",
     "GaussianAttributeHead": "heads",
@@ -294,6 +304,7 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
             "dynamic_2dgs_attention_velocity_v12",
             "dynamic_2dgs_attention_velocity_v12_1",
             "dynamic_2dgs_attention_velocity_v13",
+            "dynamic_2dgs_attention_velocity_v13_2",
         ):
             with self.subTest(variant=variant):
                 config, _source = compose_fresh_config(

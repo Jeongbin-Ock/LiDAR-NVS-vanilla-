@@ -312,7 +312,8 @@ class ModelWrapper(LightningModule):
         """Log the active motion-attention scale without building probabilities.
 
         QK-Norm variants report their learned gain bounds. V13 reports its fixed
-        head-0 cosine temperature and bound.
+        head-0 cosine temperature and bound. V13.2 uses raw unnormalized Q/K on
+        every head and intentionally has no finite norm-derived bound.
         """
         temporal = getattr(
             getattr(self.p2g_model, "dynamic_backend", None), "temporal", None
