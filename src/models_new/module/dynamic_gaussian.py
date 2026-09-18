@@ -19,6 +19,7 @@ from .dynamic.temporal import (
     MaxSpeedBarrierLayerWeightedCrossAttention,
     ParallelBidirectionalCrossAttention,
     RawQKRoPELayerWeightedCrossAttention,
+    RMSNormRoPELayerWeightedCrossAttention,
     TimeConditionedParallelCrossAttention,
 )
 from .dynamic.heads import (
@@ -53,6 +54,7 @@ from .dynamic.backends import (
     PostAttentionProposalVelocityGaussianBackend,
     ProposalInitializedVelocityGaussianBackend,
     RawQKRoPEVelocityGaussianBackend,
+    RMSNormRoPEVelocityGaussianBackend,
     SeedConditionedBarrierVelocityGaussianBackend,
     SeedConditionedCosineRoPEVelocityGaussianBackend,
     SingleGaussianBarrierVelocityGaussianBackend,
@@ -99,6 +101,8 @@ __all__ = [
     "ProposalInitializedVelocityGaussianBackend",
     "RawQKRoPELayerWeightedCrossAttention",
     "RawQKRoPEVelocityGaussianBackend",
+    "RMSNormRoPELayerWeightedCrossAttention",
+    "RMSNormRoPEVelocityGaussianBackend",
     "SeedConditionedBarrierVelocityGaussianBackend",
     "SeedConditionedCosineRoPEVelocityGaussianBackend",
     "SeedConditionedGaussianAttributeHead",

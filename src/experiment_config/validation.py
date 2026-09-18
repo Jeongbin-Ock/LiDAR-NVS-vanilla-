@@ -25,6 +25,7 @@ from .definitions import (
     PHYSICAL_VELOCITY_VARIANTS,
     PROPOSAL_VELOCITY_VARIANTS,
     REFINED_PROPOSAL_VELOCITY_VARIANTS,
+    RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS,
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
     VARIANT_CONFIG_PATHS,
     WARPED_PROPOSAL_VELOCITY_VARIANTS,
@@ -602,8 +603,14 @@ def validate_experiment_config(config) -> None:
                 qk_norm = OmegaConf.select(
                     config, f"{temporal_path}.qk_norm", default=None
                 )
-                if qk_norm is None or bool(qk_norm):
-                    raise ValueError(f"{label} requires temporal.qk_norm=false")
+                expected_qk_norm = (
+                    variant in RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS
+                )
+                if qk_norm is None or bool(qk_norm) != expected_qk_norm:
+                    raise ValueError(
+                        f"{label} requires temporal.qk_norm="
+                        f"{str(expected_qk_norm).lower()}"
+                    )
                 if variant in COSINE_ROPE_MATCH_DYNAMIC_VARIANTS:
                     temperature_value = OmegaConf.select(
                         config, f"{temporal_path}.motion_temperature"

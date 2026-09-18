@@ -2187,6 +2187,7 @@ class CosineRoPELayerWeightedCrossAttention(
         if self.qk_norm:
             self._build_qk_norm(True)
         # V13/V13.1/V13.2 intentionally register no q_norm/k_norm modules.
+        # V13.3 instead builds the same per-layer affine RMSNorm pair as V11.4.
         self._build_transformer_layers(cfg)
         self.layer_logits = nn.Parameter(torch.zeros(self.n_layers))
 
@@ -2480,6 +2481,45 @@ class RawQKRoPELayerWeightedCrossAttention(
         )
 
 
+class RMSNormRoPELayerWeightedCrossAttention(
+    RawQKRoPELayerWeightedCrossAttention
+):
+    """V13.3: V11.4 Q/K RMSNorm with all-head 3D RoPE/FlashAttention.
+
+    Every layer RMS-normalizes each projected Q/K head with one affine gain
+    vector shared across heads, exactly as V11.4 did. Unlike V11.4, head 0 has
+    no distance-dependent barrier and receives the same metric 3D RoPE as the
+    remaining heads. The inherited packed V payload still carries key xyz only
+    on head 0, so one all-head FlashAttention call returns both refined
+    features and the coordinate expectation used by the learned layer mixture.
+    """
+
+    _REQUIRES_QK_NORM = True
+    _VARIANT_LABEL = "V13.3"
+
+    @torch.no_grad()
+    def attention_temperature_stats(self):
+        """Report the all-head RMS gains and finite content-logit bound."""
+        stats = {
+            "qk_motion_head_count": 1.0,
+            "qk_norm_enabled": 1.0,
+            "motion_score_scale": self.scale,
+        }
+        bound = 0.0
+        for layer in range(self.n_layers):
+            q_gain = self.q_norm[layer].weight.float()
+            k_gain = self.k_norm[layer].weight.float()
+            rms_q = float(q_gain.square().mean().sqrt())
+            rms_k = float(k_gain.square().mean().sqrt())
+            bound = max(
+                bound, rms_q * rms_k * self.head_dim * self.scale
+            )
+            stats[f"qk_gamma_q_layer{layer}"] = rms_q
+            stats[f"qk_gamma_k_layer{layer}"] = rms_k
+        stats["qk_max_logit_bound"] = bound
+        return stats
+
+
 class GroupedGainBarrierCrossAttention(
     MaxSpeedBarrierLayerWeightedCrossAttention
 ):
@@ -2560,6 +2600,7 @@ __all__ = [
     "FinalFeatureBarrierCrossAttention",
     "CosineRoPELayerWeightedCrossAttention",
     "RawQKRoPELayerWeightedCrossAttention",
+    "RMSNormRoPELayerWeightedCrossAttention",
     "FixedMotionGainLearnableMaxSpeedBarrierCrossAttention",
     "FixedMotionHeadRMSNorm",
     "GroupedHeadRMSNorm",

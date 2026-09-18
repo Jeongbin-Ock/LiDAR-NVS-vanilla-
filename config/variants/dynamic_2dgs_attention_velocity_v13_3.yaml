@@ -1,0 +1,105 @@
+# Dynamic 2DGS V13.3: V11.4 with all-head 3D RoPE/FlashAttention.
+#
+# The adaptive K={1,2,3} router, twelve-layer learned correspondence mixture,
+# initializer-conditioned velocity offset, and split velocity L2 are inherited
+# from V11.4. Its special head-0 linear max-speed barrier is removed: all twelve
+# heads now apply Q/K RMSNorm followed by the same metric 3D RoPE and use the
+# ordinary dot-product / sqrt(head_dim) score in one varlen FlashAttention call.
+# There is no distance bias or distance-dependent score term.
+#
+# The data and Gaussian position contracts follow V13.2: legacy nuscene.py,
+# train-only whole-scene holdouts for scene-0757/scene-1094, and a 0.4 m
+# per-axis tanh bound on learned Gaussian offsets.
+model:
+  variant: dynamic_2dgs_attention_velocity_v13_3
+
+device: [0]
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  anchor_mode: grid
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  agg_mlp:
+    hidden_dim: 1024
+    hidden_layers: 2
+    out_dim: 576
+  joint_refiner:
+    num_heads: 12
+    rope_base: 10.0
+    rope_position_scale: 4.0
+  grid_query:
+    count_mode: learned_gumbel
+    grad_balance: sqrt_k
+    learned_count:
+      K_max: 3
+      tau: 1.0
+      seed_mode: range_quantile
+      grad_balance_scope: token
+      budget:
+        enable: false
+      logging:
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+
+data:
+  mode: bbox
+  bbox_json_path: null
+  train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: rope_all_heads
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+    qk_norm: true
+    layer_scale_init: 0.1
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    small_motion:
+      enabled: false
+      weight: 0.005
+      epsilon_m: 0.001
+      warmup_steps: 300
+      ramp_steps: 1700
+
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+loss:
+  w_chamfer: 0.02
+  w_scale: 0.0

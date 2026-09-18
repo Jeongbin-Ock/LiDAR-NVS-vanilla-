@@ -13,6 +13,7 @@ from src.config_loader import (
     ATTENTION_VELOCITY_VARIANTS,
     BARRIER_MATCH_DYNAMIC_VARIANTS,
     COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
+    RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS,
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
     DYNAMIC_VARIANT,
     DYNAMIC_VARIANT_V1,
@@ -37,6 +38,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,
+    DYNAMIC_VARIANT_V13_3,
     LEGACY_VARIANT,
     PHYSICAL_VELOCITY_VARIANTS,
     assert_model_variant_implemented,
@@ -809,6 +811,92 @@ class ConfigLoaderTest(unittest.TestCase):
                 f"model.variant={DYNAMIC_VARIANT_V13_2}",
                 "dynamic_2dgs.temporal.motion_temperature=0.03",
             ]))
+
+    def test_v13_3_is_v11_4_with_all_head_rope_and_v13_2_data(self):
+        v11_4, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_4}",
+        ]))
+        v13_2, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V13_2}",
+        ]))
+        v13_3, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V13_3}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V13_3}.yaml", source)
+
+        temporal = v13_3.dynamic_2dgs.temporal
+        self.assertEqual(temporal.position_encoding, "rope_all_heads")
+        self.assertTrue(temporal.qk_norm)
+        self.assertEqual(temporal.implementation, "flash_varlen")
+        self.assertEqual(temporal.layers, 12)
+        self.assertEqual(temporal.num_heads, 12)
+        self.assertEqual(temporal.rope_base, 100.0)
+        self.assertAlmostEqual(
+            temporal.rope_position_scale, 2.0 * math.pi / 5.0
+        )
+        for removed in (
+            "barrier_speed_mps", "barrier_weight", "barrier_exponent",
+            "barrier_lambda_init", "match_chunk_size",
+            "distance_bias_speed_mps", "layer_weight_hidden_dim",
+            "motion_temperature",
+        ):
+            self.assertNotIn(removed, temporal)
+
+        # Everything outside the requested score/data/offset changes remains
+        # on V11.4's adaptive correspondence-initialized motion path.
+        self.assertEqual(v13_3.p2g.grid_query, v11_4.p2g.grid_query)
+        self.assertEqual(
+            v13_3.dynamic_2dgs.gaussian_head,
+            v11_4.dynamic_2dgs.gaussian_head,
+        )
+        self.assertEqual(
+            v13_3.dynamic_2dgs.motion, v11_4.dynamic_2dgs.motion
+        )
+        self.assertEqual(
+            v13_3.dynamic_2dgs.regularization,
+            v11_4.dynamic_2dgs.regularization,
+        )
+        self.assertEqual(v13_3.loss, v11_4.loss)
+
+        self.assertEqual(v13_3.p2g.head_offset_bound, 0.4)
+        self.assertEqual(
+            OmegaConf.to_container(v13_3.data, resolve=True),
+            OmegaConf.to_container(v13_2.data, resolve=True),
+        )
+        self.assertEqual(v13_3.data.dataset_name, "nuscenes")
+        self.assertEqual(v13_3.data.mode, "bbox")
+        self.assertIsNone(v13_3.data.bbox_json_path)
+        self.assertEqual(
+            list(v13_3.data.train_excluded_scenes),
+            ["scene-0757", "scene-1094"],
+        )
+
+        for group in (
+            ATTENTION_VELOCITY_VARIANTS,
+            ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
+            RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS,
+            PHYSICAL_VELOCITY_VARIANTS,
+            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V13_3, group)
+        self.assertNotIn(
+            DYNAMIC_VARIANT_V13_3, COSINE_ROPE_MATCH_DYNAMIC_VARIANTS
+        )
+        self.assertNotIn(DYNAMIC_VARIANT_V13_3, BARRIER_MATCH_DYNAMIC_VARIANTS)
+
+        for override, message in (
+            ("dynamic_2dgs.temporal.qk_norm=false", "qk_norm=true"),
+            (
+                "dynamic_2dgs.temporal.position_encoding=barrier_rope_split",
+                "rope_all_heads",
+            ),
+        ):
+            with self.subTest(override=override), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                compose_fresh_config(OmegaConf.from_dotlist([
+                    f"model.variant={DYNAMIC_VARIANT_V13_3}", override,
+                ]))
 
     def test_v11_3_head_is_seed_conditioned_at_three_channels_per_slot(self):
         """The router trunk's geometry input survives as head input columns."""

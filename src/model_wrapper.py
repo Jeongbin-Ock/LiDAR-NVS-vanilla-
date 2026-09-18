@@ -313,7 +313,8 @@ class ModelWrapper(LightningModule):
 
         QK-Norm variants report their learned gain bounds. V13 reports its fixed
         head-0 cosine temperature and bound. V13.2 uses raw unnormalized Q/K on
-        every head and intentionally has no finite norm-derived bound.
+        every head and intentionally has no finite norm-derived bound. V13.3
+        reports V11.4-style RMS gain bounds.
         """
         temporal = getattr(
             getattr(self.p2g_model, "dynamic_backend", None), "temporal", None

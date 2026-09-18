@@ -32,6 +32,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,
+    DYNAMIC_VARIANT_V13_3,
     compose_fresh_config,
 )
 from tests.test_checkpoint_compatibility import (
@@ -43,14 +44,14 @@ from tests.test_checkpoint_compatibility import (
 DIM = 144
 BASELINE_COMMIT = "a44d941a236948b1d9248936deaf2616d12de453"
 OUTPUT_FIELDS = ("position", "shs", "opacity", "scaling", "rotation", "velocity")
-# V11.2 through V13.2 were introduced after BASELINE_COMMIT. Their state
+# V11.2 through V13.3 were introduced after BASELINE_COMMIT. Their state
 # schemas are covered by test_checkpoint_compatibility; there is no historical
 # forward implementation at this commit to compare any of them against.
 _POST_BASELINE_VARIANTS = (
     DYNAMIC_VARIANT_V11_2, DYNAMIC_VARIANT_V11_3, DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V12, DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V13, DYNAMIC_VARIANT_V13_1,
-    DYNAMIC_VARIANT_V13_2,
+    DYNAMIC_VARIANT_V13_2, DYNAMIC_VARIANT_V13_3,
 )
 HISTORICAL_PARITY_VARIANTS = tuple(
     variant for variant in DYNAMIC_VARIANTS

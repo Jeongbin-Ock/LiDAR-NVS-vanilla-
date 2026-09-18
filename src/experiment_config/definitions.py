@@ -29,6 +29,7 @@ DYNAMIC_VARIANT_V12_1 = "dynamic_2dgs_attention_velocity_v12_1"
 DYNAMIC_VARIANT_V13 = "dynamic_2dgs_attention_velocity_v13"
 DYNAMIC_VARIANT_V13_1 = "dynamic_2dgs_attention_velocity_v13_1"
 DYNAMIC_VARIANT_V13_2 = "dynamic_2dgs_attention_velocity_v13_2"
+DYNAMIC_VARIANT_V13_3 = "dynamic_2dgs_attention_velocity_v13_3"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
 # explicit constant for each predecessor so checkpoint semantics stay exact.
 DYNAMIC_VARIANT = DYNAMIC_VARIANT_V7_2
@@ -56,6 +57,7 @@ ATTENTION_VELOCITY_VARIANTS = (
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,
+    DYNAMIC_VARIANT_V13_3,
 )
 # Variants whose backend owns the learned_gumbel K={1,2,3} grid Gaussian head,
 # and can therefore let a router decide how many Gaussians each token becomes.
@@ -73,6 +75,7 @@ ROUTER_CAPABLE_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_2,
+    DYNAMIC_VARIANT_V13_3,
 )
 # Historical public name retained for scripts and configs that imported it.
 # The tuple describes backend capability; the selected count mode still comes
@@ -85,12 +88,19 @@ COSINE_ROPE_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
 )
+# V13.3 restores V11.4's per-layer Q/K RMSNorm and applies 3D RoPE to every
+# head.
+RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS = (
+    DYNAMIC_VARIANT_V13_3,
+)
 # V13-family variants in this group use all-head 3D RoPE and one Flash call.
 # V13/V13.1 specialize head 0 with cosine temperature; V13.2 leaves every
-# head on the ordinary raw QK / sqrt(d) score.
+# head on the ordinary raw QK / sqrt(d) score; V13.3 RMS-normalizes every
+# head before the same score.
 ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS = (
     *COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
     DYNAMIC_VARIANT_V13_2,
+    DYNAMIC_VARIANT_V13_3,
 )
 # Shared single-Flash packed coordinate-readout family. Position encoding and
 # Q/K normalization remain variant-specific contracts inside this group.
@@ -141,6 +151,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,
+    DYNAMIC_VARIANT_V13_3,
 )
 
 # V3 and later share the physical-time contract. V4/V5 add attention-derived
@@ -167,6 +178,7 @@ PHYSICAL_VELOCITY_VARIANTS = (
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,
+    DYNAMIC_VARIANT_V13_3,
 )
 
 WARPED_PROPOSAL_VELOCITY_VARIANTS = (
@@ -257,6 +269,9 @@ VARIANT_CONFIG_PATHS = {
     ),
     DYNAMIC_VARIANT_V13_2: (
         REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13_2}.yaml"
+    ),
+    DYNAMIC_VARIANT_V13_3: (
+        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13_3}.yaml"
     ),
 }
 
