@@ -12,6 +12,13 @@ Evaluation protocol (1-second temporal NVS, per user spec):
 This reuses NuScenesNVSDataset's 1.0 s / 0.1 s window machinery: a window
 anchored at sweep (T-0.5)s = sweep (T*20 - 10) gives 11 frames at 0.1 s, input =
 the 2 endpoints, and the window midpoint = T s.
+
+The ``input_offsets_sec`` constructor arg makes the two input offsets
+configurable (default ``(-0.5, 0.5)`` = the protocol above): the window is
+resized to span exactly ``[T+before, T+after]`` so ``window_duration_sec`` /
+``timestamps_sec`` (derived from the window's own first/last raw timestamps)
+stay the true physical gap between whatever input frames are actually used --
+e.g. ``(-0.1, 0.2)`` feeds the model 0.9 s / 1.2 s for T=1 s.
 """
 from __future__ import annotations
 
@@ -49,7 +56,7 @@ TARGET_SECONDS = (1, 2, 3, 4)
 class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
     def __init__(self, cfg, split: str = "test",
                  sequences=LIDAR4D_SEQUENCES, target_seconds=TARGET_SECONDS,
-                 use_gt_boxes: bool = False):
+                 use_gt_boxes: bool = False, input_offsets_sec=(-0.5, 0.5)):
         # NOTE: we intentionally do NOT call super().__init__ -- the parent builds
         # an index over a whole nuScenes split. We replicate the small amount of
         # setup it needs and inject our own scene_frames / index.
@@ -60,9 +67,21 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
         self.verbose = bool(getattr(cfg, "verbose", False))
         # Table S6 sequences are trainval scenes.
         self.version = _cfg_get(cfg, "version", "v1.0-trainval")
-        self.window_us = int(_cfg_get(cfg, "window_us", MAX_WIN_US))
+
+        self.input_offsets_sec = (float(input_offsets_sec[0]), float(input_offsets_sec[1]))
+        before_s, after_s = self.input_offsets_sec
+        if not (before_s < 0.0 < after_s):
+            raise ValueError(
+                "input_offsets_sec must straddle the target time (before < 0 "
+                f"< after), got {self.input_offsets_sec}"
+            )
+        # Window spans exactly the two input offsets (default (-0.5, 0.5) =
+        # the original fixed 1.0 s protocol) so window_duration_sec /
+        # timestamps_sec -- derived below from this window's own first/last
+        # raw timestamps -- equal the *actual* input frame gap.
+        self.window_us = int(round((after_s - before_s) * 1_000_000))
         self.sample_gap_us = int(_cfg_get(cfg, "sample_gap_us", MIN_GAP_US))
-        self.gt_middle_count = 1  # only the midpoint (= target T) is evaluated
+        self.gt_middle_count = 1  # only the target T is evaluated
         self.pair_mode = "sweep"  # this test set uses fixed-anchor sweep windows
 
         self.sample_hop = max(1, self.sample_gap_us // NUSCENES_SWEEP_US)
@@ -71,6 +90,19 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
         self.window_sample_hops = [
             i * self.sample_hop for i in range(self.window_frame_count)
         ]
+
+        sweeps_per_sec_grid = 1_000_000 // NUSCENES_SWEEP_US
+        before_sweeps = int(round(before_s * sweeps_per_sec_grid))
+        target_hop_sweeps = -before_sweeps
+        if target_hop_sweeps % self.sample_hop != 0:
+            raise ValueError(
+                f"input_offsets_sec={self.input_offsets_sec} is not aligned "
+                f"to the {self.sample_gap_us / 1e6:g}s sampling grid"
+            )
+        # window index of the target frame T (offset 0) inside the resized
+        # window; used by _select_gt_indices instead of the old V//2 (only
+        # valid for symmetric offsets).
+        self._target_window_idx = target_hop_sweeps // self.sample_hop
 
         self.nusc = NuScenes(version=self.version, dataroot=cfg.dataroot, verbose=False)
 
@@ -98,10 +130,15 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
         elif self.verbose:
             print(f"[lidar4d-test] using GT boxes (mode={self.mode})")
 
-        # sweeps per second (1.0 s / 0.05 s = 20) and the half-second offset.
+        # sweeps per second (1.0 s / 0.05 s = 20) and the before-offset in sweeps.
         sweeps_per_sec = 1_000_000 // NUSCENES_SWEEP_US
-        half = sweeps_per_sec // 2  # 0.5 s in sweeps
-        max_anchor = max(target_seconds) * sweeps_per_sec - half
+        min_anchor = min(target_seconds) * sweeps_per_sec + before_sweeps
+        if min_anchor < 0:
+            raise ValueError(
+                f"input_offsets_sec={self.input_offsets_sec} runs before the "
+                f"start of the sequence for target second {min(target_seconds)}"
+            )
+        max_anchor = max(target_seconds) * sweeps_per_sec + before_sweeps
         need_len = max_anchor + self.window_hop + 1
 
         start_tokens = self._resolve_start_tokens([ts for _, ts in sequences])
@@ -130,7 +167,7 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
                       else "val" if sname in val_set else "other")
             self.scene_frames.append(frames)
             for T in target_seconds:
-                anchor = T * sweeps_per_sec - half  # window start = (T-0.5)s sweep
+                anchor = T * sweeps_per_sec + before_sweeps  # window start = (T+before_s)s sweep
                 self.index.append((s_idx, anchor))
                 self.index_meta.append({"seq_name": name, "target_s": int(T),
                                         "scene": sname, "nuscenes_split": nsplit})
@@ -175,14 +212,16 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
     # ── target frame inside the selected GT cameras ─────────────────────────
     @property
     def target_cam_index(self) -> int:
-        """gt cameras are [endpoint0, midpoint, endpoint1]; midpoint = target T."""
+        """gt cameras are [input-before, target, input-after]; target = T."""
         return 1
 
     def _select_gt_indices(self, window):
-        # endpoints (needed so input frames are a subset of the loaded GT frames)
-        # + the exact window midpoint, which is the novel target view at T.
+        # window endpoints (== the two input frames, since the window is
+        # sized to span exactly input_offsets_sec) + the target-T frame,
+        # which sits at self._target_window_idx (only == V//2 when the
+        # offsets are symmetric, e.g. the default (-0.5, 0.5)).
         V = len(window)
-        return [0, V // 2, V - 1]
+        return sorted({0, self._target_window_idx, V - 1})
 
     def target_boxes_ref(self, window_index: int):
         """GT boxes at the target-second frame, in the window reference frame.
@@ -193,8 +232,8 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
         by up to ~0.5 s (metres of drift). ``nusc.get_boxes`` instead linearly
         interpolates each annotation to the sweep timestamp, so the boxes line
         up with the target-time LiDAR. Returned as ``(M, 7)``
-        ``[x,y,z,w,l,h,yaw]`` in the ref frame = the (T-0.5)s endpoint sensor
-        frame (the same ref ``__getitem__`` builds its poses/points in).
+        ``[x,y,z,w,l,h,yaw]`` in the ref frame = the input-before endpoint
+        sensor frame (the same ref ``__getitem__`` builds its poses/points in).
         """
         scene_idx, anchor = self.index[window_index]
         window = self._sample_frames(scene_idx, anchor)

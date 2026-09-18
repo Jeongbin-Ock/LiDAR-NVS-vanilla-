@@ -16,7 +16,13 @@ Our depth is already in meters (g2p.scale_factor == 1.0), so GS-LiDAR's
 Usage:
   python test_lidar4d_nvs.py test.ckpt_path=/path/to/epoch=XX.ckpt \
       [data.mode=bbox] [out_dir=outputs/lidar4d_eval] [device='[4]'] \
-      [test.velocity_source=total|init|match|zero]
+      [test.velocity_source=total|init|match|zero] \
+      [test.input_offsets_sec='[-0.5,0.5]']
+
+  test.input_offsets_sec overrides the two input offsets relative to target T
+  (default [-0.5, 0.5], the protocol above). E.g. '[-0.1,0.2]' feeds the model
+  (T-0.1)s / (T+0.2)s instead of (T-0.5)s / (T+0.5)s -- must straddle T
+  (before < 0 < after) and land on the 0.1 s sampling grid.
 """
 from __future__ import annotations
 
@@ -298,7 +304,16 @@ def main(cfg, config_source="unspecified"):
     )
     backends = MetricBackends(lpips_net="alex")
 
-    dataset = LiDAR4DNuScenesTestDataset(cfg.data, split=cfg.data.test_split)
+    input_offsets_sec = OmegaConf.select(cfg, "test.input_offsets_sec", default=None)
+    input_offsets_sec = (
+        (-0.5, 0.5) if input_offsets_sec is None
+        else tuple(float(x) for x in input_offsets_sec)
+    )
+    print(f"[setup] input_offsets_sec={input_offsets_sec} "
+          f"(input = T{input_offsets_sec[0]:+g}s / T{input_offsets_sec[1]:+g}s)")
+    dataset = LiDAR4DNuScenesTestDataset(
+        cfg.data, split=cfg.data.test_split, input_offsets_sec=input_offsets_sec
+    )
     target_cam = dataset.target_cam_index
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0,
                         collate_fn=multiframe_collate_fn)
@@ -513,6 +528,7 @@ def main(cfg, config_source="unspecified"):
                    "max_depth_m": EVAL_MAX_DEPTH_M,
                    "gt_range_policy": "clamp_positive_returns",
                    "velocity_source": velocity_source,
+                   "input_offsets_sec": list(input_offsets_sec),
                    "vfov": list(vfov), "target_seconds": [1, 2, 3, 4]},
         "overall": overall,
         "per_nuscenes_split": per_split,
