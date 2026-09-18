@@ -257,6 +257,32 @@ def _resolve_bbox_json_path(cfg, split: str):
     return bbox_json_path.format(split=split)
 
 
+def filter_train_scene_names(
+    split_scene_names,
+    *,
+    split: str,
+    train_split: str,
+    train_excluded_scenes=(),
+):
+    """Apply configured whole-scene holdouts to the training split only."""
+    active = set(map(str, split_scene_names))
+    excluded = tuple(map(str, train_excluded_scenes or ()))
+    if len(excluded) != len(set(excluded)):
+        raise ValueError("data.train_excluded_scenes has duplicates")
+    if any(not name.strip() for name in excluded):
+        raise ValueError("data.train_excluded_scenes entries must be non-empty")
+    if split != train_split:
+        return active
+    unknown = set(excluded) - active
+    if unknown:
+        raise ValueError(
+            "Configured train exclusions are not in the train split: "
+            + ", ".join(sorted(unknown))
+        )
+    active.difference_update(excluded)
+    return active
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Dataset
 # ────────────────────────────────────────────────────────────────────────────
@@ -265,7 +291,8 @@ class NuScenesNVSDataset(Dataset):
     """
     Builds a 1-second LiDAR_TOP window at 0.1-second spacing from sample_data
     sweeps. Inputs are the two endpoints; loss GT uses both endpoints plus a
-    small subset of the middle sweep frames.
+    small subset of the middle sweep frames. ``data.train_excluded_scenes``
+    removes complete scenes from the train split only; val/test remain intact.
  
     Output keys
     -----------
@@ -306,6 +333,11 @@ class NuScenesNVSDataset(Dataset):
         #              box staleness; pair count is ~unchanged (+0.6% on val).
         self.pair_mode = str(_cfg_get(cfg, "pair_mode", "sweep"))
         self.pair_kf_stride = int(_cfg_get(cfg, "pair_kf_stride", 2))
+        self.train_excluded_scenes = tuple(
+            str(scene_name) for scene_name in (
+                _cfg_get(cfg, "train_excluded_scenes", ()) or ()
+            )
+        )
 
         self.nusc          = NuScenes(version=self.version,
                                       dataroot=cfg.dataroot, verbose=False)
@@ -327,11 +359,23 @@ class NuScenesNVSDataset(Dataset):
                 raise FileNotFoundError(f"BBox JSON not found: {bbox_json_path}")
  
         # ── Build scene index ───────────────────────────────────────────────
-        splits        = create_splits_scenes()
-        split_scenes  = splits[split]
+        splits = create_splits_scenes()
+        train_split = str(_cfg_get(cfg, "train_split", "train"))
+        split_scenes = filter_train_scene_names(
+            splits[split],
+            split=split,
+            train_split=train_split,
+            train_excluded_scenes=self.train_excluded_scenes,
+        )
         filtered      = [s for s in self.nusc.scene if s['name'] in split_scenes]
+        self.active_scene_names = tuple(scene["name"] for scene in filtered)
         if self.verbose:
             print(f"[{split}] {len(filtered)} scenes")
+            if split == train_split and self.train_excluded_scenes:
+                print(
+                    f"[{split}] held out scenes: "
+                    + ", ".join(self.train_excluded_scenes)
+                )
  
         # For each scene, follow the LIDAR_TOP sample_data chain.  This includes
         # non-keyframe sweeps, unlike sample['next'] which only visits keyframes.

@@ -242,6 +242,7 @@ _CHECKPOINT_PROTECTED_PATHS = (
     "data.image_width",
     "data.ring_to_elevation_deg",
     "data.ego_radius",
+    "data.train_excluded_scenes",
     "data.dynamic_window",
 )
 

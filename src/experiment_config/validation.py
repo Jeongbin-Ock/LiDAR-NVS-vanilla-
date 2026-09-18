@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 
 from .definitions import (
     BARRIER_MATCH_DYNAMIC_VARIANTS,
@@ -323,6 +323,23 @@ def _validate_dynamic_window_loader(config, variant: str) -> None:
         raise ValueError("train_excluded_scenes must not contain duplicates")
 
 
+def _validate_legacy_train_exclusions(config) -> None:
+    """Validate whole-scene holdouts consumed by the legacy nuscene.py loader."""
+    path = "data.train_excluded_scenes"
+    excluded = OmegaConf.select(config, path, default=None)
+    if excluded is None:
+        return
+    if str(OmegaConf.select(config, "data.dataset_name")) != "nuscenes":
+        raise ValueError(f"{path} is only supported by data.dataset_name=nuscenes")
+    if not isinstance(excluded, (list, tuple, ListConfig)):
+        raise ValueError(f"{path} must be a list of scene names")
+    names = [str(name) for name in excluded]
+    if any(not name.strip() for name in names):
+        raise ValueError(f"{path} entries must be non-empty")
+    if len(names) != len(set(names)):
+        raise ValueError(f"{path} must not contain duplicates")
+
+
 def validate_experiment_config(config) -> None:
     missing = [key for key in _REQUIRED_ROOTS if key not in config]
     if missing:
@@ -336,6 +353,7 @@ def validate_experiment_config(config) -> None:
         )
 
     _validate_dynamic_window_loader(config, variant)
+    _validate_legacy_train_exclusions(config)
 
     lora_enabled = _validate_utonia_lora_config(config)
 

@@ -17,7 +17,10 @@ from src.dataloader.nuscene_dynamic_lidar4d import (
     eligible_endpoint_indices,
     sample_target_indices,
 )
-from src.dataloader.nuscene import transform as legacy_transform
+from src.dataloader.nuscene import (
+    filter_train_scene_names,
+    transform as legacy_transform,
+)
 from src.models_new.module.m3_g2p import DynamicGausRender, GausRender
 from src.models_new.utonia.lora import build_xyzi_utonia_input
 from src.models_new.utils.loss import Loss
@@ -106,6 +109,43 @@ class DynamicWindowSamplingTest(unittest.TestCase):
             [first.random() for _ in range(4)],
             [second.random() for _ in range(4)],
         )
+
+
+class LegacySceneExclusionTest(unittest.TestCase):
+    def test_train_removes_complete_lidar4d_scenes(self):
+        active = filter_train_scene_names(
+            {"scene-0001", "scene-0757", "scene-1094"},
+            split="train",
+            train_split="train",
+            train_excluded_scenes=("scene-0757", "scene-1094"),
+        )
+        self.assertEqual(active, {"scene-0001"})
+
+    def test_val_keeps_the_same_scene_names(self):
+        scenes = {"scene-0757", "scene-1094", "scene-0002"}
+        active = filter_train_scene_names(
+            scenes,
+            split="val",
+            train_split="train",
+            train_excluded_scenes=("scene-0757", "scene-1094"),
+        )
+        self.assertEqual(active, scenes)
+
+    def test_duplicate_or_unknown_train_exclusion_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            filter_train_scene_names(
+                {"scene-0757"},
+                split="train",
+                train_split="train",
+                train_excluded_scenes=("scene-0757", "scene-0757"),
+            )
+        with self.assertRaisesRegex(ValueError, "not in the train split"):
+            filter_train_scene_names(
+                {"scene-0757"},
+                split="train",
+                train_split="train",
+                train_excluded_scenes=("scene-1094",),
+            )
 
 
 class DynamicCollateTest(unittest.TestCase):
