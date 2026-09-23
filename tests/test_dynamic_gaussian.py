@@ -278,8 +278,6 @@ class DynamicGaussianTest(unittest.TestCase):
             "w_depth_median": 0.5,
             "w_intensity": 0.2,
             "w_raydrop": 0.5,
-            "w_scale": 0.0,
-            "enable_lpips": False,
         }))
         maps = {
             "depth": torch.ones(1, 1, 2, 2),

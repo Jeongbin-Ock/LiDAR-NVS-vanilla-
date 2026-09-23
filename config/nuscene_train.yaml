@@ -17,9 +17,7 @@ loss:
   w_depth_median: 0.5   #                   + 0.5 * median-depth L1
   w_intensity: 0.2
   w_raydrop: 0.5
-  w_scale: 0.0           # scale loss는 계산/기록하지만 0.0이면 total에는 반영하지 않음
-  scale_max_m: 2.5       # softplus scale regularization threshold
-  enable_lpips: false
+  scale_max_m: 2.5       # loss_scale 진단(기록 전용, total에는 반영하지 않음)의 softplus scale threshold
 
 metrics:
   interval: 50           # train valid/raydrop + val/test *_valid 진단 metric 계산 주기

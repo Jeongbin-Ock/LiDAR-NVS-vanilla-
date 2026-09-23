@@ -130,7 +130,6 @@ dynamic_2dgs:
       warmup_steps: 0
       ramp_steps: 0
 
-# Keep the requested reconstruction/scale objective explicit in this variant.
+# Keep the requested reconstruction objective explicit in this variant.
 loss:
   w_chamfer: 0.02
-  w_scale: 0.0

@@ -243,9 +243,7 @@ class RaggedViewLossTest(unittest.TestCase):
             "w_depth_median": 0.5,
             "w_intensity": 0.2,
             "w_raydrop": 0.5,
-            "w_scale": 0.0,
             "scale_max_m": 2.5,
-            "enable_lpips": False,
         }))
 
     def test_view_padding_is_ignored_by_every_reconstruction_loss(self):

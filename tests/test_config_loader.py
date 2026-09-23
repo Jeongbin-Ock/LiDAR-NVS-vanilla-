@@ -67,6 +67,8 @@ class ConfigLoaderTest(unittest.TestCase):
             self.assertNotIn(removed, config.p2g)
         self.assertNotIn("small_motion", config.dynamic_2dgs.regularization)
         self.assertNotIn("budget", config.p2g.grid_query.learned_count)
+        self.assertNotIn("w_scale", config.loss)
+        self.assertNotIn("enable_lpips", config.loss)
         self.assertEqual(config.loss.scale_max_m, 2.5)
 
     def test_dynamic_overlay_and_cli_precedence(self):
@@ -955,7 +957,6 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(prior.offset_weight, 0.01)
         self.assertNotIn("weight", prior)
         self.assertEqual(config.loss.w_chamfer, 0.02)
-        self.assertEqual(config.loss.w_scale, 0.0)
         self.assertEqual(config.data.dataset_name, "nuscenes")
         self.assertEqual(config.data.mode, "bbox")
         self.assertNotIn("dynamic_window", config.data)
@@ -1299,6 +1300,8 @@ class ConfigLoaderTest(unittest.TestCase):
             "weight": 0.005, "epsilon_m": 0.001,
             "warmup_steps": 300, "ramp_steps": 1700,
         }
+        stored["loss"]["w_scale"] = overrides.get("w_scale", 0.0)
+        stored["loss"]["enable_lpips"] = overrides.get("enable_lpips", False)
         torch.save({"experiment_config": stored}, checkpoint)
         return checkpoint
 
@@ -1321,6 +1324,8 @@ class ConfigLoaderTest(unittest.TestCase):
         for overrides, message in (
             ({"budget": True}, "routing budget"),
             ({"small_motion": True}, "small-motion"),
+            ({"w_scale": 0.02}, "w_scale"),
+            ({"enable_lpips": True}, "enable_lpips"),
         ):
             with self.subTest(overrides=overrides):
                 with tempfile.TemporaryDirectory() as tmp:

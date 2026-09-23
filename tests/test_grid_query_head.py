@@ -451,26 +451,25 @@ def test_router_rejects_a_fixed_count_config():
         raise AssertionError("the router must not accept a fixed count")
 
 
-def test_scale_loss_is_computed_but_not_added_when_weight_is_zero():
+def test_scale_diagnostic_is_logged_but_never_enters_the_total():
     loss_fn = Loss(SimpleNamespace(
         w_chamfer=0.0,
         w_depth=0.0,
         w_depth_median=0.0,
         w_intensity=0.0,
         w_raydrop=0.0,
-        w_scale=0.0,
         scale_max_m=2.5,
-        enable_lpips=False,
     ))
-    raw_scaling = torch.tensor([[4.0, 4.0]], requires_grad=True)
-    raw_loss = loss_fn._scale_regularization(
+    assert not hasattr(loss_fn, "w_scale")
+    raw_scaling = torch.tensor([[4.0, 4.0], [0.0, 0.0]])
+    diagnostic = loss_fn._scale_diagnostic(
         [{"scaling": raw_scaling}], torch.zeros(())
     )
-    assert float(raw_loss) > 0.0
-
-    total = loss_fn.w_scale * raw_loss
-    total.backward()
-    torch.testing.assert_close(raw_scaling.grad, torch.zeros_like(raw_scaling))
+    # softplus(4) = 4.018 m > 2.5 m; the second Gaussian does not violate.
+    expected = (torch.log(torch.nn.functional.softplus(torch.tensor(4.0)))
+                - torch.log(torch.tensor(2.5))).square()
+    torch.testing.assert_close(diagnostic, expected)
+    assert float(loss_fn._scale_diagnostic(None, torch.zeros(()))) == 0.0
 
 
 def test_learned_count_eval_argmax_routes_exactly_to_k2_joint_head():

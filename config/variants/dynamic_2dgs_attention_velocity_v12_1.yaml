@@ -107,4 +107,3 @@ dynamic_2dgs:
 
 loss:
   w_chamfer: 0.02
-  w_scale: 0.0

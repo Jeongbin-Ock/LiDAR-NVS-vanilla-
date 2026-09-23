@@ -104,7 +104,6 @@ dynamic_2dgs:
       warmup_steps: 0
       ramp_steps: 0
 
-# Keep V11.4's reconstruction/scale objective unchanged.
+# Keep V11.4's reconstruction objective unchanged.
 loss:
   w_chamfer: 0.02
-  w_scale: 0.0

@@ -120,6 +120,21 @@ def _allow_disabled_retired_block(config, path: str, switch: str, what: str):
         )
 
 
+def _validate_retired_loss_options(config) -> None:
+    """Loss switches that were removed, accepted only at their inert value."""
+    w_scale = OmegaConf.select(config, "loss.w_scale", default=None)
+    if w_scale is not None and float(w_scale) != 0.0:
+        raise ValueError(
+            "loss.w_scale was removed: the scale term is only logged as "
+            "loss_scale and never enters the total; drop the key or set it to 0"
+        )
+    if bool(OmegaConf.select(config, "loss.enable_lpips", default=False)):
+        raise ValueError(
+            "loss.enable_lpips was removed; LPIPS is reported by "
+            "test_lidar4d_nvs.py"
+        )
+
+
 def _configured_count_mode(config) -> str:
     """The Gaussian-count contract ``p2g.grid_query`` asks for.
 
@@ -473,6 +488,7 @@ def validate_experiment_config(config) -> None:
 
     _validate_dynamic_window_loader(config, variant)
     _validate_legacy_train_exclusions(config)
+    _validate_retired_loss_options(config)
     _validate_utonia_lora_config(config, label)
 
     # Checkpoints embed the anchor mode from when a second one existed.
