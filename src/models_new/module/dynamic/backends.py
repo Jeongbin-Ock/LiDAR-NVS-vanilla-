@@ -637,11 +637,6 @@ class RouterCapableGaussianBackend(DynamicGaussianBackend):
             "k_logits": packing["k_logits"].detach(),
             "selected_k": packing["anchor_k"].detach(),
             "token_position_sensor": token_position_sensor.detach(),
-            "is_dynamic": torch.ones(
-                fused_feature.shape[0],
-                dtype=torch.bool,
-                device=fused_feature.device,
-            ),
         }
         return {
             "batch_gaussians": batch_gaussians,

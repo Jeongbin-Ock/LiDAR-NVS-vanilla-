@@ -535,42 +535,6 @@ class ModelWrapper(LightningModule):
                 batch_size=bin_batch_size,
             )
 
-        for group_index, group_name in enumerate(("bg", "fg")):
-            count = statistics["group_token_counts"][group_index]
-            log_value(
-                f"{group_name}/token_frac",
-                count / unit_count,
-            )
-            if not bool((count > 0).item()):
-                continue
-            group_batch_size = int(count.item())
-            log_value(
-                f"{group_name}/sampled_mean_k",
-                statistics["group_sampled_k_sums"][group_index] / count,
-                batch_size=group_batch_size,
-            )
-            log_value(
-                f"{group_name}/argmax_mean_k",
-                statistics["group_argmax_k_sums"][group_index] / count,
-                batch_size=group_batch_size,
-            )
-            for index in range(k_max):
-                k = index + 1
-                log_value(
-                    f"{group_name}/sampled_frac_k{k}",
-                    statistics["group_selected_counts"][
-                        group_index, index
-                    ] / count,
-                    batch_size=group_batch_size,
-                )
-                log_value(
-                    f"{group_name}/argmax_frac_k{k}",
-                    statistics["group_argmax_counts"][
-                        group_index, index
-                    ] / count,
-                    batch_size=group_batch_size,
-                )
-
     def _record_eval_summary(self, losses: dict, *, batch_idx: int, prefix: str) -> None:
         summary = {
             "epoch": int(getattr(self, "current_epoch", 0)),

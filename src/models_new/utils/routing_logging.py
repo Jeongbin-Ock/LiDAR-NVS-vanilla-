@@ -22,8 +22,7 @@ def routing_sufficient_statistics(
 ) -> dict[str, torch.Tensor]:
     """Summarize learned-count routing without retaining its autograd graph.
 
-    Produces the global K distribution and its breakdowns by token range
-    and by background/foreground group.
+    Produces the global K distribution and its breakdown by token range.
     """
     with torch.no_grad():
         logits = routing["k_logits"].detach().float()
@@ -59,13 +58,10 @@ def routing_sufficient_statistics(
         }
         edges = _validated_range_edges(range_edges_m)
         token_position_sensor = routing["token_position_sensor"].detach().float()
-        is_dynamic = routing["is_dynamic"].detach().bool()
         if tuple(token_position_sensor.shape) != (token_count, 3):
             raise ValueError(
                 "routing token_position_sensor must have shape (N, 3)"
             )
-        if tuple(is_dynamic.shape) != expected_shape:
-            raise ValueError("routing is_dynamic must align with k_logits")
 
         device = logits.device
         ranges = token_position_sensor.norm(dim=-1)
@@ -91,29 +87,10 @@ def routing_sufficient_statistics(
         range_argmax_k_sums = scatter_sum(
             argmax_k, range_index, num_range_bins
         )
-
-        # group 0 = background, group 1 = dynamic foreground.
-        group_index = is_dynamic.long()
-        group_token_counts = scatter_sum(ones, group_index, 2)
-        group_sampled_k_sums = scatter_sum(selected_k, group_index, 2)
-        group_argmax_k_sums = scatter_sum(argmax_k, group_index, 2)
-        group_selected_flat = group_index * k_max + selected_index
-        group_argmax_flat = group_index * k_max + (argmax_k - 1)
-        group_selected_counts = torch.bincount(
-            group_selected_flat, minlength=2 * k_max
-        ).to(dtype).reshape(2, k_max)
-        group_argmax_counts = torch.bincount(
-            group_argmax_flat, minlength=2 * k_max
-        ).to(dtype).reshape(2, k_max)
         statistics.update({
             "range_token_counts": range_token_counts,
             "range_sampled_k_sums": range_sampled_k_sums,
             "range_argmax_k_sums": range_argmax_k_sums,
-            "group_token_counts": group_token_counts,
-            "group_sampled_k_sums": group_sampled_k_sums,
-            "group_argmax_k_sums": group_argmax_k_sums,
-            "group_selected_counts": group_selected_counts,
-            "group_argmax_counts": group_argmax_counts,
         })
         return statistics
 
