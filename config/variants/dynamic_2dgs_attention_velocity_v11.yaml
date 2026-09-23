@@ -17,8 +17,6 @@
 model:
   variant: dynamic_2dgs_attention_velocity_v11
 
-device: [0]
-
 exp_name: ${model.variant}-bs-${train.batch_size}
 
 p2g:

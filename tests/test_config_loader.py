@@ -96,7 +96,7 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(temporal.num_heads, 12)
         self.assertEqual(config.p2g.grid_query.count_mode, "learned_gumbel")
         self.assertEqual(config.dynamic_2dgs.motion.residual_hidden_dim, 96)
-        self.assertEqual(list(config.device), [0])
+        self.assertEqual(list(config.device), [2, 3])
         self.assertIsNone(config.data.bbox_json_path)
         self.assertEqual(config.train.batch_size, 3)
         self.assertEqual(
