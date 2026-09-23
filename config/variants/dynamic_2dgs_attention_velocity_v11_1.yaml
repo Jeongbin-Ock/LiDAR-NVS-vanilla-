@@ -76,19 +76,13 @@ p2g:
   # router, so count_mode=learned_gumbel is rejected rather than ignored.
 
 data:
-  dataset_name: nuscenes_dynamic_lidar4d
-  window_us: 1000000
-  sample_gap_us: 100000
-  gt_middle_count: 3
-  pair_mode: keyframe
-  pair_kf_stride: 2
-  mode: nvs
+  # The legacy src/dataloader/nuscene.py loader: ``dataset_name: nuscenes`` and
+  # the fixed keyframe window are inherited from nuscene_train.yaml.
+  mode: bbox
   bbox_json_path: null
-  dynamic_window:
-    endpoint_min_sec: 0.2
-    endpoint_max_sec: 1.2
-    eval_seed: 42
-    train_excluded_scenes: [scene-0757, scene-1094]
+  # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
+  # train scenes. Hold out each complete scene to prevent overlap.
+  train_excluded_scenes: [scene-0757, scene-1094]
 
 dynamic_2dgs:
   temporal:

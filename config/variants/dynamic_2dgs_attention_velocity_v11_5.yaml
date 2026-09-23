@@ -1,8 +1,9 @@
 # Bbox-free Dynamic 2DGS V11.5.
 #
 # V11.4 with the adaptive-K router replaced by a fixed count of two Gaussians
-# per occupied token. Correspondence, the temporal stack, the offset head and
-# every loss weight are V11.4's without modification; what changes is:
+# per occupied token. Correspondence, the temporal stack, the offset head, the
+# data contract and every loss weight are V11.4's without modification; what
+# changes is:
 #
 # 1. Gaussian count. The K={1,2,3} Gumbel router is gone and every token emits
 #    exactly two Gaussians, seeded at its own range quantiles. This is V11.3's
@@ -12,12 +13,11 @@
 #        V11.3   -4 * relu(||dp|| / (v_max * |dt|) - 1)^2
 #        V11.5   -1 * relu(||dp|| / (v_max * |dt|) - 1)
 #
-# 2. p2g.head_offset_bound is set to 0.4 m per axis here, independent of the
-#    shared base config.
-#
-# 3. Data follows V12/V13: the legacy src/dataloader/nuscene.py loader with the
-#    complete train scenes scene-0757 and scene-1094 held out, rather than
-#    V11.4's random-duration nuscenes_dynamic_lidar4d loader.
+# The overlay also pins p2g.head_offset_bound to 0.4 m per axis and the legacy
+# src/dataloader/nuscene.py loader with the complete train scenes scene-0757
+# and scene-1094 held out. Both match V11.4's current overlay, but V11.4
+# checkpoints trained before they became its contract embed a 0.8 m bound and
+# no scene holdouts.
 #
 # Unchanged from V11.4:
 # - Position encoding is split across heads. Head 0 is the sole correspondence

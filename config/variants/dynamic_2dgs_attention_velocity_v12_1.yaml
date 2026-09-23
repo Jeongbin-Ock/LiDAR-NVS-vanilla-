@@ -60,7 +60,7 @@ p2g:
         interval: 20
         range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
 
-# Keep V12's pre-random-window loader. ``dataset_name: nuscenes`` is inherited
+# Keep V12's legacy fixed-window loader. ``dataset_name: nuscenes`` is inherited
 # from nuscene_train.yaml and selects src/dataloader/nuscene.py.
 data:
   mode: bbox

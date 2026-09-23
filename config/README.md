@@ -607,13 +607,13 @@ seed-conditioned trunk head included, so its parameter names and shapes are
 V11.3's exactly. Neither the hinge nor the offset bound is a parameter, so what
 keeps the two checkpoints apart is the embedded config.
 
-`p2g.head_offset_bound` is pinned to 0.4 m in the V11.5 overlay itself. The
-shared base now defaults to 0.4 m as well, but V11.4 checkpoints trained under
-the earlier 0.8 m default embed that value. The data contract is V12's rather
-than V11.4's random-duration loader:
-the inherited `dataset_name: nuscenes` (legacy `nuscene.py`), `data.mode: bbox`,
-`data.bbox_json_path: null`, and train-only whole-scene holdouts
-`data.train_excluded_scenes: [scene-0757, scene-1094]`.
+The V11.5 overlay also pins `p2g.head_offset_bound` to 0.4 m and the data
+contract: the inherited `dataset_name: nuscenes` (legacy `nuscene.py`),
+`data.mode: bbox`, `data.bbox_json_path: null`, and train-only whole-scene
+holdouts `data.train_excluded_scenes: [scene-0757, scene-1094]`. Both equal what
+V11.4's overlay composes to now, so a fresh V11.4 and V11.5 differ only in
+`p2g.grid_query`. V11.4 checkpoints trained earlier embed a 0.8 m bound and no
+scene holdouts.
 
 Like V11.3, V11.5 is not router-capable, so `count_mode=learned_gumbel` is
 rejected. On the smoke pair at 12 layers and `batch_size=2` it emits 58,686
@@ -635,12 +635,11 @@ not the speed used as a fixed hyperparameter after construction. The learned
 `attention_temperature_stats` logs `barrier_v_0`, the current learned value as
 `barrier_speed_mps`, and the initialization as `barrier_speed_initial_mps`.
 
-V12 deliberately uses the earlier `src/dataloader/nuscene.py` contract rather
-than V11.4's new random-duration loader. Its overlay inherits
-`data.dataset_name: nuscenes` and the fixed keyframe/window settings from
-`nuscene_train.yaml`, while setting `data.mode: bbox` and
-`data.bbox_json_path: null` exactly as the previous V11.4 overlay did. V11.5,
-V12, V12.1, V13, V13.1, V13.2, V13.3 and V13.4 additionally set
+V12 uses the legacy `src/dataloader/nuscene.py` contract, as every V11-V13
+overlay now does. Its overlay inherits `data.dataset_name: nuscenes` and the
+fixed keyframe/window settings from `nuscene_train.yaml`, while setting
+`data.mode: bbox` and `data.bbox_json_path: null`. V11, V11.1-V11.5, V12,
+V12.1, V13, V13.1, V13.2, V13.3 and V13.4 additionally set
 `data.train_excluded_scenes: [scene-0757, scene-1094]`; `nuscene.py` removes
 those complete scenes only when constructing the train split. Validation and
 test scenes remain unchanged. The key is checkpoint-protected sampling state,
@@ -927,24 +926,25 @@ fixed-count seed set, so the two contracts cannot be mixed.
 Both counts are structural: `p2g` is a checkpoint-protected root, so a resume or
 evaluation cannot change how many Gaussians a checkpoint's tokens produce.
 
-## V11 random-duration windows (`data.dataset_name=nuscenes_dynamic_lidar4d`)
+## Random-duration windows (`data.dataset_name=nuscenes_dynamic_lidar4d`)
 
-Fresh V11, V11.1, V11.2, V11.3, and V11.4 runs use
-`src/dataloader/nuscene_dynamic_lidar4d.py` instead of the legacy bbox-compatible
-`nuscene.py`. V11.5 deliberately does not: it keeps `nuscene.py` with V12's
-scene holdouts. The new loader retains the old flat index's keyframe start sweep
-and 0.5-second sliding stride, but samples the actual second endpoint uniformly
-from the available 0.1-second-grid sweeps whose measured timestamp is between
-0.2 and 1.2 seconds after that start:
+`src/dataloader/nuscene_dynamic_lidar4d.py` is an opt-in alternative to the
+legacy bbox-compatible `nuscene.py` for the barrier-family variants (V11-V11.5,
+V12, V12.1). No shipped overlay selects it: V11-V11.4 used it briefly and have
+returned to `nuscene.py` with the scene holdouts, like every later variant. The
+loader retains the old flat index's keyframe start sweep and 0.5-second sliding
+stride, but samples the actual second endpoint uniformly from the available
+0.1-second-grid sweeps whose measured timestamp is between 0.2 and 1.2 seconds
+after that start. Selecting it replaces the data block; its holdouts live under
+`dynamic_window`, so the legacy `data.train_excluded_scenes` has to be cleared.
+`pair_mode: keyframe`, `sample_gap_us: 100000` and `gt_middle_count: 3` are
+inherited from `nuscene_train.yaml`:
 
 ```yaml
 data:
   dataset_name: nuscenes_dynamic_lidar4d
-  sample_gap_us: 100000
-  gt_middle_count: 3
-  pair_mode: keyframe
-  pair_kf_stride: 2
   mode: nvs
+  train_excluded_scenes: null
   dynamic_window:
     endpoint_min_sec: 0.2
     endpoint_max_sec: 1.2
@@ -1041,16 +1041,16 @@ For `nuscenes_dynamic_lidar4d`, that stored pair is a **nominal address only**: 
 selects the same legacy keyframe start anchor, while the actual endpoint comes
 from the stable validation draw described above. This lets the existing
 180-dynamic/20-static manifest retain the same start population even though
-V11's physical interval is now variable.
+the physical interval varies under that loader.
 
 `enable: false` restores full-split validation. `train`/`test` dataloaders are
 untouched.
 
-Pre-V11 Dynamic overlays retain the shared bbox-compatible loader. The V11
-family selects `data.mode=nvs` and the minimal dynamic loader above. Both loader
-contracts expose relative `timestamps_sec` plus `window_duration_sec`; V3 and
-later use those physical values for time conditioning and transport. Normalized
-endpoint timestamps remain only as a small historical backend-API field.
+Every Dynamic overlay uses the shared bbox-compatible loader; the minimal
+dynamic loader above (`data.mode=nvs`) is opt-in. Both loader contracts expose
+relative `timestamps_sec` plus `window_duration_sec`; V3 and later use those
+physical values for time conditioning and transport. Normalized endpoint
+timestamps remain only as a small historical backend-API field.
 
 Only keys consumed by the implementation remain in each dynamic overlay.
 Attention geometry uses the shared Utonia-compatible `Rotary3D`; V3 and later

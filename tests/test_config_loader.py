@@ -52,6 +52,19 @@ from src.config_loader import (
     resolve_main_config,
 )
 
+# No shipped overlay selects the random-duration loader any more; this opts a
+# barrier-family overlay into it. Its holdouts live under dynamic_window, so the
+# legacy loader's data.train_excluded_scenes has to be cleared.
+DYNAMIC_LOADER_CLI = (
+    "data.dataset_name=nuscenes_dynamic_lidar4d",
+    "data.mode=nvs",
+    "data.train_excluded_scenes=null",
+    "data.dynamic_window.endpoint_min_sec=0.2",
+    "data.dynamic_window.endpoint_max_sec=1.2",
+    "data.dynamic_window.eval_seed=42",
+    "data.dynamic_window.train_excluded_scenes=[scene-0757,scene-1094]",
+)
+
 
 class ConfigLoaderTest(unittest.TestCase):
     def test_default_compose_is_current_dynamic(self):
@@ -567,8 +580,8 @@ class ConfigLoaderTest(unittest.TestCase):
                     f"dynamic_2dgs.temporal.barrier_exponent={value}",
                 ]))
 
-    def test_v11_5_is_v11_4_with_fixed_k2_and_legacy_scene_holdouts(self):
-        """V11.4's model with V11.3's count, a 0.4 m bound and V12's data."""
+    def test_v11_5_is_v11_4_with_only_a_fixed_k2_count(self):
+        """V11.4 with V11.3's count; the bound and data are V11.4's own."""
         v11_3, _source = compose_fresh_config(OmegaConf.from_dotlist([
             f"model.variant={DYNAMIC_VARIANT_V11_3}",
         ]))
@@ -588,12 +601,11 @@ class ConfigLoaderTest(unittest.TestCase):
         left["model"]["variant"] = right["model"]["variant"]
         left_count = left["p2g"].pop("grid_query")
         right_count = right["p2g"].pop("grid_query")
-        left.pop("data")
-        right_data = right.pop("data")
-        # The bound is explicit in V11.5 rather than inherited from the base.
-        self.assertEqual(right["p2g"].pop("head_offset_bound"), 0.4)
-        left["p2g"].pop("head_offset_bound")
+        # V11.5 pins the 0.4 m bound and the legacy loader with scene holdouts
+        # in its own overlay; both equal what V11.4 composes to.
+        self.assertEqual(right["p2g"]["head_offset_bound"], 0.4)
         self.assertEqual(left, right)
+        right_data = right["data"]
 
         self.assertEqual(left_count["count_mode"], "learned_gumbel")
         self.assertEqual(
@@ -637,8 +649,8 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertIn("V11.5", str(raised.exception))
         self.assertIn("count router", str(raised.exception))
 
-    def test_v12_keeps_v11_4_model_but_uses_the_legacy_loader(self):
-        """Only learnable speed and the requested data loader differ."""
+    def test_v12_composes_to_v11_4_and_only_learns_the_speed(self):
+        """The learnable speed is a backend change; the config is V11.4's."""
         v11_4, _source = compose_fresh_config(OmegaConf.from_dotlist([
             f"model.variant={DYNAMIC_VARIANT_V11_4}",
         ]))
@@ -650,11 +662,9 @@ class ConfigLoaderTest(unittest.TestCase):
         left = OmegaConf.to_container(v11_4, resolve=False)
         right = OmegaConf.to_container(v12, resolve=False)
         left["model"]["variant"] = right["model"]["variant"]
-        left_data = left.pop("data")
-        right_data = right.pop("data")
         self.assertEqual(left, right)
 
-        self.assertEqual(left_data["dataset_name"], "nuscenes_dynamic_lidar4d")
+        right_data = right["data"]
         self.assertEqual(right_data["dataset_name"], "nuscenes")
         self.assertEqual(right_data["mode"], "bbox")
         self.assertIsNone(right_data["bbox_json_path"])
@@ -663,11 +673,6 @@ class ConfigLoaderTest(unittest.TestCase):
             list(right_data["train_excluded_scenes"]),
             ["scene-0757", "scene-1094"],
         )
-        for key in (
-            "window_us", "sample_gap_us", "gt_middle_count", "pair_mode",
-            "pair_kf_stride",
-        ):
-            self.assertEqual(left_data[key], right_data[key])
 
         temporal = v12.dynamic_2dgs.temporal
         self.assertEqual(temporal.barrier_speed_mps, 30.0)
@@ -1241,14 +1246,17 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertNotIn("weight", prior)
         self.assertEqual(config.loss.w_chamfer, 0.02)
         self.assertEqual(config.loss.w_scale, 0.0)
-        self.assertEqual(config.data.dataset_name, "nuscenes_dynamic_lidar4d")
-        self.assertEqual(config.data.mode, "nvs")
-        self.assertAlmostEqual(config.data.dynamic_window.endpoint_min_sec, 0.2)
-        self.assertAlmostEqual(config.data.dynamic_window.endpoint_max_sec, 1.2)
+        self.assertEqual(config.data.dataset_name, "nuscenes")
+        self.assertEqual(config.data.mode, "bbox")
+        self.assertNotIn("dynamic_window", config.data)
+        self.assertEqual(
+            list(config.data.train_excluded_scenes),
+            ["scene-0757", "scene-1094"],
+        )
         self.assertEqual(config.data.gt_middle_count, 3)
         self.assertIn(f"{DYNAMIC_VARIANT_V11}.yaml", source)
 
-    def test_every_v11_family_config_selects_the_dynamic_loader(self):
+    def test_every_v11_family_config_uses_the_legacy_loader_with_holdouts(self):
         for variant in (
             DYNAMIC_VARIANT_V11,
             DYNAMIC_VARIANT_V11_1,
@@ -1260,24 +1268,31 @@ class ConfigLoaderTest(unittest.TestCase):
                 config, _source = compose_fresh_config(
                     OmegaConf.from_dotlist([f"model.variant={variant}"])
                 )
-                self.assertEqual(
-                    config.data.dataset_name, "nuscenes_dynamic_lidar4d"
-                )
+                self.assertEqual(config.data.dataset_name, "nuscenes")
                 self.assertEqual(config.data.pair_mode, "keyframe")
                 self.assertEqual(config.data.sample_gap_us, 100_000)
                 self.assertEqual(config.data.gt_middle_count, 3)
-                self.assertEqual(config.data.mode, "nvs")
+                self.assertEqual(config.data.mode, "bbox")
                 self.assertIsNone(config.data.bbox_json_path)
-                self.assertAlmostEqual(
-                    config.data.dynamic_window.endpoint_min_sec, 0.2
-                )
-                self.assertAlmostEqual(
-                    config.data.dynamic_window.endpoint_max_sec, 1.2
-                )
+                self.assertNotIn("dynamic_window", config.data)
                 self.assertEqual(
-                    list(config.data.dynamic_window.train_excluded_scenes),
+                    list(config.data.train_excluded_scenes),
                     ["scene-0757", "scene-1094"],
                 )
+
+    def test_the_dynamic_loader_is_still_selectable_from_the_cli(self):
+        config, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_4}", *DYNAMIC_LOADER_CLI,
+        ]))
+        self.assertEqual(config.data.dataset_name, "nuscenes_dynamic_lidar4d")
+        self.assertEqual(config.data.mode, "nvs")
+        self.assertIsNone(config.data.train_excluded_scenes)
+        self.assertAlmostEqual(config.data.dynamic_window.endpoint_min_sec, 0.2)
+        self.assertAlmostEqual(config.data.dynamic_window.endpoint_max_sec, 1.2)
+        self.assertEqual(
+            list(config.data.dynamic_window.train_excluded_scenes),
+            ["scene-0757", "scene-1094"],
+        )
 
     def test_v11_dynamic_loader_rejects_invalid_sampling_contracts(self):
         invalid = (
@@ -1295,7 +1310,9 @@ class ConfigLoaderTest(unittest.TestCase):
                 ValueError, message
             ):
                 compose_fresh_config(OmegaConf.from_dotlist([
-                    f"model.variant={DYNAMIC_VARIANT_V11}", override,
+                    f"model.variant={DYNAMIC_VARIANT_V11}",
+                    *DYNAMIC_LOADER_CLI,
+                    override,
                 ]))
 
     def test_v11_validates_barrier_and_rope_contract(self):
@@ -1665,33 +1682,35 @@ class ConfigLoaderTest(unittest.TestCase):
             self.assertEqual(config.train.batch_size, 9)
             self.assertIn("embedded checkpoint config", source)
 
-    def test_historical_v11_checkpoint_keeps_its_fixed_loader_contract(self):
+    def test_historical_v11_checkpoint_keeps_its_unfiltered_train_split(self):
         with tempfile.TemporaryDirectory() as tmp:
             checkpoint = Path(tmp) / "epoch=1.ckpt"
             stored, _ = compose_fresh_config(OmegaConf.from_dotlist([
                 f"model.variant={DYNAMIC_VARIANT_V11}",
             ]))
             stored = OmegaConf.to_container(stored, resolve=True)
-            stored["data"]["dataset_name"] = "nuscenes"
-            stored["data"]["mode"] = "bbox"
-            stored["data"].pop("dynamic_window")
+            # Saved before the overlay gained scene holdouts.
+            stored["data"].pop("train_excluded_scenes")
             torch.save({"experiment_config": stored}, checkpoint)
 
             config, _source = load_checkpoint_config(checkpoint)
 
             self.assertEqual(config.data.dataset_name, "nuscenes")
+            self.assertNotIn("train_excluded_scenes", config.data)
             self.assertNotIn("dynamic_window", config.data)
 
     def test_dynamic_loader_sampling_contract_is_immutable_on_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             checkpoint = Path(tmp) / "epoch=1.ckpt"
             stored, _ = compose_fresh_config(OmegaConf.from_dotlist([
-                f"model.variant={DYNAMIC_VARIANT_V11}",
+                f"model.variant={DYNAMIC_VARIANT_V11}", *DYNAMIC_LOADER_CLI,
             ]))
             torch.save(
                 {"experiment_config": OmegaConf.to_container(stored, resolve=True)},
                 checkpoint,
             )
+            config, _source = load_checkpoint_config(checkpoint)
+            self.assertEqual(config.data.dataset_name, "nuscenes_dynamic_lidar4d")
             cli = OmegaConf.from_dotlist([
                 f"train.ckpt_path={checkpoint}",
                 "data.dynamic_window.endpoint_max_sec=0.8",
