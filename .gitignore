@@ -19,6 +19,8 @@ lightning_logs/
 .cache/
 *.txt
 tools/
+GS_exp/
+
 
 # Outputs / Logs / Visualization
 outputs/
