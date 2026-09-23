@@ -28,6 +28,7 @@ Every variant's velocity head is `EmbeddedInitVelocityHead`.
 | `attention_velocity_v11_6` | `SeedConditionedBarrierVelocityGaussianBackend` | linear-hinge `MaxSpeedBarrierLayerWeightedCrossAttention` | fixed K=3, range-quantile seeds |
 | `attention_velocity_v12` | `LearnableMaxSpeedBarrierVelocityGaussianBackend` | `LearnableMaxSpeedBarrierLayerWeightedCrossAttention`, one global `v_max=exp(v_0)` | learned K=1..3 by default; fixed available by config |
 | `attention_velocity_v12_1` | `FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend` | learned `v_max`/lambda barrier, fixed head-0 gain, learned heads-1..11 gain | learned K=1..3 by default; fixed available by config |
+| `attention_velocity_v12_2` | `LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend` | `LayerwiseSoftplusMaxSpeedBarrierCrossAttention`, one `v_max_l=softplus(v_raw_l)` per layer | learned K=1..3 by default; fixed available by config |
 | `attention_velocity_v13` | `CosineRoPEVelocityGaussianBackend` | `CosineRoPELayerWeightedCrossAttention`, all-head RoPE/Flash, L2 head 0 at temperature 0.03 | learned K=1..3, range-quantile seeds |
 | `attention_velocity_v13_1` | `SeedConditionedCosineRoPEVelocityGaussianBackend` | V13 cosine/RoPE matcher | fixed K=2, range-quantile seeds |
 | `attention_velocity_v13_2` | `RawQKRoPEVelocityGaussianBackend` | all-head RoPE/Flash with raw QK / sqrt(d) on every head | learned K=1..3, range-quantile seeds |

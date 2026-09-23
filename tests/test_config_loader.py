@@ -26,6 +26,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V11_6,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
+    DYNAMIC_VARIANT_V12_2,
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,
@@ -38,8 +39,9 @@ from src.config_loader import (
 )
 
 # Opts a barrier-family overlay into the random-duration loader, the contract
-# the V11.6 overlay ships with. Its holdouts live under dynamic_window, so the
-# legacy loader's data.train_excluded_scenes has to be cleared.
+# the V11.6 and V12.2 overlays ship with. Its holdouts live under
+# dynamic_window, so the legacy loader's data.train_excluded_scenes has to be
+# cleared.
 DYNAMIC_LOADER_CLI = (
     "data.dataset_name=nuscenes_dynamic_lidar4d",
     "data.mode=nvs",
@@ -466,6 +468,54 @@ class ConfigLoaderTest(unittest.TestCase):
             compose_fresh_config(OmegaConf.from_dotlist([
                 f"model.variant={DYNAMIC_VARIANT_V12_1}",
                 "data.train_excluded_scenes=[scene-0757,scene-0757]",
+            ]))
+
+    def test_v12_2_is_v12_on_the_dynamic_loader(self):
+        """Per-layer softplus speeds are a backend change; config is V12's."""
+        # V12 opted into the loader V11.6 ships with, exactly as the V11.4
+        # dynamic-loader run was launched.
+        v12_dynamic, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V12}", *DYNAMIC_LOADER_CLI,
+        ]))
+        v11_6, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_6}",
+        ]))
+        v12_2, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V12_2}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V12_2}.yaml", source)
+
+        left = OmegaConf.to_container(v12_dynamic, resolve=False)
+        right = OmegaConf.to_container(v12_2, resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        # The overlay pins the shared 0.4 m bound V12 inherits.
+        self.assertEqual(right["p2g"]["head_offset_bound"], 0.4)
+        self.assertEqual(left, right)
+        self.assertEqual(
+            OmegaConf.to_container(v12_2.data, resolve=True),
+            OmegaConf.to_container(v11_6.data, resolve=True),
+        )
+        self.assertEqual(v12_2.data.dataset_name, "nuscenes_dynamic_lidar4d")
+        self.assertEqual(v12_2.data.mode, "nvs")
+        self.assertIsNone(v12_2.data.train_excluded_scenes)
+
+        temporal = v12_2.dynamic_2dgs.temporal
+        self.assertEqual(temporal.layers, 12)
+        self.assertEqual(temporal.barrier_speed_mps, 30.0)
+        self.assertEqual(temporal.barrier_weight, 1.0)
+        self.assertEqual(temporal.barrier_exponent, 1)
+        self.assertEqual(v12_2.p2g.grid_query.count_mode, "learned_gumbel")
+        for group in (
+            BARRIER_MATCH_DYNAMIC_VARIANTS,
+            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V12_2, group)
+
+        # V12.2 has no learned lambda to initialize.
+        with self.assertRaisesRegex(ValueError, "barrier_lambda_init"):
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V12_2}",
+                "dynamic_2dgs.temporal.barrier_lambda_init=1.0",
             ]))
 
     def test_v13_uses_all_head_rope_cosine_and_adaptive_range_quantiles(self):

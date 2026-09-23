@@ -15,6 +15,7 @@ DYNAMIC_VARIANT_V11_5 = "dynamic_2dgs_attention_velocity_v11_5"
 DYNAMIC_VARIANT_V11_6 = "dynamic_2dgs_attention_velocity_v11_6"
 DYNAMIC_VARIANT_V12 = "dynamic_2dgs_attention_velocity_v12"
 DYNAMIC_VARIANT_V12_1 = "dynamic_2dgs_attention_velocity_v12_1"
+DYNAMIC_VARIANT_V12_2 = "dynamic_2dgs_attention_velocity_v12_2"
 DYNAMIC_VARIANT_V13 = "dynamic_2dgs_attention_velocity_v13"
 DYNAMIC_VARIANT_V13_1 = "dynamic_2dgs_attention_velocity_v13_1"
 DYNAMIC_VARIANT_V13_2 = "dynamic_2dgs_attention_velocity_v13_2"
@@ -41,6 +42,7 @@ ROUTER_CAPABLE_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
+    DYNAMIC_VARIANT_V12_2,
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_2,
     DYNAMIC_VARIANT_V13_3,
@@ -90,6 +92,8 @@ FLASH_ROPE_MATCH_DYNAMIC_VARIANTS = (
 # global max-speed radius in log space from an initial 30 m/s.
 # V12.1 keeps V12's learned radius, fixes head 0's RMS gain to one, and lets
 # heads 1..H-1 share a separate learned gain.
+# V12.2 is V12 with one learned radius per layer, each softplus(v_raw_l) from an
+# initial 30 m/s, trained on the random-duration loader.
 # V11.2 gives head 0 RoPE too and moves the barrier to a single post-refinement
 # readout head with its own gain, which is what lets its layer stack run
 # entirely on FlashAttention.
@@ -103,6 +107,7 @@ BARRIER_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11_6,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
+    DYNAMIC_VARIANT_V12_2,
 )
 DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11,
@@ -114,6 +119,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11_6,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
+    DYNAMIC_VARIANT_V12_2,
     DYNAMIC_VARIANT_V13,
     DYNAMIC_VARIANT_V13_1,
     DYNAMIC_VARIANT_V13_2,

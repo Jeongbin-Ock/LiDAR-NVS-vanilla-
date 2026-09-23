@@ -51,6 +51,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v12_1": (
         "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v12_2": (
+        "LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend"
+    ),
     "dynamic_2dgs_attention_velocity_v13": (
         "CosineRoPEVelocityGaussianBackend"
     ),
@@ -118,6 +121,11 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v12_1": (
         "018ea06086c89eddba66", "7b477ca6c13d6632021a"
     ),
+    # V12.2 registers one per-layer v_raw vector where V12 registers its
+    # scalar v_0, in the same position; every other parameter is V12's.
+    "dynamic_2dgs_attention_velocity_v12_2": (
+        "c2063628e8f8f09a5d5e", "e6eb26eaef8f1c0b77d3"
+    ),
     # V13 removes every temporal QK gain and both barrier scalars. V13.1 keeps
     # that temporal schema but replaces the adaptive router with the fixed K=2
     # seed-conditioned decoder.
@@ -175,6 +183,8 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "FixedMotionGainLearnableMaxSpeedBarrierCrossAttention": "temporal",
     "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend": "backends",
     "FixedMotionHeadRMSNorm": "temporal",
+    "LayerwiseSoftplusMaxSpeedBarrierCrossAttention": "temporal",
+    "LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend": "backends",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention": "temporal",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend": "backends",
     "RawQKRoPELayerWeightedCrossAttention": "temporal",
@@ -280,6 +290,29 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
         self.assertEqual(backend.temporal.barrier_exponent, 1)
         self.assertEqual(backend.temporal.barrier_weight, 1.0)
         self.assertEqual(backend.temporal.barrier_speed_mps, 30.0)
+
+    def test_v12_2_swaps_v12_v0_for_one_softplus_speed_per_layer(self):
+        v12 = _build_backend("dynamic_2dgs_attention_velocity_v12")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v12_2")
+        self.assertIs(
+            type(backend),
+            _DYNAMIC.LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend,
+        )
+        self.assertTrue(backend.adaptive_count)
+        self.assertEqual(
+            [name for name, _ in backend.named_parameters()],
+            [
+                "temporal.v_raw" if name == "temporal.v_0" else name
+                for name, _ in v12.named_parameters()
+            ],
+        )
+        self.assertEqual(tuple(backend.temporal.v_raw.shape), (12,))
+        torch.testing.assert_close(
+            backend.temporal.v_max.detach(), torch.full((12,), 30.0)
+        )
+        self.assertAlmostEqual(backend.offset_bound, 0.4)
+        self.assertEqual(backend.temporal.barrier_exponent, 1)
+        self.assertEqual(backend.temporal.barrier_weight, 1.0)
 
     def test_single_seed_slot_preserves_the_legacy_geometry_transform(self):
         """The new explicit slot axis must preserve legacy (N, 3) inputs."""

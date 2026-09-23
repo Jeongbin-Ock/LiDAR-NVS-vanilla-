@@ -1,0 +1,123 @@
+# Bbox-free Dynamic 2DGS V12.2.
+#
+# V12 with its learned max speed reparameterized and split by layer. V12 learns
+# one global v_max = exp(v_0). V12.2 gives each of the twelve temporal layers
+# its own speed through a softplus,
+#
+#     v_raw_l = Parameter(softplus^-1(30))      l = 0..11
+#     v_max_l = softplus(v_raw_l)
+#     R_l,i   = v_max_l * |dt_i|
+#
+# so head 0 of layer l reads correspondence under its own radius, shared by
+# both endpoint directions and every sample. Every layer starts at the 30 m/s
+# below, so a fresh V12.2 barrier is exactly V12's. Softplus has slope ~1 at
+# these speeds: an optimizer step moves v_max_l by about the same number of m/s
+# anywhere, where a step on V12's v_0 scaled the speed by a constant factor.
+# There is still no clamp or barrier-specific prior on the speeds.
+#
+# Unchanged from V12 (and V11.4): shared per-layer QK RMSNorm gains, the
+# adaptive K={1,2,3} router, the v_init-conditioned offset head and the split
+# velocity prior. Differences from the V12 overlay besides the speeds:
+# - Data: src/dataloader/nuscene_dynamic_lidar4d.py, the V11.6 contract.
+# - p2g.head_offset_bound is pinned to the shared 0.4 m default; V12's run
+#   predates that default and trained at 0.8 m.
+model:
+  variant: dynamic_2dgs_attention_velocity_v12_2
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  # V12's adaptive K={1,2,3} router, unchanged.
+  grid_query:
+    count_mode: learned_gumbel
+    grad_balance: sqrt_k
+    learned_count:
+      K_max: 3
+      tau: 1.0
+      seed_mode: range_quantile
+      grad_balance_scope: token
+      logging:
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+
+# The random-duration loader with V11.6's sampling contract: second endpoint
+# 0.2-1.2 s after a keyframe start, up to three interior novel views.
+data:
+  dataset_name: nuscenes_dynamic_lidar4d
+  mode: nvs
+  bbox_json_path: null
+  # The legacy loader's holdout key stays empty; this loader reads its holdouts
+  # from dynamic_window below.
+  train_excluded_scenes: null
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.2
+    eval_seed: 42
+    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
+    # train scenes. Hold out each complete scene to prevent overlap.
+    train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    # V5 physical endpoint-time conditioning before layer one, as in V11.4.
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # V11.4's linear hinge at every layer's own learned speed:
+    #   bias_ij = -relu(d_ij / (softplus(v_raw_l) * |dt|) - 1).
+    # This 30 m/s value initializes all twelve v_raw_l; after construction the
+    # active speeds come from the parameters, not from the config value.
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+
+    # Heads 1-11 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    layer_scale_init: 0.1
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    # V12's v_init-conditioned, zero-initialized residual head, unchanged.
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+# Keep V12's reconstruction objective unchanged.
+loss:
+  w_chamfer: 0.02

@@ -25,6 +25,7 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v11_5
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_6
 python main.py model.variant=dynamic_2dgs_attention_velocity_v12
 python main.py model.variant=dynamic_2dgs_attention_velocity_v12_1
+python main.py model.variant=dynamic_2dgs_attention_velocity_v12_2
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13_1
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13_2
@@ -43,7 +44,7 @@ into temporal attention; there is no separate intensity stream, fusion MLP or
 token refiner. V11.1, V11.3, V11.5, V11.6 and V13.1 emit a fixed number of
 Gaussians per occupied endpoint token -- one observed-medoid seed by default,
 two range quantiles in V11.3/V11.5/V13.1 and three in V11.6; V11, V11.2, V11.4,
-V12, V12.1, V13, V13.2, V13.3 and V13.4 let a router select one to three
+V12, V12.1, V12.2, V13, V13.2, V13.3 and V13.4 let a router select one to three
 range-quantile-seeded Gaussians instead. `p2g.grid_query` chooses between the
 two and sets the fixed count -- see "Gaussians per token" below.
 
@@ -415,15 +416,17 @@ not the speed used as a fixed hyperparameter after construction. The learned
 `barrier_speed_mps`, and the initialization as `barrier_speed_initial_mps`.
 
 V12 uses the legacy `src/dataloader/nuscene.py` contract, as every V11-V13
-overlay except V11.6 does. Its overlay inherits `data.dataset_name: nuscenes`
-and the fixed keyframe/window settings from `nuscene_train.yaml`, while setting
-`data.mode: bbox` and `data.bbox_json_path: null`. V11, V11.1-V11.5, V12,
-V12.1, V13, V13.1, V13.2, V13.3 and V13.4 additionally set
+overlay except V11.6 and V12.2 does. Its overlay inherits
+`data.dataset_name: nuscenes` and the fixed keyframe/window settings from
+`nuscene_train.yaml`, while setting `data.mode: bbox` and
+`data.bbox_json_path: null`. V11, V11.1-V11.5, V12, V12.1, V13, V13.1, V13.2,
+V13.3 and V13.4 additionally set
 `data.train_excluded_scenes: [scene-0757, scene-1094]`; `nuscene.py` removes
-those complete scenes only when constructing the train split. V11.6 holds out
-the same two scenes under `data.dynamic_window`, where its loader reads them. Validation and
-test scenes remain unchanged. The key is checkpoint-protected sampling state,
-so a resume cannot silently put either held-out scene back.
+those complete scenes only when constructing the train split. V11.6 and V12.2
+hold out the same two scenes under `data.dynamic_window`, where their loader
+reads them. Validation and test scenes remain unchanged. The key is
+checkpoint-protected sampling state, so a resume cannot silently put either
+held-out scene back.
 
 The QK RMSNorm path is exactly V11.4's: each layer has one Q gain vector and one
 K gain vector, and each is broadcast across all twelve heads. V12 does not use
@@ -473,6 +476,38 @@ logged `qk_gamma_*_rope_layer*` may move. V12.1 also pins
 `p2g.head_offset_bound` to 0.4 m, so each Gaussian position offset is
 `0.4 * tanh(raw_offset)` per axis. That is now the shared default too; V12
 checkpoints trained under the earlier 0.8 m default keep it.
+
+**V12.2** is V12 with its learned max speed split by layer and moved from an
+exponential to a softplus:
+
+```
+v_raw_l = Parameter(softplus^-1(30.0))   # l = 0..11, one per temporal layer
+v_max_l = softplus(v_raw_l)
+R_l,i   = v_max_l * |dt_i|
+```
+
+Head 0 of layer `l` reads correspondence under its own radius `R_l,i`, shared
+by both endpoint directions and every sample. Every layer starts at
+`barrier_speed_mps: 30.0`, so a fresh V12.2 reproduces V12 exactly, and the
+checkpoint stores the twelve-entry `v_raw` where V12 stores `v_0`. Everything
+else is V12's: shared per-layer QK RMSNorm gains, no `lambda`, the adaptive-K
+router, the initializer-conditioned offset head and the split velocity prior.
+The overlay pins `p2g.head_offset_bound` to the 0.4 m shared default.
+
+Softplus keeps each speed positive but changes what an optimizer step does to
+it. Its slope `sigmoid(v_raw)` is one to float precision at 30 m/s and still
+0.95 at 3 m/s, so a step moves `v_max_l` by about the same number of metres per
+second at any speed, whereas a step on V12's `v_0` multiplies the speed by a
+constant factor. Adam moves a parameter by at most about the learning rate per
+step, so at `lr: 5e-4` a speed changes by at most about 0.5 m/s per 1,000
+optimizer steps, less as the cosine schedule decays. There is still no clamp
+and no prior toward 30 m/s. `attention_temperature_stats` logs
+`barrier_v_raw_layer{l}`, `barrier_speed_mps_layer{l}`,
+`barrier_speed_mps_min/mean/max` and `barrier_speed_initial_mps`; the scalar
+`barrier_speed_mps` is dropped because no single current speed exists.
+
+Unlike V12, V12.2 trains on the random-duration `nuscenes_dynamic_lidar4d`
+loader with V11.6's data block (see "Random-duration windows" below).
 
 **V13** keeps V12.1's fixed-window `nuscene.py` data contract, complete-scene
 train holdouts, embedded-init offset head, split velocity regularizer,
@@ -693,7 +728,7 @@ V11.3 emits that same 58,686 from its shipped `K_max: 2`.
 
 **Learned count (`count_mode: learned_gumbel`).** The refined token routes
 through the grid `GridSlotHead` and a hard Gumbel-Softmax over K={1,2,3} picks
-one K-specific joint head per token. Only V11, V11.2, V11.4, V12, V12.1,
+one K-specific joint head per token. Only V11, V11.2, V11.4, V12, V12.1, V12.2,
 V13, V13.2, V13.3 and V13.4 may use it; asking any other variant for it is
 rejected at config time rather than silently ignored. V11.3, V11.5, V11.6 and
 V13.1 are rejected too because their identities are the fixed count. The seed
@@ -706,10 +741,10 @@ evaluation cannot change how many Gaussians a checkpoint's tokens produce.
 ## Random-duration windows (`data.dataset_name=nuscenes_dynamic_lidar4d`)
 
 `src/dataloader/nuscene_dynamic_lidar4d.py` is the barrier family's
-alternative to the legacy bbox-compatible `nuscene.py`. V11.6 is the only
-overlay that ships with it; the other barrier-family variants (V11-V11.5, V12,
-V12.1) train on `nuscene.py` with the scene holdouts and can opt into this
-loader from the CLI, as V11-V11.4 briefly did. The loader retains the old flat index's keyframe start sweep and 0.5-second sliding
+alternative to the legacy bbox-compatible `nuscene.py`. V11.6 and V12.2 are
+the only overlays that ship with it; the other barrier-family variants
+(V11-V11.5, V12, V12.1) train on `nuscene.py` with the scene holdouts and can
+opt into this loader from the CLI, as V11-V11.4 briefly did. The loader retains the old flat index's keyframe start sweep and 0.5-second sliding
 stride, but samples the actual second endpoint uniformly from the available
 0.1-second-grid sweeps whose measured timestamp is between 0.2 and 1.2 seconds
 after that start. Selecting it replaces the data block; its holdouts live under
@@ -823,9 +858,9 @@ the physical interval varies under that loader.
 `enable: false` restores full-split validation. `train`/`test` dataloaders are
 untouched.
 
-Every overlay except V11.6 uses the shared bbox-compatible loader;
-V11.6 ships the minimal dynamic loader above (`data.mode=nvs`), which the other
-barrier-family overlays can opt into. Both loader contracts expose
+Every overlay except V11.6 and V12.2 uses the shared bbox-compatible loader;
+V11.6 and V12.2 ship the minimal dynamic loader above (`data.mode=nvs`), which
+the other barrier-family overlays can opt into. Both loader contracts expose
 relative `timestamps_sec` plus `window_duration_sec`; every variant uses those
 physical values for time conditioning and transport. Normalized endpoint
 timestamps remain only as a small historical backend-API field.

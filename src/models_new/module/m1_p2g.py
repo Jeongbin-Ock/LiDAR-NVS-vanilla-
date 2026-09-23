@@ -130,6 +130,7 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V11_6,
             DYNAMIC_VARIANT_V12,
             DYNAMIC_VARIANT_V12_1,
+            DYNAMIC_VARIANT_V12_2,
             DYNAMIC_VARIANT_V13,
             DYNAMIC_VARIANT_V13_1,
             DYNAMIC_VARIANT_V13_2,
@@ -140,6 +141,7 @@ class Point2Gaus(nn.Module):
             CosineRoPEVelocityGaussianBackend,
             FinalFeatureBarrierVelocityGaussianBackend,
             FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
+            LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend,
             LearnableMaxSpeedBarrierVelocityGaussianBackend,
             MaxSpeedBarrierVelocityGaussianBackend,
             RawQKRoPEVelocityGaussianBackend,
@@ -163,9 +165,10 @@ class Point2Gaus(nn.Module):
         # V11.3's fixed-count class, run under V11.4's linear-hinge temporal
         # config. V12 keeps V11.4's complete path and swaps in one learned
         # log-space barrier speed. V12.1 fixes only head 0's RMS gain while the
-        # RoPE heads retain their own shared learned gain. V13 removes every QK
-        # RMSNorm and the barrier, L2-normalizes only head 0 at a fixed
-        # temperature, and runs all RoPE heads in one FlashAttention call.
+        # RoPE heads retain their own shared learned gain. V12.2 instead gives
+        # every layer its own learned speed, softplus(v_raw_l). V13 removes
+        # every QK RMSNorm and the barrier, L2-normalizes only head 0 at a
+        # fixed temperature, and runs all RoPE heads in one FlashAttention call.
         # V13.1 keeps that matcher but replaces adaptive K with fixed
         # range-quantile K=2. V13.2 instead keeps V13's adaptive count and makes
         # head 0 use the same raw QK/sqrt(d) score as every feature head. V13.3
@@ -183,6 +186,9 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V12: LearnableMaxSpeedBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V12_1: (
                 FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend
+            ),
+            DYNAMIC_VARIANT_V12_2: (
+                LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend
             ),
             DYNAMIC_VARIANT_V13: CosineRoPEVelocityGaussianBackend,
             DYNAMIC_VARIANT_V13_1: (

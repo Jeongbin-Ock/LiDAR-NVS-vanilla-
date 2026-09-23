@@ -15,6 +15,7 @@ from .temporal import (
     FinalFeatureBarrierCrossAttention,
     FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
     GroupedGainBarrierCrossAttention,
+    LayerwiseSoftplusMaxSpeedBarrierCrossAttention,
     LearnableMaxSpeedBarrierLayerWeightedCrossAttention,
     MaxSpeedBarrierLayerWeightedCrossAttention,
     RawQKRoPELayerWeightedCrossAttention,
@@ -683,6 +684,17 @@ class FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend(
         )
 
 
+class LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend(
+    MaxSpeedBarrierVelocityGaussianBackend
+):
+    """V12.2: V12 with one softplus-parameterized barrier speed per layer."""
+
+    def _build_temporal(self, cfg):
+        return LayerwiseSoftplusMaxSpeedBarrierCrossAttention(
+            cfg.temporal, self.dim
+        )
+
+
 class CosineRoPEVelocityGaussianBackend(
     MaxSpeedBarrierVelocityGaussianBackend
 ):
@@ -838,6 +850,7 @@ __all__ = [
     "MaxSpeedBarrierVelocityGaussianBackend",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend",
     "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend",
+    "LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend",
     "CosineRoPEVelocityGaussianBackend",
     "RawQKRoPEVelocityGaussianBackend",
     "RMSNormRoPEVelocityGaussianBackend",

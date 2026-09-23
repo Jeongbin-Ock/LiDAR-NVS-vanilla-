@@ -524,6 +524,15 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
             ],
         }
 
+    def _layer_frame_radius_values(self, layout, layer):
+        """The per-frame barrier radii that layer ``layer``'s head 0 uses.
+
+        Every layer shares one radius per frame here. V12.2 overrides this to
+        give each layer its own learned speed.
+        """
+        del layer
+        return layout["frame_radius_values"]
+
     def _use_flash(self, x):
         """Whether the varlen kernel is available for this batch."""
         if (
@@ -562,7 +571,6 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
         memory_rows = layout["memory_rows"]
         q_count_values = layout["q_count_values"]
         k_count_values = layout["k_count_values"]
-        frame_radius_values = layout["frame_radius_values"]
 
         x = feature + self.time_to_feature(
             self.time_encoder(token_time_coordinate)
@@ -600,7 +608,7 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
                 key_position,
                 q_count_values,
                 k_count_values,
-                frame_radius_values,
+                self._layer_frame_radius_values(layout, layer),
             )
             layer_matched_positions.append(matched_position)
 
@@ -642,8 +650,59 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
         }
 
 
-class LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+class _LearnedRadiusBarrierCrossAttention(
     MaxSpeedBarrierLayerWeightedCrossAttention
+):
+    """V11.4's barrier arithmetic with the radius left in the autograd graph.
+
+    V11.4 resolves its fixed radius to a Python float and computes the whole
+    barrier under ``no_grad``.  The learned-speed variants (V12, V12.1, V12.2)
+    instead keep each radius as a 0-D tensor and detach only the pairwise
+    input-geometry distance.  Reconstruction gradients can therefore reach the
+    learned speed without opening an unintended path into the source
+    coordinates.  How many speeds exist and how they are parameterized is up to
+    the subclass, which also supplies the radius tensors.
+    """
+
+    @staticmethod
+    def _as_radius_tensor(radius, reference):
+        if torch.is_tensor(radius):
+            return radius.to(device=reference.device, dtype=reference.dtype)
+        return reference.new_tensor(float(radius))
+
+    def _barrier_bias(self, query_position, key_position, radius):
+        """Differentiable-in-radius form of the V11.4 barrier penalty."""
+        radius = self._as_radius_tensor(radius, query_position)
+        with torch.no_grad():
+            distance = torch.cdist(query_position, key_position)
+        excess = torch.relu(distance - radius)
+        if self.barrier_exponent == 2:
+            excess = excess.square()
+        return excess * (
+            self.barrier_weight / radius.pow(self.barrier_exponent)
+        )
+
+    def _barrier_chunk(
+        self, query, key, value, query_position, key_position, radius
+    ):
+        """Head-0 softmax whose radius retains its gradient to the speed."""
+        penalty = self._barrier_bias(
+            query_position, key_position, radius
+        )
+        score = torch.addmm(
+            penalty,
+            query,
+            key.transpose(0, 1),
+            beta=-1.0,
+            alpha=self.scale,
+        )
+        probability = torch.softmax(score, dim=-1)
+        attended = probability @ value
+        return attended[..., :self.head_dim], attended[..., self.head_dim:]
+
+
+class LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+    _LearnedRadiusBarrierCrossAttention
 ):
     """V12: V11.4's linear barrier with one learned global ``v_max``.
 
@@ -657,12 +716,6 @@ class LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
     gain vector and one K gain vector, and each vector is broadcast across all
     heads.  In particular, this class does not use V11.1's match/RoPE gain
     split.
-
-    V11.4 resolves its fixed radius to a Python float and computes the whole
-    barrier under ``no_grad``.  V12 instead keeps each radius as a scalar tensor
-    and detaches only the pairwise input-geometry distance.  Reconstruction
-    gradients can therefore reach ``v_0`` without opening an unintended path
-    into the source coordinates.
     """
 
     def __init__(self, cfg, dim: int):
@@ -687,42 +740,6 @@ class LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
         # speed rather than the initialization stored in the config.
         stats["barrier_speed_mps"] = float(self.v_max)
         return stats
-
-    @staticmethod
-    def _as_radius_tensor(radius, reference):
-        if torch.is_tensor(radius):
-            return radius.to(device=reference.device, dtype=reference.dtype)
-        return reference.new_tensor(float(radius))
-
-    def _barrier_bias(self, query_position, key_position, radius):
-        """Differentiable-in-radius form of the V11.4 barrier penalty."""
-        radius = self._as_radius_tensor(radius, query_position)
-        with torch.no_grad():
-            distance = torch.cdist(query_position, key_position)
-        excess = torch.relu(distance - radius)
-        if self.barrier_exponent == 2:
-            excess = excess.square()
-        return excess * (
-            self.barrier_weight / radius.pow(self.barrier_exponent)
-        )
-
-    def _barrier_chunk(
-        self, query, key, value, query_position, key_position, radius
-    ):
-        """Head-0 softmax whose radius retains its gradient to ``v_0``."""
-        penalty = self._barrier_bias(
-            query_position, key_position, radius
-        )
-        score = torch.addmm(
-            penalty,
-            query,
-            key.transpose(0, 1),
-            beta=-1.0,
-            alpha=self.scale,
-        )
-        probability = torch.softmax(score, dim=-1)
-        attended = probability @ value
-        return attended[..., :self.head_dim], attended[..., self.head_dim:]
 
     def _prepare_forward(
         self,
@@ -1122,6 +1139,102 @@ class FixedMotionGainLearnableMaxSpeedBarrierCrossAttention(
             stats[f"qk_max_logit_bound_{tag}"] = bound
         stats["qk_max_logit_bound"] = max(bounds.values())
         return stats
+
+
+class LayerwiseSoftplusMaxSpeedBarrierCrossAttention(
+    _LearnedRadiusBarrierCrossAttention
+):
+    """V12.2: V12's learned barrier speed, one per layer, through softplus.
+
+    V12 learns one global ``v_max = exp(v_0)``. V12.2 gives every layer its own
+    speed and replaces the exponential with a softplus:
+
+    ``v_max_l = softplus(v_raw_l)``, ``R_{l,i} = v_max_l * |dt_i|``
+
+    for layers ``l = 0..L-1``. Head 0 of layer ``l`` reads opposite-frame
+    coordinates under that layer's radius, so the layer mixture weighs readouts
+    taken at different reach. Every ``v_raw_l`` starts at
+    ``softplus^-1(barrier_speed_mps)``: each layer begins at the configured
+    30 m/s, and a fresh V12.2 reproduces V12 and V11.4 exactly.
+
+    Softplus keeps every speed strictly positive, as ``exp`` did, but its slope
+    ``sigmoid(v_raw)`` is one at 30 m/s (to float precision) and still 0.95 at
+    3 m/s. An optimizer step therefore moves a speed by about the same number
+    of metres per second at any speed, whereas a step on V12's ``v_0`` scales
+    the speed by a constant factor. Nothing clamps a speed or pulls it back
+    toward its initial value.
+
+    QK-Norm, the layer mixture and the linear hinge are V12's, unchanged.
+    """
+
+    def __init__(self, cfg, dim: int):
+        super().__init__(cfg, dim)
+        self.initial_barrier_speed_mps = self.barrier_speed_mps
+        speed = self.initial_barrier_speed_mps
+        # softplus^-1(y) = y + log(1 - exp(-y)); expm1 keeps it accurate for
+        # small y. At 30 m/s the correction is 1e-13, below float32 spacing.
+        initial_raw = speed + math.log(-math.expm1(-speed))
+        self.v_raw = nn.Parameter(torch.full(
+            (self.n_layers,), initial_raw, dtype=torch.float32
+        ))
+
+    @property
+    def v_max(self):
+        """Current positive max speed of every layer in m/s, shape ``(L,)``."""
+        return F.softplus(self.v_raw)
+
+    @torch.no_grad()
+    def attention_temperature_stats(self):
+        """V11.4 temperature diagnostics plus every layer's learned speed."""
+        stats = super().attention_temperature_stats()
+        # V11.4's scalar entry is the configured initial speed, and no single
+        # current speed exists any more; per-layer values and their range
+        # replace it rather than leave it reporting the initialization.
+        del stats["barrier_speed_mps"]
+        stats["barrier_speed_initial_mps"] = self.initial_barrier_speed_mps
+        raw = self.v_raw.float().cpu()
+        speed = self.v_max.float().cpu()
+        for layer in range(self.n_layers):
+            stats[f"barrier_v_raw_layer{layer}"] = float(raw[layer])
+            stats[f"barrier_speed_mps_layer{layer}"] = float(speed[layer])
+        stats["barrier_speed_mps_min"] = float(speed.min())
+        stats["barrier_speed_mps_mean"] = float(speed.mean())
+        stats["barrier_speed_mps_max"] = float(speed.max())
+        return stats
+
+    def _prepare_forward(
+        self,
+        feature,
+        position_ref,
+        token_offset,
+        frame_batch_idx,
+        token_duration_sec,
+    ):
+        layout = super()._prepare_forward(
+            feature,
+            position_ref,
+            token_offset,
+            frame_batch_idx,
+            token_duration_sec,
+        )
+        frame_duration = self._frame_first(
+            token_duration_sec, layout["q_counts"]
+        ).float()
+        # Row l holds layer l's radius for every frame. As in V12, 0-D tensors
+        # carry each radius into the checkpointed chunks; Python floats would
+        # silently detach the learned speeds.
+        radius = (
+            self.v_max[:, None] * frame_duration[None, :]
+        ).clamp_min(1.0e-4)
+        # Drop V11.4's shared fixed-speed floats so nothing can read them.
+        del layout["frame_radius_values"]
+        layout["layer_frame_radius_values"] = tuple(
+            tuple(row.unbind()) for row in radius.unbind()
+        )
+        return layout
+
+    def _layer_frame_radius_values(self, layout, layer):
+        return layout["layer_frame_radius_values"][layer]
 
 
 class CosineRoPELayerWeightedCrossAttention(
@@ -1717,5 +1830,6 @@ __all__ = [
     "FixedMotionHeadRMSNorm",
     "GroupedHeadRMSNorm",
     "GroupedGainBarrierCrossAttention",
+    "LayerwiseSoftplusMaxSpeedBarrierCrossAttention",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention",
 ]

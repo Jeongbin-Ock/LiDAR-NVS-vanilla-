@@ -34,6 +34,9 @@ BACKENDS = {
     cl.DYNAMIC_VARIANT_V12_1: (
         dg.FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend
     ),
+    cl.DYNAMIC_VARIANT_V12_2: (
+        dg.LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend
+    ),
     cl.DYNAMIC_VARIANT_V13: dg.CosineRoPEVelocityGaussianBackend,
     cl.DYNAMIC_VARIANT_V13_1: dg.SeedConditionedCosineRoPEVelocityGaussianBackend,
     cl.DYNAMIC_VARIANT_V13_2: dg.RawQKRoPEVelocityGaussianBackend,
