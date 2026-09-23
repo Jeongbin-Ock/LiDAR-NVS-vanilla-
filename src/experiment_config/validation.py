@@ -495,6 +495,13 @@ def validate_experiment_config(config) -> None:
     anchor_mode = OmegaConf.select(config, "p2g.anchor_mode", default=None)
     if anchor_mode is not None and str(anchor_mode) != "grid":
         raise ValueError(f"{variant} requires p2g.anchor_mode=grid")
+    # They also embed g2p.dynamic=false from the removed PVG-style
+    # temporal-opacity (marginal_t) prefilter.
+    if bool(OmegaConf.select(config, "g2p.dynamic", default=False)):
+        raise ValueError(
+            "g2p.dynamic=true is no longer supported: the marginal_t temporal "
+            "prefilter was removed; Gaussians move by velocity transport only"
+        )
     if OmegaConf.select(config, "dynamic_2dgs", default=None) is None:
         raise ValueError(f"{variant} requires a dynamic_2dgs config block")
     # How many Gaussians a token becomes is a config decision, not a property

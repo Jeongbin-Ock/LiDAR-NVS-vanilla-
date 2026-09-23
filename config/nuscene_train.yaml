@@ -126,4 +126,3 @@ g2p:
   neg_fov: true
   sh_degree: 3
   scale_factor: 1.0
-  dynamic: false

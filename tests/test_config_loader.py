@@ -69,6 +69,7 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertNotIn("budget", config.p2g.grid_query.learned_count)
         self.assertNotIn("w_scale", config.loss)
         self.assertNotIn("enable_lpips", config.loss)
+        self.assertNotIn("dynamic", config.g2p)
         self.assertEqual(config.loss.scale_max_m, 2.5)
 
     def test_dynamic_overlay_and_cli_precedence(self):
@@ -1302,6 +1303,7 @@ class ConfigLoaderTest(unittest.TestCase):
         }
         stored["loss"]["w_scale"] = overrides.get("w_scale", 0.0)
         stored["loss"]["enable_lpips"] = overrides.get("enable_lpips", False)
+        stored["g2p"]["dynamic"] = overrides.get("g2p_dynamic", False)
         torch.save({"experiment_config": stored}, checkpoint)
         return checkpoint
 
@@ -1326,6 +1328,7 @@ class ConfigLoaderTest(unittest.TestCase):
             ({"small_motion": True}, "small-motion"),
             ({"w_scale": 0.02}, "w_scale"),
             ({"enable_lpips": True}, "enable_lpips"),
+            ({"g2p_dynamic": True}, "g2p.dynamic"),
         ):
             with self.subTest(overrides=overrides):
                 with tempfile.TemporaryDirectory() as tmp:

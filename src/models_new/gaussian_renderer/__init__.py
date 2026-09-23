@@ -100,8 +100,6 @@ def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifie
 
     # Prefilter
     mask = (opacity[:, 0] > 1 / 255) if mask is None else mask & (opacity[:, 0] > 1 / 255)
-    if cfg.dynamic:
-        mask = mask & (marginal_t[:, 0] > 0.05)
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     contrib, rendered_image, rendered_feature, rendered_depth, rendered_opacity, radii = rasterizer(

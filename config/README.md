@@ -615,8 +615,10 @@ saved before the cleanup also carry the removed intensity-encoder, fusion and
 refiner blocks under `p2g`; nothing reads them any more. Removed switches are
 accepted only at the inert value those checkpoints stored --
 `p2g.anchor_mode: grid`, `p2g.grid_query.learned_count.budget.enable: false`,
-`dynamic_2dgs.regularization.small_motion.enabled: false`, `loss.w_scale: 0`
-and `loss.enable_lpips: false` -- and rejected otherwise, so no config silently
+`dynamic_2dgs.regularization.small_motion.enabled: false`, `loss.w_scale: 0`,
+`loss.enable_lpips: false` and `g2p.dynamic: false` (the PVG-style
+`marginal_t` temporal-opacity prefilter, never implemented here) -- and
+rejected otherwise, so no config silently
 loses a term it asked for. `loss_scale` is still computed against
 `loss.scale_max_m` and logged, but never enters the total. The selected
 variant's `dynamic_2dgs` block rejects unsupported keys.
