@@ -21,7 +21,7 @@ from src.dataloader.nuscene import (
     filter_train_scene_names,
     transform as legacy_transform,
 )
-from src.models_new.module.m3_g2p import DynamicGausRender, GausRender
+from src.models_new.module.m3_g2p import DynamicGausRender
 from src.models_new.utonia.lora import build_xyzi_utonia_input
 from src.models_new.utils.loss import Loss
 from src.models_new.utils.model_utils import DataModule
@@ -345,7 +345,7 @@ class RaggedViewLossTest(unittest.TestCase):
     def test_renderer_padding_helper_preserves_real_rows_and_zeroes_missing_rows(self):
         short = torch.ones(3, 1, 2, 2)
         long = torch.full((5, 1, 2, 2), 2.0)
-        packed = GausRender._pad_view_batches([short, long], 5)
+        packed = DynamicGausRender._pad_view_batches([short, long], 5)
         self.assertEqual(tuple(packed.shape), (2, 5, 1, 2, 2))
         torch.testing.assert_close(packed[0, :3], short)
         self.assertEqual(int(torch.count_nonzero(packed[0, 3:])), 0)

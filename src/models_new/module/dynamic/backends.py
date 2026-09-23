@@ -8,57 +8,52 @@ import torch
 import torch.nn as nn
 
 from ...utils import boxes as box_utils
-from .attention_matching import ConsensusAttentionMotionMatcher
 from .common import _cfg_get
-from .heads import (
-    EmbeddedInitDurationVelocityHead, EmbeddedInitVelocityHead,
-    FeatureOnlyVelocityOffsetHead, GaussianAttributeHead,
-    InitConditionedVelocityHead, MotionConditionedVelocityHead,
-    PhysicalVelocityHead, SeedConditionedGaussianAttributeHead,
-)
-from .motion_proposals import (
-    ProjectedDenseMotionProposal, SparseMotionProposal,
-    StraightThroughTop4MotionProposal,
-)
+from .heads import EmbeddedInitVelocityHead, GaussianAttributeHead
 from .temporal import (
     CosineRoPELayerWeightedCrossAttention,
     FinalFeatureBarrierCrossAttention,
     FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
     GroupedGainBarrierCrossAttention,
-    LayerWeightedDistanceBiasCrossAttention,
     LearnableMaxSpeedBarrierLayerWeightedCrossAttention,
     MaxSpeedBarrierLayerWeightedCrossAttention,
-    ParallelBidirectionalCrossAttention, TimeConditionedParallelCrossAttention,
     RawQKRoPELayerWeightedCrossAttention,
     RMSNormFeatureRoPELayerWeightedCrossAttention,
     RMSNormRoPELayerWeightedCrossAttention,
 )
 
 class DynamicGaussianBackend(nn.Module):
-    """Legacy direct-velocity v1 backend."""
+    """Shared Dynamic 2DGS backend with a fixed Gaussian count per token.
+
+    A subclass supplies the temporal stack through ``_build_temporal``. That
+    module returns the refined token feature beside a coordinate-readout
+    displacement ``delta_p_init``. Dividing it by the signed endpoint interval
+    turns both source frames into one forward-time ``v_init``; the offset head,
+    which embeds the ``v_init`` it corrects, adds ``v_offset``. Every one of a
+    token's ``gaussians_per_token`` Gaussians shares that token's velocity.
+    """
 
     def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
-                 gaussians_per_token: int = 1):
+                 gaussians_per_token: int = 1, gaussian_count_cfg=None):
         super().__init__()
         self.cfg = cfg
         self.dim = int(dim)
-        if int(gaussians_per_token) != 1:
-            # This head refines the token feature with its seed's own offset
-            # geometry, which is defined at token resolution only.
-            raise ValueError(
-                "the legacy V1 backend emits exactly one Gaussian per token"
-            )
-        self.gaussians_per_token = 1
-        self.temporal = ParallelBidirectionalCrossAttention(cfg.temporal, self.dim)
-        gaussian_cfg = _cfg_get(cfg, "gaussian_head", None)
-        self.gaussian_head = SeedConditionedGaussianAttributeHead(
-            gaussian_cfg, gs_params, self.dim, offset_bound
+        self.gaussians_per_token = int(gaussians_per_token)
+        self.temporal = self._build_temporal(cfg)
+        self.time_reference_sec = float(
+            _cfg_get(cfg.temporal, "time_reference_sec", 1.0)
         )
-        self.velocity_head = MotionConditionedVelocityHead(
-            cfg.motion,
-            self.dim,
-            self.temporal.time_encoder.out_dim,
+        if self.time_reference_sec <= 0.0:
+            raise ValueError("time_reference_sec must be positive")
+        self.adaptive_count = gaussian_count_cfg is not None
+        self.gaussian_head = self._build_gaussian_head(
+            cfg, gs_params, offset_bound, gaussian_count_cfg
         )
+        self.velocity_head = self._build_velocity_head(cfg)
+
+    def _build_temporal(self, cfg):
+        """The cross-attention stack this variant refines its tokens with."""
+        raise NotImplementedError
 
     def _check_fixed_count_seeds(self, seed_sensor, token_position_sensor):
         """Normalize the source seeds to ``(N, G, 3)`` and check the count.
@@ -111,8 +106,8 @@ class DynamicGaussianBackend(nn.Module):
         of how it obtained position, attributes, and velocity, so the split is
         shared. ``extra_fields`` carries whatever the variant additionally
         exposes -- motion diagnostics, and for the adaptive-K router the token
-        each Gaussian came from. ``is_dynamic`` is a diagnostics field: nothing
-        here performs bbox assignment or gates rendering.
+        each Gaussian came from. ``is_dynamic`` marks every Gaussian as moving
+        for the evaluation viewers; nothing here gates rendering.
         """
         extra_fields = extra_fields or {}
         batch_gaussians = []
@@ -121,12 +116,8 @@ class DynamicGaussianBackend(nn.Module):
             if rows.numel() == 0:
                 batch_gaussians.append(None)
                 continue
-            n = int(rows.numel())
-            motion_mask = torch.ones(n, dtype=torch.bool, device=rows.device)
             batch_gaussians.append({
                 "position": position[rows],
-                "coord": position[rows],
-                "coord_ref": position[rows],
                 "shs": raw["shs"][rows],
                 "opacity": raw["opacity"][rows],
                 "scaling": raw["scaling"][rows],
@@ -136,13 +127,9 @@ class DynamicGaussianBackend(nn.Module):
                 "source_time_sec": time_sec[rows],
                 "source_time_normalized": time_normalized[rows],
                 "window_duration_sec": duration_sec[rows],
-                "is_dynamic": motion_mask,
-                "instance_id": torch.full(
-                    (n,), -1, dtype=torch.long, device=rows.device
+                "is_dynamic": torch.ones(
+                    int(rows.numel()), dtype=torch.bool, device=rows.device
                 ),
-                "bg_mask": ~motion_mask,
-                "fg_masks": {},
-                "frame_bboxes": [],
             })
         return batch_gaussians
 
@@ -240,99 +227,6 @@ class DynamicGaussianBackend(nn.Module):
             "local_frame": local_frame_index,
         }
 
-    def forward(
-        self,
-        fused_feature,
-        token_position_sensor,
-        seed_sensor,
-        token_offset,
-        frame_batch_idx,
-        pose_list,
-        timestamps_normalized,
-        timestamps_sec,
-        window_duration_sec,
-    ):
-        if fused_feature.ndim != 2 or fused_feature.shape[1] != self.dim:
-            raise ValueError(
-                f"dynamic fused_feature must be (N,{self.dim})"
-            )
-        seed_sensor = self._check_fixed_count_seeds(
-            seed_sensor, token_position_sensor
-        )
-
-        geometry = self._reference_geometry_and_time(
-            token_position_sensor,
-            seed_sensor,
-            token_offset,
-            frame_batch_idx,
-            pose_list,
-            timestamps_normalized,
-            timestamps_sec,
-            window_duration_sec,
-        )
-        seed_ref = geometry["seed_ref"].reshape(-1, 3)
-        refined, temporal_delta, time_embedding = self.temporal(
-            fused_feature,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            geometry["time_normalized"],
-        )
-        raw, position_offset, _gaussian_feature = self.gaussian_head(
-            refined,
-            seed_ref - geometry["token_ref"],
-        )
-        position = seed_ref + position_offset
-        velocity = self.velocity_head(
-            refined,
-            temporal_delta,
-            time_embedding,
-            geometry["duration_sec"],
-            position,
-        )
-
-        batch_gaussians = self._assemble_batch_gaussians(
-            sample_count=len(pose_list),
-            batch_index=geometry["batch"],
-            position=position,
-            raw=raw,
-            velocity=velocity,
-            time_sec=geometry["time_sec"],
-            time_normalized=geometry["time_normalized"],
-            duration_sec=geometry["duration_sec"],
-        )
-
-        return {
-            "batch_gaussians": batch_gaussians,
-            "gaussians": batch_gaussians,
-            "batch": geometry["batch"],
-        }
-
-class PhysicalVelocityGaussianBackend(DynamicGaussianBackend):
-    """Current bbox-free backend with physical-time conditioning and direct m/s."""
-
-    def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
-                 gaussians_per_token: int = 1, gaussian_count_cfg=None):
-        nn.Module.__init__(self)
-        self.cfg = cfg
-        self.dim = int(dim)
-        self.gaussians_per_token = int(gaussians_per_token)
-        self.temporal = self._build_temporal(cfg)
-        self.time_reference_sec = float(
-            _cfg_get(cfg.temporal, "time_reference_sec", 1.0)
-        )
-        if self.time_reference_sec <= 0.0:
-            raise ValueError("time_reference_sec must be positive")
-        self.adaptive_count = gaussian_count_cfg is not None
-        self.gaussian_head = self._build_gaussian_head(
-            cfg, gs_params, offset_bound, gaussian_count_cfg
-        )
-        self.velocity_head = self._build_velocity_head(cfg)
-
-    def _build_temporal(self, cfg):
-        """The cross-attention stack this variant refines its tokens with."""
-        return TimeConditionedParallelCrossAttention(cfg.temporal, self.dim)
-
     def _build_gaussian_head(self, cfg, gs_params, offset_bound,
                              gaussian_count_cfg):
         """The 2DGS attribute decoder, fixed-count unless a router is given.
@@ -355,35 +249,52 @@ class PhysicalVelocityGaussianBackend(DynamicGaussianBackend):
         )
 
     def _build_velocity_head(self, cfg):
-        """The module that turns a refined token into metres per second."""
-        return PhysicalVelocityHead(cfg.motion, self.dim)
+        """The additive correction applied on top of ``v_init``."""
+        return EmbeddedInitVelocityHead(cfg.motion, self.dim)
 
     def _temporal_coordinate(self, geometry):
         # A fixed reference unit preserves cadence: endpoints 0.8 s apart are
         # encoded as [0, 0.8], not collapsed to [0, 1].
         return geometry["time_sec"] / self.time_reference_sec
 
-    def _temporal_refine(
-        self,
-        fused_feature,
-        geometry,
-        token_offset,
-        frame_batch_idx,
-        motion_proposal_feature=None,
-    ):
-        del motion_proposal_feature
-        refined = self.temporal(
+    def _temporal_refine(self, fused_feature, geometry, token_offset,
+                         frame_batch_idx):
+        return self.temporal(
             fused_feature,
             geometry["token_ref"],
             token_offset,
             frame_batch_idx,
             self._temporal_coordinate(geometry),
+            geometry["duration_sec"],
         )
-        return refined, {}
+
+    def _velocity_offset(self, refined, velocity_init):
+        """The additive correction applied on top of ``v_init``."""
+        return self.velocity_head(refined, velocity_init)
 
     def _predict_motion(self, refined, geometry, position, temporal_fields):
-        del geometry, position, temporal_fields
-        return self.velocity_head(refined), {}
+        del position
+        pair_delta_t_sec = self._signed_pair_delta_t(geometry)
+        delta_p_init = temporal_fields["delta_p_init"]
+        velocity_init = delta_p_init / pair_delta_t_sec.unsqueeze(-1)
+        velocity_offset = self._velocity_offset(refined, velocity_init)
+        velocity = velocity_init + velocity_offset
+        motion_fields = {
+            "delta_p_match": temporal_fields["delta_p_match"],
+            "delta_p_init": delta_p_init,
+            "matched_position": temporal_fields["matched_position"],
+            "pair_delta_t_sec": pair_delta_t_sec,
+            "velocity_match": velocity_init,
+            "velocity_init": velocity_init,
+            "velocity_offset": velocity_offset,
+        }
+        # Layer-mixture variants publish their per-layer logits and weights.
+        # V11.2 reads correspondence from final f' instead, so it deliberately
+        # publishes neither a dormant logit nor a misleading layer-weight chart.
+        for name in ("motion_layer_logits", "motion_layer_weights"):
+            if name in temporal_fields:
+                motion_fields[name] = temporal_fields[name]
+        return velocity, motion_fields
 
     def _predict_gaussian(self, refined, geometry):
         del geometry
@@ -400,7 +311,6 @@ class PhysicalVelocityGaussianBackend(DynamicGaussianBackend):
         timestamps_normalized,
         timestamps_sec,
         window_duration_sec,
-        motion_proposal_feature=None,
         seed_delta_sensor=None,
     ):
         if fused_feature.ndim != 2 or fused_feature.shape[1] != self.dim:
@@ -429,7 +339,6 @@ class PhysicalVelocityGaussianBackend(DynamicGaussianBackend):
             geometry,
             token_offset,
             frame_batch_idx,
-            motion_proposal_feature,
         )
         raw, position_offset, _gaussian_feature = self._predict_gaussian(
             refined, geometry
@@ -467,158 +376,16 @@ class PhysicalVelocityGaussianBackend(DynamicGaussianBackend):
             "batch": self._expand_to_gaussians(geometry["batch"]),
         }
 
-class AttentionInitializedVelocityGaussianBackend(PhysicalVelocityGaussianBackend):
-    """V4 physical velocity with a four-head correspondence initialization.
+class RouterCapableGaussianBackend(DynamicGaussianBackend):
+    """A backend whose Gaussian count a learned K={1,2,3} router may choose.
 
-    The selected heads remain part of the ordinary all-head feature update.
-    Their final-layer Q/K probabilities are additionally applied to ref-frame
-    token xyz to produce a source-to-opposite-frame displacement. Dividing by
-    the signed source-to-opposite timestamp interval converts both endpoint
-    directions to one forward-time velocity convention. The V3 velocity head
-    is retained as a zero-initialized residual in metres/second.
+    ``p2g.grid_query.count_mode`` decides. With ``learned_gumbel`` the
+    normalized refined token routes through the grid ``GridSlotHead``: only the
+    selected K-specific joint head runs, and every child of a token shares its
+    velocity while the additive correction stays at token resolution. A
+    ``legacy`` count config instead builds the shared fixed-count head, and the
+    temporal stack is then the only thing that distinguishes the backend.
     """
-
-    def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
-                 gaussians_per_token: int = 1):
-        super().__init__(
-            cfg, gs_params, dim, offset_bound,
-            gaussians_per_token=gaussians_per_token,
-        )
-        if self.temporal.motion_head_count <= 0:
-            raise ValueError(
-                "V4 attention velocity requires temporal.motion_head_count > 0"
-            )
-
-    def _temporal_refine(
-        self,
-        fused_feature,
-        geometry,
-        token_offset,
-        frame_batch_idx,
-        motion_proposal_feature=None,
-    ):
-        del motion_proposal_feature
-        refined, delta_p_init = self.temporal(
-            fused_feature,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            self._temporal_coordinate(geometry),
-            return_motion_displacement=True,
-        )
-        return refined, {"delta_p_init": delta_p_init}
-
-    def _predict_motion(self, refined, geometry, position, temporal_fields):
-        del position
-        delta_p_init = temporal_fields["delta_p_init"]
-        pair_delta_t_sec = self._signed_pair_delta_t(geometry)
-        velocity_init = delta_p_init / pair_delta_t_sec.unsqueeze(-1)
-        velocity_residual = self.velocity_head(refined)
-        velocity = velocity_init + velocity_residual
-        return velocity, {
-            "delta_p_init": delta_p_init,
-            "pair_delta_t_sec": pair_delta_t_sec,
-            "velocity_init": velocity_init,
-            "velocity_residual": velocity_residual,
-        }
-
-class LayerMixtureMotionMixin:
-    """The correspondence-to-velocity contract of the late attention variants.
-
-    The temporal module returns a coordinate-readout displacement beside the
-    refined feature. Dividing it by the signed endpoint interval turns both
-    source frames into one forward-time ``v_init``, and the variant's offset
-    head corrects it. V10/V11/V11.1/V13 mix layer maps; V11.2 replaces only
-    that readout with a final-feature map.
-    """
-
-    def _velocity_offset(self, refined, velocity_init):
-        """The additive correction applied on top of ``v_init``.
-
-        V10's offset head reads only the refined token; V11-family and V13
-        heads embed the initializer they are correcting, because head 0's attended
-        feature channels never carry the metric coordinate expectation itself.
-        The head declares which it is, so no backend has to restate it.
-        """
-        if self.velocity_head.reads_velocity_init:
-            return self.velocity_head(refined, velocity_init)
-        return self.velocity_head(refined)
-
-    def _temporal_refine(
-        self,
-        fused_feature,
-        geometry,
-        token_offset,
-        frame_batch_idx,
-        motion_proposal_feature=None,
-    ):
-        del motion_proposal_feature
-        return self.temporal(
-            fused_feature,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            self._temporal_coordinate(geometry),
-            geometry["duration_sec"],
-        )
-
-    def _predict_motion(self, refined, geometry, position, temporal_fields):
-        del position
-        pair_delta_t_sec = self._signed_pair_delta_t(geometry)
-        delta_p_init = temporal_fields["delta_p_init"]
-        velocity_init = delta_p_init / pair_delta_t_sec.unsqueeze(-1)
-        velocity_offset = self._velocity_offset(refined, velocity_init)
-        velocity = velocity_init + velocity_offset
-        motion_fields = {
-            "delta_p_match": temporal_fields["delta_p_match"],
-            "delta_p_init": delta_p_init,
-            "matched_position": temporal_fields["matched_position"],
-            "pair_delta_t_sec": pair_delta_t_sec,
-            "velocity_match": velocity_init,
-            "velocity_init": velocity_init,
-            "velocity_offset": velocity_offset,
-        }
-        # V10/V11/V11.1/V13 genuinely use the layer mixture and keep their exact
-        # diagnostics. V11.2 reads correspondence from final f' instead, so it
-        # deliberately publishes neither a dormant logit nor a misleading
-        # layer-weight chart.
-        for name in ("motion_layer_logits", "motion_layer_weights"):
-            if name in temporal_fields:
-                motion_fields[name] = temporal_fields[name]
-        return velocity, motion_fields
-
-class LayerWeightedAttentionVelocityGaussianBackend(
-    LayerMixtureMotionMixin, PhysicalVelocityGaussianBackend
-):
-    """V10 all-layer initializer with config-selected Gaussian count.
-
-    The temporal module returns the layer-weighted coordinate expectation.
-    Dividing its signed displacement by the physical endpoint interval produces
-    one token-level ``v_init``. The shipped config routes the normalized refined
-    token through ``learned_gumbel`` and emits K={1,2,3} children; a legacy count
-    config instead uses the fixed-count Gaussian head. Every child of a token
-    shares its velocity, while the additive correction stays at token resolution.
-    """
-
-    def __init__(
-        self,
-        cfg,
-        gs_params,
-        dim: int,
-        offset_bound: float,
-        gaussian_count_cfg=None,
-        *,
-        gaussians_per_token: int = 1,
-    ):
-        """Preserve the historical fifth positional adaptive-count argument."""
-        super().__init__(
-            cfg,
-            gs_params,
-            dim,
-            offset_bound,
-            gaussians_per_token=gaussians_per_token,
-            gaussian_count_cfg=gaussian_count_cfg,
-        )
 
     def _build_gaussian_head(self, cfg, gs_params, offset_bound,
                              gaussian_count_cfg):
@@ -659,14 +426,6 @@ class LayerWeightedAttentionVelocityGaussianBackend(
             _cfg_get(cfg, "gaussian_head", None), head
         )
         return head
-
-    def _build_temporal(self, cfg):
-        """The temporal module whose head probabilities become ``v_init``."""
-        return LayerWeightedDistanceBiasCrossAttention(cfg.temporal, self.dim)
-
-    def _build_velocity_head(self, cfg):
-        """The additive correction applied on top of ``v_init``."""
-        return FeatureOnlyVelocityOffsetHead(cfg.motion, self.dim)
 
     def _initialize_adaptive_gaussian_heads(self, cfg, head=None):
         """Give every K expert the existing dynamic-head output priors."""
@@ -718,10 +477,7 @@ class LayerWeightedAttentionVelocityGaussianBackend(
                 "adaptive-K dynamic backend requires a transformed K-specific seed-delta bank"
             )
         raw_params, packing = self.gaussian_head(
-            gaussian_feature,
-            None,
-            delta_ref,
-            token_offset,
+            gaussian_feature, delta_ref, token_offset,
         )
         selected_index = packing["anchor_k"] - 1
         token_rows = torch.arange(
@@ -764,13 +520,12 @@ class LayerWeightedAttentionVelocityGaussianBackend(
         timestamps_normalized,
         timestamps_sec,
         window_duration_sec,
-        motion_proposal_feature=None,
         seed_delta_sensor=None,
     ):
         if not self.adaptive_count:
-            # Without a router this backend is an ordinary fixed-count variant
-            # whose temporal stack happens to mix layers; the shared forward
-            # already implements that. Deltas are then the per-slot
+            # Without a router this backend is an ordinary fixed-count variant;
+            # the shared forward already implements that. Deltas are then the
+            # per-slot
             # ``(N, G, 3)`` set a seed-conditioned head reads, never the
             # K-specific ``(N, K, K, 3)`` bank, and the shared forward
             # validates that shape.
@@ -790,10 +545,8 @@ class LayerWeightedAttentionVelocityGaussianBackend(
                 timestamps_normalized,
                 timestamps_sec,
                 window_duration_sec,
-                motion_proposal_feature=motion_proposal_feature,
                 seed_delta_sensor=seed_delta_sensor,
             )
-        del motion_proposal_feature
         if fused_feature.ndim != 2 or fused_feature.shape[1] != self.dim:
             raise ValueError(f"dynamic fused_feature must be (N,{self.dim})")
         expected_seed_shape = (
@@ -897,12 +650,10 @@ class LayerWeightedAttentionVelocityGaussianBackend(
             "routing_stats": routing_stats,
         }
 
-class MaxSpeedBarrierVelocityGaussianBackend(
-    LayerWeightedAttentionVelocityGaussianBackend
-):
-    """V11: V10's count-selectable backend with split position encoding.
+class MaxSpeedBarrierVelocityGaussianBackend(RouterCapableGaussianBackend):
+    """V11/V11.4: count-selectable backend with split position encoding.
 
-    The shipped config uses V10's ``learned_gumbel`` K={1,2,3} router, while a
+    The shipped config uses the ``learned_gumbel`` K={1,2,3} router, while a
     legacy count config selects the fixed-count head. Both keep one token velocity
     shared by its Gaussian children. Correspondence comes from head 0 of each
     layer under the max-speed soft barrier, and plain learned scalars mix the
@@ -913,15 +664,6 @@ class MaxSpeedBarrierVelocityGaussianBackend(
         return MaxSpeedBarrierLayerWeightedCrossAttention(
             cfg.temporal, self.dim
         )
-
-    def _build_velocity_head(self, cfg):
-        """V8's head: ``[LN(f'), MLP(v_init; 3->32->32)] -> 96 -> 3``.
-
-        The refined feature carries head 0's attended *feature* channels, never
-        the metric coordinate expectation itself, so the offset head cannot see
-        what it is correcting unless the initializer is embedded explicitly.
-        """
-        return EmbeddedInitVelocityHead(cfg.motion, self.dim)
 
 
 class LearnableMaxSpeedBarrierVelocityGaussianBackend(
@@ -1076,9 +818,7 @@ class SeedConditionedCosineRoPEVelocityGaussianBackend(
         )
 
 
-class SingleGaussianBarrierVelocityGaussianBackend(
-    LayerMixtureMotionMixin, PhysicalVelocityGaussianBackend
-):
+class SingleGaussianBarrierVelocityGaussianBackend(DynamicGaussianBackend):
     """V11.1: V11's temporal stack with a fixed Gaussian count.
 
     The shipped config emits one medoid-seeded Gaussian per occupied token, and
@@ -1096,512 +836,19 @@ class SingleGaussianBarrierVelocityGaussianBackend(
     def _build_temporal(self, cfg):
         return GroupedGainBarrierCrossAttention(cfg.temporal, self.dim)
 
-    def _build_velocity_head(self, cfg):
-        """V8's head: ``[LN(f'), MLP(v_init; 3->32->32)] -> 96 -> 3``.
-
-        The refined feature carries head 0's attended *feature* channels, never
-        the metric coordinate expectation itself, so the offset head cannot see
-        what it is correcting unless the initializer is embedded explicitly.
-        """
-        return EmbeddedInitVelocityHead(cfg.motion, self.dim)
-
-class ConsensusAttentionVelocityGaussianBackend(
-    AttentionInitializedVelocityGaussianBackend
-):
-    """V8 final-attention consensus matching plus an additive offset.
-
-    Heads ``[0, motion_head_count)`` remain ordinary dense feature-attention
-    heads.  After the final layer has computed that dense update, their Q/K
-    probabilities are averaged and one shared K->M reciprocal support is used
-    only to read opposite-frame coordinates.  There is no independent LoRA
-    descriptor branch, distance bias, dustbin, or query-coordinate warp.
-    """
-
-    def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
-                 gaussians_per_token: int = 1):
-        super().__init__(
-            cfg, gs_params, dim, offset_bound,
-            gaussians_per_token=gaussians_per_token,
-        )
-        self.motion_matcher = ConsensusAttentionMotionMatcher(
-            cfg.motion_matching
-        )
-        self.velocity_head = EmbeddedInitVelocityHead(
-            cfg.motion, self.dim
-        )
-
-    def _temporal_refine(
-        self,
-        fused_feature,
-        geometry,
-        token_offset,
-        frame_batch_idx,
-        motion_proposal_feature=None,
-    ):
-        del motion_proposal_feature
-        refined, matching_fields = self.temporal(
-            fused_feature,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            self._temporal_coordinate(geometry),
-            return_motion_displacement=True,
-            motion_matcher=self.motion_matcher,
-        )
-        return refined, matching_fields
-
-    def _predict_motion(self, refined, geometry, position, temporal_fields):
-        del position
-        pair_delta_t_sec = self._signed_pair_delta_t(geometry)
-        delta_p_init = temporal_fields["delta_p_init"]
-        velocity_init = delta_p_init / pair_delta_t_sec.unsqueeze(-1)
-        velocity_offset = self.velocity_head(
-            refined,
-            velocity_init,
-        )
-        velocity = velocity_init + velocity_offset
-        fields = {
-            "delta_p_match": temporal_fields["delta_p_match"],
-            "delta_p_init": delta_p_init,
-            "pair_delta_t_sec": pair_delta_t_sec,
-            "velocity_match": (
-                temporal_fields["delta_p_match"]
-                / pair_delta_t_sec.unsqueeze(-1)
-            ),
-            "velocity_init": velocity_init,
-            "velocity_offset": velocity_offset,
-        }
-        for name in (
-            "matched_position",
-            "motion_top1_probability",
-            "motion_effective_support",
-            "motion_reciprocal_probability",
-            "motion_selected_forward_probability",
-            "motion_consensus_entropy",
-            "motion_head_js_divergence",
-            "motion_candidate_probability_mass",
-            "motion_selection_log_margin",
-            "motion_candidate_support",
-            "motion_match_support",
-        ):
-            fields[name] = temporal_fields[name]
-        return velocity, fields
-
-class ProposalInitializedVelocityGaussianBackend(PhysicalVelocityGaussianBackend):
-    """V6 velocity from a sparse proposal plus an init-aware residual.
-
-    Correspondence is computed from the same Utonia tokens used by the temporal
-    trunk and before the temporal module adds time. The ordinary
-    temporal stack refines attributes and supplies the feature for a velocity
-    residual conditioned on the dustbin-aware proposal velocity. Dustbin
-    probability remains a soft proposal-confidence gate; it no longer gates the
-    residual itself.
-    """
-
-    def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
-                 proposal_dim: int | None = None,
-                 gaussians_per_token: int = 1):
-        super().__init__(
-            cfg, gs_params, dim, offset_bound,
-            gaussians_per_token=gaussians_per_token,
-        )
-        if self.temporal.motion_head_count != 0:
-            raise ValueError(
-                "V6 motion proposal is independent; temporal.motion_head_count "
-                "must be omitted or zero"
-            )
-        self.motion_proposal = SparseMotionProposal(
-            cfg.motion_proposal,
-            self.dim if proposal_dim is None else int(proposal_dim),
-        )
-        # Old V6 checkpoints do not carry this flag and retain their original
-        # feature-only head and dustbin-gated fallback exactly. Fresh configs
-        # opt into the init-conditioned additive residual explicitly.
-        self.init_conditioned_residual = bool(
-            _cfg_get(cfg.motion, "init_conditioned_residual", False)
-        )
-        if self.init_conditioned_residual:
-            self.velocity_head = InitConditionedVelocityHead(
-                cfg.motion, self.dim
-            )
-
-    def _temporal_refine(
-        self,
-        fused_feature,
-        geometry,
-        token_offset,
-        frame_batch_idx,
-        motion_proposal_feature=None,
-    ):
-        if motion_proposal_feature is None:
-            raise ValueError("V6 requires Utonia motion proposal features")
-        # This call is intentionally before self.temporal: descriptors never see
-        # endpoint time embedding or cross-frame
-        # feature attention.
-        proposal_fields = self.motion_proposal(
-            motion_proposal_feature,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            geometry["duration_sec"],
-        )
-        refined = self.temporal(
-            fused_feature,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            self._temporal_coordinate(geometry),
-        )
-        return refined, proposal_fields
-
-    def _predict_motion(self, refined, geometry, position, temporal_fields):
-        del position
-        pair_delta_t_sec = self._signed_pair_delta_t(geometry)
-        delta_p_match = temporal_fields["delta_p_match"]
-        delta_p_init = temporal_fields["delta_p_init"]
-        velocity_match = delta_p_match / pair_delta_t_sec.unsqueeze(-1)
-        velocity_init = delta_p_init / pair_delta_t_sec.unsqueeze(-1)
-        if self.init_conditioned_residual:
-            velocity_offset = self.velocity_head(refined, velocity_init)
-            velocity = velocity_init + velocity_offset
-        else:
-            # Checkpoint compatibility for the original V6 formulation.
-            velocity_offset = self.velocity_head(refined)
-            velocity = (
-                velocity_init
-                + temporal_fields["p_unmatched"].unsqueeze(-1) * velocity_offset
-            )
-
-        fields = {
-            "delta_p_match": delta_p_match,
-            "delta_p_init": delta_p_init,
-            "pair_delta_t_sec": pair_delta_t_sec,
-            "velocity_match": velocity_match,
-            "velocity_init": velocity_init,
-            "velocity_offset": velocity_offset,
-        }
-        fields.update({
-            name: temporal_fields[name]
-            for name in (
-                "matched_position",
-                "motion_top1_probability",
-                "motion_effective_support",
-                "motion_reciprocal_probability",
-                "motion_dustbin_similarity",
-                "motion_search_speed_mps",
-                "match_probability",
-                "p_unmatched",
-            )
-        })
-        return velocity, fields
-
-class WarpedProposalVelocityGaussianBackend(
-    ProposalInitializedVelocityGaussianBackend
-):
-    """V7 proposal-warped attention and duration-aware velocity offset.
-
-    The hard-gated initializer moves only the RoPE query coordinate to
-    ``x_query + stopgrad(v_init) * signed_dt``. Keys stay at their observed
-    reference-frame coordinates. There is no multiplicative confidence gate on
-    cross-attention and V7 constructs no temporal time embedding. A confidently
-    unmatched token therefore keeps its query at the observed position.
-    """
-
-    def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
-                 proposal_dim: int | None = None,
-                 gaussians_per_token: int = 1):
-        super().__init__(
-            cfg,
-            gs_params,
-            dim,
-            offset_bound,
-            proposal_dim=proposal_dim,
-            gaussians_per_token=gaussians_per_token,
-        )
-        if self.temporal.use_time_embedding:
-            raise ValueError("V7 temporal attention must disable time embedding")
-        if self.motion_proposal.descriptor_mode != "direct_l2":
-            raise ValueError("V7 requires direct_l2 motion descriptors")
-        if self.motion_proposal.dustbin_mode != "evidence_mlp":
-            raise ValueError("V7 requires evidence_mlp unmatched prediction")
-        self.velocity_head = EmbeddedInitDurationVelocityHead(
-            cfg.motion, self.dim
-        )
-
-    def _temporal_attention_time(self, geometry):
-        # Historical V7/V7.1 intentionally keep temporal feature conditioning
-        # disabled. V7.2 overrides this hook with raw relative seconds.
-        return None
-
-    def _velocity_offset(self, refined, velocity_init, geometry):
-        return self.velocity_head(
-            refined,
-            velocity_init,
-            geometry["duration_sec"],
-        )
-
-    def _temporal_refine(
-        self,
-        fused_feature,
-        geometry,
-        token_offset,
-        frame_batch_idx,
-        motion_proposal_feature=None,
-    ):
-        if motion_proposal_feature is None:
-            raise ValueError("V7 requires Utonia motion proposal features")
-        proposal_fields = self.motion_proposal(
-            motion_proposal_feature,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            geometry["duration_sec"],
-        )
-        pair_delta_t_sec = self._signed_pair_delta_t(geometry)
-        velocity_match = (
-            proposal_fields["delta_p_match"]
-            / pair_delta_t_sec.unsqueeze(-1)
-        )
-        velocity_init = (
-            proposal_fields["delta_p_init"]
-            / pair_delta_t_sec.unsqueeze(-1)
-        )
-        # V7/V7.1 use their binary dustbin gate here; V7.2 supplies its exact
-        # normalized Top-4 forward displacement. Detaching keeps attention loss
-        # from reshaping the proposal through its own lookup coordinate, while
-        # final-velocity loss still trains the proposal through the STE below.
-        query_position_ref = (
-            geometry["token_ref"]
-            + velocity_init.detach() * pair_delta_t_sec.unsqueeze(-1)
-        )
-        refined = self.temporal(
-            fused_feature,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            self._temporal_attention_time(geometry),
-            query_position_ref=query_position_ref,
-        )
-        proposal_fields["pair_delta_t_sec"] = pair_delta_t_sec
-        proposal_fields["velocity_match"] = velocity_match
-        return refined, proposal_fields
-
-    def _predict_motion(self, refined, geometry, position, temporal_fields):
-        del position
-        pair_delta_t_sec = temporal_fields["pair_delta_t_sec"]
-        delta_p_init = temporal_fields["delta_p_init"]
-        velocity_init = delta_p_init / pair_delta_t_sec.unsqueeze(-1)
-        velocity_offset = self._velocity_offset(
-            refined, velocity_init, geometry
-        )
-        velocity = velocity_init + velocity_offset
-
-        fields = {
-            "delta_p_match": temporal_fields["delta_p_match"],
-            "delta_p_init": delta_p_init,
-            "pair_delta_t_sec": pair_delta_t_sec,
-            "velocity_match": temporal_fields["velocity_match"],
-            "velocity_init": velocity_init,
-            "velocity_offset": velocity_offset,
-        }
-        for name in (
-            "matched_position",
-            "motion_top1_probability",
-            "motion_effective_support",
-            "motion_reciprocal_probability",
-            "motion_candidate_entropy",
-            "motion_best_candidate_displacement_m",
-            "motion_reciprocal_probability_sum",
-            "motion_mean_displacement_m",
-            "motion_candidate_spread_m",
-            "motion_normalized_mean_displacement",
-            "motion_normalized_candidate_spread",
-            "motion_dustbin_logit",
-            "motion_soft_match_probability",
-            "motion_hard_reject",
-            "motion_search_speed_mps",
-            "motion_candidate_probability_mass",
-            "motion_selection_log_margin",
-            "motion_hard_soft_displacement_cosine",
-            "motion_hard_soft_displacement_norm_ratio",
-            "motion_selected_distance_prior_penalty",
-            "motion_match_support",
-            "match_probability",
-            "p_unmatched",
-        ):
-            if name in temporal_fields:
-                fields[name] = temporal_fields[name]
-        return velocity, fields
-
-class StraightThroughProposalVelocityGaussianBackend(
-    WarpedProposalVelocityGaussianBackend
-):
-    """V7.2: direct Top-4 STE, time-aware Q warp, and feature-only offset.
-
-    The matcher remains time-free and consumes raw LoRA-adapted Utonia tokens.
-    Temporal refinement then adds the historical V5 endpoint-time embedding
-    before all four cross-attention layers while retaining the detached hard
-    initializer Q-coordinate warp. The additive offset sees only the refined
-    feature. Correspondence uses direct Utonia cosine, one fixed distance
-    envelope, no reciprocal or unmatched terms, and a full-key softmax backward
-    surrogate for the normalized Top-4 forward.
-    """
-
-    def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
-                 proposal_dim: int | None = None,
-                 gaussians_per_token: int = 1):
-        # Skip the V6/V7 SparseMotionProposal constructor and its dustbin/search
-        # parameters while retaining the common physical Gaussian trunk.
-        PhysicalVelocityGaussianBackend.__init__(
-            self, cfg, gs_params, dim, offset_bound,
-            gaussians_per_token=gaussians_per_token,
-        )
-        if self.temporal.motion_head_count != 0:
-            raise ValueError(
-                "V7.2 motion proposal is independent; "
-                "temporal.motion_head_count must be omitted or zero"
-            )
-        if not self.temporal.use_time_embedding:
-            raise ValueError("V7.2 temporal attention must enable time embedding")
-        self.motion_proposal = StraightThroughTop4MotionProposal(
-            cfg.motion_proposal,
-            self.dim if proposal_dim is None else int(proposal_dim),
-        )
-        self.velocity_head = FeatureOnlyVelocityOffsetHead(
-            cfg.motion, self.dim
-        )
-
-    def _temporal_attention_time(self, geometry):
-        return self._temporal_coordinate(geometry)
-
-    def _velocity_offset(self, refined, velocity_init, geometry):
-        # Q-warped, time-conditioned attention has already made the refined
-        # feature depend on correspondence and cadence. Keep the final residual
-        # decoder feature-only; v_init retains its separate additive path.
-        del velocity_init, geometry
-        return self.velocity_head(refined)
-
-class PostAttentionProposalVelocityGaussianBackend(
-    PhysicalVelocityGaussianBackend
-):
-    """V9: correspondence after temporal refinement, dense and offset-free.
-
-    The temporal stack is the plain V3/V5 form -- endpoint time added once as
-    ``f = f + E(t)``, twelve bidirectional cross-attention layers, and no
-    query-coordinate warp, motion head, or matcher hook.  Its output ``f'``
-    then feeds two independent consumers: the dense projected-descriptor
-    proposal that produces ``v_init``, and the feature-only offset head that
-    produces ``v_offset``.  Final motion is ``v_init + v_offset``.
-
-    This is the structural difference from V6/V7/V7.2, whose proposals run
-    *before* attention on raw LoRA Utonia tokens and therefore need a detached
-    warp to feed correspondence back into the trunk.  Here the trunk feeds the
-    matcher directly, so correspondence gradient reaches the same twelve layers
-    that render the Gaussians and no detached path is required.
-    """
-
-    def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
-                 gaussians_per_token: int = 1):
-        super().__init__(
-            cfg, gs_params, dim, offset_bound,
-            gaussians_per_token=gaussians_per_token,
-        )
-        if self.temporal.motion_head_count != 0:
-            raise ValueError(
-                "V9 motion proposal is a separate descriptor branch; "
-                "temporal.motion_head_count must be omitted or zero"
-            )
-        if not self.temporal.use_time_embedding:
-            raise ValueError("V9 temporal attention must enable time embedding")
-        self.motion_proposal = ProjectedDenseMotionProposal(
-            cfg.motion_proposal, self.dim
-        )
-        self.velocity_head = FeatureOnlyVelocityOffsetHead(
-            cfg.motion, self.dim
-        )
-
-    def _temporal_refine(
-        self,
-        fused_feature,
-        geometry,
-        token_offset,
-        frame_batch_idx,
-        motion_proposal_feature=None,
-    ):
-        # V9 matches on the refined feature, so the raw pre-attention Utonia
-        # tokens V6/V7 need are deliberately unused here.
-        del motion_proposal_feature
-        refined = self.temporal(
-            fused_feature,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            self._temporal_coordinate(geometry),
-        )
-        proposal_fields = self.motion_proposal(
-            refined,
-            geometry["token_ref"],
-            token_offset,
-            frame_batch_idx,
-            geometry["duration_sec"],
-        )
-        pair_delta_t_sec = self._signed_pair_delta_t(geometry)
-        proposal_fields["pair_delta_t_sec"] = pair_delta_t_sec
-        proposal_fields["velocity_match"] = (
-            proposal_fields["delta_p_match"] / pair_delta_t_sec.unsqueeze(-1)
-        )
-        return refined, proposal_fields
-
-    def _predict_motion(self, refined, geometry, position, temporal_fields):
-        del geometry, position
-        pair_delta_t_sec = temporal_fields["pair_delta_t_sec"]
-        delta_p_init = temporal_fields["delta_p_init"]
-        velocity_init = delta_p_init / pair_delta_t_sec.unsqueeze(-1)
-        velocity_offset = self.velocity_head(refined)
-        velocity = velocity_init + velocity_offset
-
-        fields = {
-            "delta_p_match": temporal_fields["delta_p_match"],
-            "delta_p_init": delta_p_init,
-            "pair_delta_t_sec": pair_delta_t_sec,
-            "velocity_match": temporal_fields["velocity_match"],
-            "velocity_init": velocity_init,
-            "velocity_offset": velocity_offset,
-        }
-        for name in (
-            "matched_position",
-            "motion_top1_probability",
-            "motion_effective_support",
-            "motion_candidate_probability_mass",
-            "motion_selection_log_margin",
-            "motion_hard_soft_displacement_cosine",
-            "motion_hard_soft_displacement_norm_ratio",
-            "motion_selected_distance_prior_penalty",
-        ):
-            if name in temporal_fields:
-                fields[name] = temporal_fields[name]
-        return velocity, fields
 
 __all__ = [
     "DynamicGaussianBackend",
-    "PhysicalVelocityGaussianBackend",
-    "AttentionInitializedVelocityGaussianBackend",
-    "LayerMixtureMotionMixin",
-    "LayerWeightedAttentionVelocityGaussianBackend",
+    "RouterCapableGaussianBackend",
+    "MaxSpeedBarrierVelocityGaussianBackend",
+    "LearnableMaxSpeedBarrierVelocityGaussianBackend",
+    "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend",
     "CosineRoPEVelocityGaussianBackend",
     "RawQKRoPEVelocityGaussianBackend",
-    "RMSNormFeatureRoPEVelocityGaussianBackend",
     "RMSNormRoPEVelocityGaussianBackend",
-    "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend",
-    "LearnableMaxSpeedBarrierVelocityGaussianBackend",
-    "MaxSpeedBarrierVelocityGaussianBackend",
+    "RMSNormFeatureRoPEVelocityGaussianBackend",
     "FinalFeatureBarrierVelocityGaussianBackend",
     "SeedConditionedBarrierVelocityGaussianBackend",
     "SeedConditionedCosineRoPEVelocityGaussianBackend",
     "SingleGaussianBarrierVelocityGaussianBackend",
-    "ConsensusAttentionVelocityGaussianBackend",
-    "ProposalInitializedVelocityGaussianBackend",
-    "WarpedProposalVelocityGaussianBackend",
-    "StraightThroughProposalVelocityGaussianBackend",
-    "PostAttentionProposalVelocityGaussianBackend",
 ]

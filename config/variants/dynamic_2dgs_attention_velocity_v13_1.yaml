@@ -12,7 +12,6 @@ device: [0]
 exp_name: ${model.variant}-bs-${train.batch_size}
 
 p2g:
-  anchor_mode: grid
   freeze_utonia: true
   utonia_feature_stage: 3
   head_offset_bound: 0.4
@@ -22,15 +21,6 @@ p2g:
     rank: 16
     alpha: 16
     dropout: 0.0
-  # Inactive compatibility values; V13.1 validation requires LoRA above.
-  agg_mlp:
-    hidden_dim: 1024
-    hidden_layers: 2
-    out_dim: 576
-  joint_refiner:
-    num_heads: 12
-    rope_base: 10.0
-    rope_position_scale: 4.0
   # exp: null is the fixed range-quantile rule. For K=2 the raw-point ranks are
   # floor(N/4) and floor(3N/4), exactly the adaptive router's K=2 candidate row.
   grid_query:
@@ -75,13 +65,6 @@ dynamic_2dgs:
     detach_init_condition: true
 
   regularization:
-    small_motion:
-      enabled: false
-      weight: 0.005
-      epsilon_m: 0.001
-      warmup_steps: 300
-      ramp_steps: 1700
-
     velocity_l2:
       enabled: true
       mode: split_group_l2

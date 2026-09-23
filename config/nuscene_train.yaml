@@ -2,12 +2,11 @@ device: [8, 9]
 seed: 42
 
 model:
-  # This dedicated worktree defaults to the current Dynamic 2DGS baseline.
-  # Historical configs with no model block are still restored as bbox_rigid_v1.
-  variant: dynamic_2dgs_attention_velocity_v7_2
+  # Fresh runs default to the current Dynamic 2DGS baseline.
+  variant: dynamic_2dgs_attention_velocity_v11_4
 
 project_name: 2dgs-utonia
-exp_name:  ${p2g.anchor_mode}-bs-${train.batch_size}-n-cd
+exp_name: ${model.variant}-bs-${train.batch_size}
 mode: train
 allow_legacy_wandb_fallback: false
 
@@ -97,73 +96,14 @@ p2g:
   # Checkpoint의 functional XYZ 입력([xyz, zero_rgb, zero_normal])을 XYZI로
   # 바꾸고 Utonia의 모든 Linear/SubMConv3d에 LoRA를 설치한다. 실제 forward가
   # 지나는 stage까지만 trainable로 두어 DDP unused parameter를 피한다. 출력은
-  # 별도 intensity encoder/fusion/local refiner 없이 바로 temporal attention으로 간다.
+  # 바로 temporal attention으로 간다 (LoRA는 필수).
   utonia_lora:
     enable: true
     input_mode: xyzi
     rank: 16
     alpha: 16
     dropout: 0.0
-  anchor_mode: grid        # "spherical" | "grid"
   head_offset_bound: 0.4    # gaussian pos = seed_pos + bound*tanh(offset), per-axis meters
-
-
-
-
-  # Legacy path only (utonia_lora.enable=false). type=ptv3 -> mini PTv3 mirroring the
-  # frozen Utonia backbone (serialization -> RoPE patch attn + xCPE -> GridPooling);
-  # output dim = last channel (no projection head), fused end-to-end with the Utonia
-  # stream. type=sparse|mlp fall back to the encoders below. Omitting this block
-  # reverts to the legacy intensity_sparse.enable switch.
-  intensity_encoder:
-    type: ptv3                     # ptv3 | sparse | mlp
-    ptv3:
-      input_feats: [intensity]     # 1ch intensity/255; [intensity, ray] -> 5D A/B
-      channels: [36, 72, 108, 144, 192]   # uses first (utonia_feature_stage + 1); head_dim 18
-      num_heads: [2, 4, 6, 8, 8]          # stage4: 192/8=24 (12 would give head_dim 16, RoPE needs %6==0)
-      depths: [1, 1, 2, 2, 2]
-      patch_size: 1024
-      mlp_ratio: 2.0
-      order: [z, hilbert]          # or [z, z-trans, hilbert, hilbert-trans] to mirror Utonia
-
-  # Legacy path only (utonia_lora.enable=false). Post-fusion joint token refiner.
-  # preserves serialized RoPE blocks with xCPE; sparse uses exact occupied-cell
-  # local attention without xCPE.
-  # At stage3 each cell is 0.4m, so window_size=3 attends to at most 3x3x3=27 cells.
-  joint_refiner:
-    enable: true
-    type: sparse                     # serial | sparse
-    depth: 2
-    num_heads: 8                   # 192/8 = 24 (RoPE head_dim multiple of 6)
-    patch_size: 1024                # serial only
-    window_size: 3                 # sparse only; odd int or [x, y, z] odd triplet
-    attn_chunk_size: 4096          # sparse manual fallback only; CUDA uses flash-attn
-    layer_scale: 1.0e-5
-
-  # Fallback (sparse/mlp) intensity config; ignored when intensity_encoder.type=ptv3.
-  int_proj:
-    in_dim: 5
-    out_dim: 64
-
-  # Sparse (SubMConv3d) intensity encoder mirroring the Utonia grid hierarchy, used
-  # when intensity_encoder.type=sparse (or the legacy enable switch when the
-  # intensity_encoder block is absent). n_down auto-tracks utonia_feature_stage
-  # (3 -> 0.4m, 4 -> 0.8m); type=mlp uses per-cell IntensityMLPEncoder.
-  intensity_sparse:
-    enable: true
-    channels: [16, 32, 48, 64, 96]   # uses first (utonia_feature_stage + 1)
-    depth: 1                          # SubMConv context blocks per stage
-
-  # Legacy separate-stream fusion modules; not constructed in XYZI LoRA mode.
-  utonia_adapter:
-    bottleneck: null   # residual adapter bottleneck r (PEFT-style); null -> utonia_feature_dim // 4
-
-  agg_mlp:
-    hidden_dim: 256
-    hidden_layers: 2   # number of hidden Linear+SiLU stages; variants may override
-    out_dim: 192       # with 8 heads: head_dim=24; each head must be divisible by 6 for 3D RoPE
-
-
 
   gs_params:               # source of truth for the gaussian head size (= sum)
     opacity: 1
@@ -179,12 +119,11 @@ p2g:
      -9.33,  -8.00,  -6.66,  -5.33,  -4.00,  -2.67,  -1.33,   0.00,
       1.33,   2.67,   4.00,   5.33,   6.67,   8.00,   9.33,  10.67,
   ]
-  r_far: 80.0             # RoPE/intensity range normalisation (log1p(r_far))
 
   # Preprocessing
   ego_radius: 2.5
 
-g2g: {}                   # GausTemp takes no config; block kept so cfg.g2g resolves
+g2g: {}                   # DynamicGausTemp takes no config; block kept so cfg.g2g resolves
 g2p:
   neg_fov: true
   sh_degree: 3

@@ -35,11 +35,12 @@ def _aggregate_points_to_cells(points_xyz, intensity, grid_coord, voxel_feats,
 
     Returns (positions[M,3] metric, utonia_feat[M,C_stage], intensity5d[M,5],
     occ[V] bool, raw_count[M] long) for the Utonia cells that received >=1 point.
-    positions = Utonia cell position; the intensity (theta,phi,r) come from the
-    per-cell MEAN point position. ``occ`` (over all V grid_coord rows) lets callers
-    recover the token grid_coords (grid_coord[occ]) for aligning a separate
-    intensity encoder. ``raw_count`` is the own-frame point count and deliberately
-    excludes temporally matched observations.
+    positions = Utonia cell position; ``intensity5d`` holds per-cell intensity
+    statistics whose (theta,phi,r) come from the per-cell MEAN point position,
+    for analysis callers. ``occ`` (over all V grid_coord rows) lets callers
+    recover the token grid_coords (grid_coord[occ]). ``raw_count`` is the
+    own-frame point count and deliberately excludes temporally matched
+    observations.
     """
     device = voxel_feats.device
     V = grid_coord.shape[0]
@@ -104,9 +105,8 @@ def _aggregate_points_to_cells(points_xyz, intensity, grid_coord, voxel_feats,
     cnt = counts.clamp_min(1.0)
     mean_i = sum_i / cnt
     var_i = (sum_i2 / cnt - mean_i * mean_i).clamp_min(0.0)
-    # option B: per-cell MEAN position -> spherical (matches the spherical builder,
-    # and avoids phi/atan2 wraparound from averaging per-point angles across the
-    # +/-pi azimuth seam).
+    # Per-cell MEAN position -> spherical, which avoids phi/atan2 wraparound
+    # from averaging per-point angles across the +/-pi azimuth seam.
     mean_xyz = sum_xyz / cnt.unsqueeze(-1)
     mean_tpr = xyz_to_theta_phi_r(mean_xyz)
 
@@ -119,9 +119,9 @@ def _aggregate_points_to_cells(points_xyz, intensity, grid_coord, voxel_feats,
     int5 = torch.cat([mean_i.unsqueeze(-1), var_i.unsqueeze(-1), mean_tpr], dim=-1)
     result = util_pos[occ], voxel_feats[occ], int5[occ], occ, counts[occ].long()
     if return_membership:
-        # ``cell_idx`` addresses the original Utonia grid rows.  Downstream
-        # spherical code consumes only occupied tokens, so remap every retained
-        # raw point to that compact row order (the same order as result[0:3]).
+        # ``cell_idx`` addresses the original Utonia grid rows. Callers consume
+        # only occupied tokens, so remap every retained raw point to that
+        # compact row order (the same order as result[0:3]).
         full_to_compact = torch.full(
             (V,), -1, dtype=torch.long, device=device
         )

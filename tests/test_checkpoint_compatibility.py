@@ -18,43 +18,12 @@ import torch
 from omegaconf import OmegaConf
 
 from src.config_loader import (
-    ADAPTIVE_COUNT_DYNAMIC_VARIANTS,
     DYNAMIC_VARIANTS,
-    DYNAMIC_VARIANT_V1,
-    ROUTER_CAPABLE_DYNAMIC_VARIANTS,
     compose_fresh_config,
 )
 
 
 _BACKEND_CLASS = {
-    "dynamic_2dgs_direct_velocity_v1": "DynamicGaussianBackend",
-    "dynamic_2dgs_physical_velocity_v3": "PhysicalVelocityGaussianBackend",
-    "dynamic_2dgs_physical_velocity_v3_1": "PhysicalVelocityGaussianBackend",
-    "dynamic_2dgs_attention_velocity_v4": (
-        "AttentionInitializedVelocityGaussianBackend"
-    ),
-    "dynamic_2dgs_attention_velocity_v5": (
-        "AttentionInitializedVelocityGaussianBackend"
-    ),
-    "dynamic_2dgs_attention_velocity_v6": (
-        "ProposalInitializedVelocityGaussianBackend"
-    ),
-    "dynamic_2dgs_attention_velocity_v7": "WarpedProposalVelocityGaussianBackend",
-    "dynamic_2dgs_attention_velocity_v7_1": (
-        "WarpedProposalVelocityGaussianBackend"
-    ),
-    "dynamic_2dgs_attention_velocity_v7_2": (
-        "StraightThroughProposalVelocityGaussianBackend"
-    ),
-    "dynamic_2dgs_attention_velocity_v8": (
-        "ConsensusAttentionVelocityGaussianBackend"
-    ),
-    "dynamic_2dgs_attention_velocity_v9": (
-        "PostAttentionProposalVelocityGaussianBackend"
-    ),
-    "dynamic_2dgs_attention_velocity_v10": (
-        "LayerWeightedAttentionVelocityGaussianBackend"
-    ),
     "dynamic_2dgs_attention_velocity_v11": (
         "MaxSpeedBarrierVelocityGaussianBackend"
     ),
@@ -99,51 +68,9 @@ _BACKEND_CLASS = {
     ),
 }
 
-_PROPOSAL_VARIANTS = {
-    "dynamic_2dgs_attention_velocity_v6",
-    "dynamic_2dgs_attention_velocity_v7",
-    "dynamic_2dgs_attention_velocity_v7_1",
-    "dynamic_2dgs_attention_velocity_v7_2",
-}
 
 # (ordered state_dict schema, ordered named-parameter list), SHA-256 prefixes.
 _PRE_REFACTOR_MANIFEST = {
-    "dynamic_2dgs_direct_velocity_v1": (
-        "8e882fa993e2cf8fd5c9", "8c0381e3e4e6bd56ce12"
-    ),
-    "dynamic_2dgs_physical_velocity_v3": (
-        "4d8b6764892f49cdcbd9", "750889ed52d8c0c951a9"
-    ),
-    "dynamic_2dgs_physical_velocity_v3_1": (
-        "4d8b6764892f49cdcbd9", "750889ed52d8c0c951a9"
-    ),
-    "dynamic_2dgs_attention_velocity_v4": (
-        "4d8b6764892f49cdcbd9", "750889ed52d8c0c951a9"
-    ),
-    "dynamic_2dgs_attention_velocity_v5": (
-        "fb0ac56d44e6f9232bd2", "4b07d64b61632b27a32c"
-    ),
-    "dynamic_2dgs_attention_velocity_v6": (
-        "4078c102a780f857cd23", "a80fd0e17556f5bc4c1c"
-    ),
-    "dynamic_2dgs_attention_velocity_v7": (
-        "b2072f0ac928deee931c", "fedf4248c19ec944a552"
-    ),
-    "dynamic_2dgs_attention_velocity_v7_1": (
-        "b2072f0ac928deee931c", "fedf4248c19ec944a552"
-    ),
-    "dynamic_2dgs_attention_velocity_v7_2": (
-        "96dbcc6eda924003096a", "68326c05555f1e6cb615"
-    ),
-    "dynamic_2dgs_attention_velocity_v8": (
-        "4388375c624e2d2c7514", "b44ce23131a852b0a120"
-    ),
-    "dynamic_2dgs_attention_velocity_v9": (
-        "7f3658407384eeec306c", "30d35db9c5689160eec7"
-    ),
-    "dynamic_2dgs_attention_velocity_v10": (
-        "f0add34f786db8d33181", "38a17230ad2df5268028"
-    ),
     "dynamic_2dgs_attention_velocity_v11": (
         "a7f420bb2b15d7023d1f", "b72527798ae7652e170c"
     ),
@@ -237,6 +164,9 @@ def _load_dynamic_module_without_renderer():
 
 _DYNAMIC = _load_dynamic_module_without_renderer()
 _SEMANTIC_MODULE_BY_EXPORT = {
+    "BidirectionalCrossAttentionBase": "temporal",
+    "RouterCapableGaussianBackend": "backends",
+    "EmbeddedInitVelocityHead": "heads",
     "CosineRoPELayerWeightedCrossAttention": "temporal",
     "CosineRoPEVelocityGaussianBackend": "backends",
     "DynamicGaussianBackend": "backends",
@@ -254,9 +184,7 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "RMSNormFeatureRoPELayerWeightedCrossAttention": "temporal",
     "RMSNormFeatureRoPEVelocityGaussianBackend": "backends",
     "SeedConditionedCosineRoPEVelocityGaussianBackend": "backends",
-    "ConsensusAttentionMotionMatcher": "attention_matching",
     "GaussianAttributeHead": "heads",
-    "StraightThroughTop4MotionProposal": "motion_proposals",
     "DynamicGausTemp": "trajectory",
 }
 
@@ -265,7 +193,7 @@ def _build_backend(variant):
     config, _source = compose_fresh_config(
         OmegaConf.from_dotlist([f"model.variant={variant}"])
     )
-    kwargs = {"proposal_dim": 144} if variant in _PROPOSAL_VARIANTS else {}
+    kwargs = {}
     count = getattr(config.p2g, "grid_query", None)
     count_mode = str(getattr(count, "count_mode", "legacy")).lower()
     if count is not None and count_mode == "learned_gumbel":
@@ -325,41 +253,6 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
                         index,
                     )
 
-    def test_v1_rejects_a_fixed_count_its_backend_cannot_restore(self):
-        with self.assertRaisesRegex(ValueError, "K_max=1"):
-            compose_fresh_config(OmegaConf.from_dotlist([
-                f"model.variant={DYNAMIC_VARIANT_V1}",
-                "p2g.grid_query.K_max=2",
-                "p2g.grid_query.exp=1",
-            ]))
-
-    def test_adaptive_backends_keep_the_historical_fifth_positional_argument(self):
-        for variant in (
-            "dynamic_2dgs_attention_velocity_v10",
-            "dynamic_2dgs_attention_velocity_v11",
-            "dynamic_2dgs_attention_velocity_v11_2",
-            "dynamic_2dgs_attention_velocity_v12",
-            "dynamic_2dgs_attention_velocity_v12_1",
-            "dynamic_2dgs_attention_velocity_v13",
-            "dynamic_2dgs_attention_velocity_v13_2",
-            "dynamic_2dgs_attention_velocity_v13_3",
-            "dynamic_2dgs_attention_velocity_v13_4",
-        ):
-            with self.subTest(variant=variant):
-                config, _source = compose_fresh_config(
-                    OmegaConf.from_dotlist([f"model.variant={variant}"])
-                )
-                backend_cls = getattr(_DYNAMIC, _BACKEND_CLASS[variant])
-                backend = backend_cls(
-                    config.dynamic_2dgs,
-                    config.p2g.gs_params,
-                    144,
-                    float(config.p2g.head_offset_bound),
-                    config.p2g.grid_query,
-                )
-                self.assertTrue(backend.adaptive_count)
-                self.assertEqual(backend.gaussian_head.k_max, 3)
-
     def test_v11_5_builds_the_v11_3_decoder_under_the_v11_4_hinge(self):
         backend = _build_backend("dynamic_2dgs_attention_velocity_v11_5")
         self.assertIs(
@@ -390,7 +283,7 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
 
     def test_single_seed_slot_preserves_the_legacy_geometry_transform(self):
         """The new explicit slot axis must preserve legacy (N, 3) inputs."""
-        variant = "dynamic_2dgs_physical_velocity_v3"
+        variant = "dynamic_2dgs_attention_velocity_v11_1"
         torch.manual_seed(31)
         backend = _build_backend(variant).eval()
         feature = torch.randn(4, 144)
@@ -418,17 +311,11 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
         slotted = backend(
             arguments[0], arguments[1], legacy_seed.unsqueeze(1), *arguments[2:]
         )
-        for name in ("position", "coord_ref", "velocity"):
+        for name in ("position", "velocity", "velocity_init"):
             torch.testing.assert_close(
                 legacy["batch_gaussians"][0][name],
                 slotted["batch_gaussians"][0][name],
             )
-
-    def test_historical_adaptive_count_import_remains_available(self):
-        self.assertIs(
-            ADAPTIVE_COUNT_DYNAMIC_VARIANTS,
-            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
-        )
 
     def test_historical_facade_reexports_the_moved_class_objects(self):
         for name, module_name in _SEMANTIC_MODULE_BY_EXPORT.items():

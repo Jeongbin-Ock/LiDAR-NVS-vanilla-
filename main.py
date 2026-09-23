@@ -27,7 +27,7 @@ from pytorch_lightning.strategies import DDPStrategy
 from src.model_wrapper import ModelWrapper
 from src.models_new.utils.model_utils import DataModule
 from src.dataloader import dataset_dict
-from src.config_loader import assert_model_variant_implemented, resolve_main_config
+from src.config_loader import resolve_main_config
 
 warnings.filterwarnings(
     "ignore",
@@ -146,7 +146,6 @@ def main(cfg, config_source="unspecified"):
 if __name__ == '__main__':
     cli_conf = OmegaConf.from_cli()
     cfg, config_source = resolve_main_config(cli_conf)
-    assert_model_variant_implemented(cfg)
     if 'mode' not in cfg:
             cfg.mode = "eval"
     print_run_summary(cfg)

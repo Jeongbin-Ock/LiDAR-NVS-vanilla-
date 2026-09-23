@@ -1,29 +1,5 @@
-"""Shared grid-token builder selected by the downstream anchor mode."""
+"""Occupied Utonia-grid tokenization shared by every Dynamic 2DGS variant."""
 
+from .grid_tokens import OccupiedGridTokenBuilder, OccupiedTokenBatch
 
-SUPPORTED_ANCHOR_MODES = ("spherical", "grid")
-
-
-def resolve_anchor_mode(cfg):
-    """Validate and normalize the two supported anchor modes."""
-    mode = str(getattr(cfg, "anchor_mode", "spherical")).lower()
-    if mode not in SUPPORTED_ANCHOR_MODES:
-        raise ValueError(
-            f"Unknown p2g.anchor_mode={mode!r}; expected one of "
-            f"{SUPPORTED_ANCHOR_MODES}"
-        )
-    return mode
-
-
-def build_token_builder(cfg, *, fixed_count_seeds=False):
-    """Build the tokenization path shared by spherical and grid modes."""
-    mode = resolve_anchor_mode(cfg)
-    from .grid_intensity import OccupiedGridTokenBuilder
-
-    return mode, OccupiedGridTokenBuilder(
-        cfg,
-        fixed_count_seeds=fixed_count_seeds,
-    )
-
-
-__all__ = ["SUPPORTED_ANCHOR_MODES", "build_token_builder", "resolve_anchor_mode"]
+__all__ = ["OccupiedGridTokenBuilder", "OccupiedTokenBatch"]

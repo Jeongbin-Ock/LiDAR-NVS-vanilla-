@@ -5,8 +5,6 @@ from collections.abc import Mapping
 
 from omegaconf import DictConfig, OmegaConf
 
-from .definitions import LEGACY_VARIANT
-
 
 def _as_config(value=None) -> DictConfig:
     if value is None:
@@ -25,7 +23,7 @@ def _has_path(config, dotted_path: str) -> bool:
     return True
 
 
-def _variant(config, *, default=LEGACY_VARIANT) -> str:
+def _variant(config, *, default="") -> str:
     value = OmegaConf.select(config, "model.variant", default=default)
     return str(value)
 

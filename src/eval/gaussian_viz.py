@@ -3,10 +3,9 @@
 One self-contained HTML per sequence (Plotly.js from CDN, no python dep). The
 1/2/3/4 buttons toggle the Gaussian point cloud of each target second
 (T=1,2,3,4s). Points are Gaussian *centers* (means3D) at that window's target
-time, in the window's ref frame (frame-0 sensor frame, z-up). Bbox-transport
-models show static/dynamic centers. Velocity-transport models color target-time
-centers by their source endpoint frame and draw each actual source-to-target
-transport as an arrow.
+time, in the window's ref frame (frame-0 sensor frame, z-up). Target-time
+centers are colored by their source endpoint frame and each actual
+source-to-target transport is drawn as an arrow.
 """
 from __future__ import annotations
 
@@ -17,29 +16,6 @@ import numpy as np
 import torch
 
 from src.models_new.utils.boxes import point_in_box
-
-
-def extract_frame(means_np: np.ndarray, is_dyn_np: np.ndarray,
-                  max_static=None, seed: int = 0):
-    """Split into static / dynamic. `max_static=None` keeps ALL Gaussians."""
-    is_dyn_np = is_dyn_np.astype(bool)
-    static = means_np[~is_dyn_np]
-    dynamic = means_np[is_dyn_np]
-    if max_static is not None and static.shape[0] > max_static:
-        rng = np.random.default_rng(seed)
-        static = static[rng.choice(static.shape[0], max_static, replace=False)]
-    return static, dynamic
-
-
-def gaussians_from_output(g2p_model, b_gs, t_target: float, max_static=None):
-    """means3D at the target time + dynamic mask -> (static_xyz, dynamic_xyz)."""
-    means = g2p_model.get_means3D(b_gs, t_target).detach().cpu().numpy()
-    is_dyn = b_gs.get("is_dynamic")
-    if torch.is_tensor(is_dyn):
-        is_dyn = is_dyn.detach().cpu().numpy()
-    else:
-        is_dyn = np.zeros((means.shape[0],), dtype=bool)
-    return extract_frame(means, is_dyn, max_static=max_static)
 
 
 def velocity_transport_from_output(g2p_model, b_gs, t_target: float):
@@ -155,7 +131,6 @@ refresh();
 L_STATIC = "gaussians (static)"
 L_DYN = "gaussians (dynamic)"
 L_DYN_INBOX = "gaussians (dynamic, in GT bbox)"
-L_BOX = "bbox"
 L_GT_BOX = "GT bbox"
 L_INPUT = "input LiDAR (2 endpoints)"
 L_GT = "GT LiDAR @ target t"
@@ -428,20 +403,6 @@ def _ellipse_mesh(centers, quats, su, sv, k=8, sigma=1.0):
     return verts.astype(np.float32), faces
 
 
-def dyn_boxes_from_output(g2p_model, b_gs, t_target: float) -> np.ndarray:
-    """Per-instance dynamic bbox [cx,cy,cz,dx,dy,dz,yaw] in the ref frame,
-    interpolated to the target time (same path the renderer uses). [M,7]."""
-    trajs = b_gs.get("object_trajectories", {})
-    if not trajs:
-        return np.zeros((0, 7), np.float32)
-    dev = b_gs["position"].device
-    boxes = []
-    for _, traj in trajs.items():
-        box = g2p_model.interpolate_box_ref(traj, t_target, dev, torch.float32)
-        boxes.append(box.detach().cpu().numpy())
-    return np.stack(boxes).astype(np.float32) if boxes else np.zeros((0, 7), np.float32)
-
-
 def surfels_from_output(g2p_model, b_gs, t_target: float,
                         max_static=None, k: int = 8, sigma: float = 1.0,
                         seed: int = 0, gt_boxes_ref=None):
@@ -450,8 +411,7 @@ def surfels_from_output(g2p_model, b_gs, t_target: float,
     Uses the SAME means/rotations the renderer uses (`get_means3D` /
     `get_rotations` at the target time) and 2D scales = softplus(scaling[:, :2]).
     Scales are shown AS-IS (no clamp) and `max_static=None` keeps ALL Gaussians,
-    so degenerate large-scale Gaussians are fully visible for diagnosis. Also
-    returns the dynamic bboxes at the target time for overlay.
+    so degenerate large-scale Gaussians are fully visible for diagnosis.
 
     ``gt_boxes_ref`` (optional ``[M, 7]`` ``[x,y,z,w,l,h,yaw]`` boxes already in
     the Gaussian ref frame, at the target time) splits the dynamic surfels into
@@ -494,10 +454,8 @@ def surfels_from_output(g2p_model, b_gs, t_target: float,
     dynamic_in_box = _ellipse_mesh(
         means[d_in_idx], rots[d_in_idx], su[d_in_idx], sv[d_in_idx], k, sigma
     )
-    boxes = dyn_boxes_from_output(g2p_model, b_gs, t_target)
     return {"static": static, "dynamic": dynamic,
-            "dynamic_in_box": dynamic_in_box, "boxes": boxes,
-            "gt_boxes": gt_boxes_np}
+            "dynamic_in_box": dynamic_in_box, "gt_boxes": gt_boxes_np}
 
 
 def _box_lines(boxes: np.ndarray):
@@ -558,7 +516,7 @@ def _box_trace(boxes, visible, name, color="#ffd000"):
 
 
 def save_sequence_surfel_html(path, title: str, frames: list):
-    """frames: list of {"label", "static": (V,F), "dynamic": (V,F), "boxes": [M,7],
+    """frames: list of {"label", "static": (V,F), "dynamic": (V,F),
     optional "dynamic_in_box": (V,F), "gt_boxes": [M,7], "input_points" [P,3],
     "gt_points" [Q,3], and "pred_points" [R,3]} (all in the Gaussian ref frame).
 
@@ -575,8 +533,6 @@ def save_sequence_surfel_html(path, title: str, frames: list):
         traces.append(_mesh_trace(fr.get("dynamic_in_box", empty_mesh), False,
                                   False, L_DYN_INBOX, 0.95, color="#39ff14"))
         tags.append([fi, L_DYN_INBOX])
-        traces.append(_box_trace(fr.get("boxes", np.zeros((0, 7))), False, L_BOX))
-        tags.append([fi, L_BOX])
         traces.append(_box_trace(fr.get("gt_boxes", np.zeros((0, 7))), False,
                                  L_GT_BOX, color="#00e5ff"))
         tags.append([fi, L_GT_BOX])
@@ -592,5 +548,5 @@ def save_sequence_surfel_html(path, title: str, frames: list):
 
     return _render(path, str(title) + " — 1σ surfels",
                    [fr["label"] for fr in frames], traces, tags,
-                   [L_STATIC, L_DYN, L_DYN_INBOX, L_BOX, L_GT_BOX,
+                   [L_STATIC, L_DYN, L_DYN_INBOX, L_GT_BOX,
                     L_INPUT, L_GT, L_PRED], off=[L_INPUT])

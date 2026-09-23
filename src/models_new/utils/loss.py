@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from skimage.metrics import structural_similarity
 
-#from pytorch3d import chamfer_loss
 from ..utils.chamfer.chamfer3D.dist_chamfer_3D import chamfer_3DDist
 try:
     import lpips
@@ -15,7 +14,7 @@ except ImportError:
 DEFAULT_SCALE_MAX_M = 2.5
 
 
-def budget_weight_at_step(
+def ramped_weight_at_step(
     max_weight: float,
     step: int,
     warmup_steps: int,
@@ -27,30 +26,15 @@ def budget_weight_at_step(
     warmup_steps = int(warmup_steps)
     ramp_steps = int(ramp_steps)
     if max_weight < 0.0:
-        raise ValueError("budget weight must be non-negative")
+        raise ValueError("scheduled weight must be non-negative")
     if warmup_steps < 0 or ramp_steps < 0:
-        raise ValueError("budget warmup_steps and ramp_steps must be non-negative")
+        raise ValueError("warmup_steps and ramp_steps must be non-negative")
     if step < warmup_steps:
         return 0.0
     if ramp_steps == 0:
         return max_weight
     progress = min(max((step - warmup_steps) / ramp_steps, 0.0), 1.0)
     return max_weight * progress
-
-
-def expected_k_sum_from_logits(logits: torch.Tensor) -> torch.Tensor:
-    """Return the noise-free categorical expected-K sum for local tokens."""
-    if logits.ndim != 2 or logits.shape[1] < 2:
-        raise ValueError("budget k_logits must have shape (N, K) with K >= 2")
-    work_logits = logits.float()
-    k_values = torch.arange(
-        1,
-        work_logits.shape[1] + 1,
-        device=work_logits.device,
-        dtype=work_logits.dtype,
-    )
-    policy = torch.softmax(work_logits, dim=-1)
-    return (policy * k_values).sum(dim=-1).sum()
 
 
 def distributed_token_mean(
@@ -89,62 +73,6 @@ def distributed_token_mean(
     )
     global_mean = global_sum / global_count + local_surrogate
     return global_mean, global_count
-
-
-def target_budget_loss(
-    logits: torch.Tensor,
-    *,
-    target_mean_k: float,
-    max_weight: float,
-    step: int,
-    warmup_steps: int,
-    ramp_steps: int,
-) -> dict[str, torch.Tensor]:
-    """Build the normalized global expected-mean-K target loss."""
-    if logits.ndim != 2 or logits.shape[1] < 2:
-        raise ValueError("budget k_logits must have shape (N, K) with K >= 2")
-    k_max = int(logits.shape[1])
-    target_mean_k = float(target_mean_k)
-    if not 1.0 <= target_mean_k <= float(k_max):
-        raise ValueError(
-            f"budget target_mean_k must be in [1, {k_max}], "
-            f"got {target_mean_k}"
-        )
-
-    local_expected_k_sum = expected_k_sum_from_logits(logits)
-    expected_mean_k, global_token_count = distributed_token_mean(
-        local_expected_k_sum,
-        logits.shape[0],
-    )
-    effective_weight = budget_weight_at_step(
-        max_weight,
-        step,
-        warmup_steps,
-        ramp_steps,
-    )
-    weight = expected_mean_k.new_tensor(effective_weight)
-    if not bool((global_token_count > 0).item()):
-        zero = local_expected_k_sum * 0.0
-        return {
-            "expected_mean_k": zero,
-            "global_token_count": global_token_count,
-            "violation": zero,
-            "loss": zero,
-            "weight": weight,
-            "weighted_loss": zero,
-        }
-
-    violation = expected_mean_k - target_mean_k
-    normalized_violation = violation / float(k_max - 1)
-    loss = normalized_violation.square()
-    return {
-        "expected_mean_k": expected_mean_k,
-        "global_token_count": global_token_count,
-        "violation": violation,
-        "loss": loss,
-        "weight": weight,
-        "weighted_loss": weight * loss,
-    }
 
 
 class Loss(nn.Module):
@@ -281,11 +209,8 @@ class Loss(nn.Module):
         The squared log-ratio is averaged over violating Gaussians in each
         violating sample, then over only those samples. Non-violating Gaussians
         and samples therefore contribute neither gradients nor reduction
-        denominator. Viewpoint mode stores Common once even though it appears in
-        every render union, so a violating Common row is weighted by its number
-        of valid target views; this is exactly equivalent to the old physical
-        repetition without retaining V copies. ``w_scale=0`` still computes
-        this raw diagnostic term, but its zero weight keeps it out of ``total``.
+        denominator. ``w_scale=0`` still computes this raw diagnostic term, but
+        its zero weight keeps it out of ``total``.
         """
         if gaussians is None:
             if self.w_scale == 0.0:
@@ -318,26 +243,9 @@ class Loss(nn.Module):
                 torch.log(max_scale.clamp_min(1e-6))
                 - max_scale.new_tensor(self.scale_max_m).log()
             )
-            multiplicity = torch.ones_like(excess)
-            gaussian_view = batch_item.get("view_index")
-            common_view_gate = batch_item.get("common_view_gate")
-            if gaussian_view is not None and common_view_gate is not None:
-                common_mask = gaussian_view.to(device=excess.device) == -1
-                if common_view_gate.ndim != 2:
-                    raise ValueError(
-                        "common_view_gate must have shape (N_common, V)"
-                    )
-                common_multiplicity = common_view_gate.detach().ne(0).sum(
-                    dim=-1
-                ).clamp_min(1).to(device=excess.device, dtype=excess.dtype)
-                multiplicity[common_mask] = common_multiplicity
             violated = excess > 0
             if violated.any():
-                violated_weight = multiplicity[violated]
-                sample_losses.append(
-                    (excess[violated].square() * violated_weight).sum()
-                    / violated_weight.sum()
-                )
+                sample_losses.append(excess[violated].square().mean())
 
         if not sample_losses:
             return connected_zero
@@ -348,7 +256,6 @@ class Loss(nn.Module):
         all_renders,
         *,
         gaussians=None,
-        routing_budget=None,
         metric_mode="train",
         compute_valid_metrics=True,
         compute_raydrop_metrics=True,
@@ -577,27 +484,5 @@ class Loss(nn.Module):
         if self.w_chamfer > 0.0:
             total = total + self.w_chamfer * losses["loss_chamfer"]
         losses["total"] = total
-
-        # Optional learned-count regularization belongs to the same loss
-        # assembly as the rendering terms. Existing callers omit this argument
-        # and therefore preserve their historical total exactly.
-        if routing_budget is not None:
-            budget_logits = routing_budget.get("logits")
-            if budget_logits is None:
-                raise ValueError("routing_budget requires attached router logits")
-            terms = target_budget_loss(
-                budget_logits,
-                target_mean_k=routing_budget["target_mean_k"],
-                max_weight=routing_budget["weight"],
-                step=routing_budget["step"],
-                warmup_steps=routing_budget["warmup_steps"],
-                ramp_steps=routing_budget["ramp_steps"],
-            )
-            losses["loss_budget"] = terms["loss"]
-            losses["wc_budget"] = terms["weighted_loss"].detach()
-            losses["budget_expected_mean_k"] = terms["expected_mean_k"].detach()
-            losses["budget_violation"] = terms["violation"].detach()
-            losses["budget_effective_weight"] = terms["weight"].detach()
-            losses["total"] = losses["total"] + terms["weighted_loss"]
 
         return losses

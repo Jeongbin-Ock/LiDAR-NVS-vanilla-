@@ -12,8 +12,6 @@ from .grid_seeds import (
     _r_quantile_seed_bank,
     _r_quantile_seed_data,
     _token_position_seed_data,
-    _viewpoint_seed_bank,
-    counts_to_variable_k,
 )
 from .token_aggregation import (
     RawTokenMembership,
@@ -30,7 +28,6 @@ __all__ = [
     "UtoniaGridMapper",
     "aggregate_points_to_cells_with_membership",
     "aggregate_points_to_cells_with_seeds",
-    "counts_to_variable_k",
     "split_by_offset",
     "xyz_to_theta_phi_r",
 ]

@@ -1,4 +1,4 @@
-"""Detached, fixed-size statistics for learned grid/spherical count routing."""
+"""Detached, fixed-size statistics for learned Gaussian-count routing."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -18,15 +18,12 @@ def _validated_range_edges(range_edges_m: Sequence[float]) -> tuple[float, ...]:
 
 def routing_sufficient_statistics(
     routing: Mapping[str, torch.Tensor],
-    range_edges_m: Sequence[float] | None = None,
-    *,
-    include_breakdowns: bool = True,
+    range_edges_m: Sequence[float],
 ) -> dict[str, torch.Tensor]:
     """Summarize learned-count routing without retaining its autograd graph.
 
-    The global K distribution is always produced. Grid mode can additionally
-    request its historical range and bg/fg breakdowns; spherical mode keeps the
-    W&B surface intentionally small and needs only ``k_logits``/``selected_k``.
+    Produces the global K distribution and its breakdowns by token range
+    and by background/foreground group.
     """
     with torch.no_grad():
         logits = routing["k_logits"].detach().float()
@@ -54,19 +51,12 @@ def routing_sufficient_statistics(
             argmax_k - 1, minlength=k_max
         ).to(dtype)
         statistics = {
-            # Keep the historical key for compatibility; in spherical mode
-            # the counted units are labelled-cell anchors rather than tokens.
             "token_count": logits.new_tensor(float(token_count)),
             "selected_counts": selected_counts,
             "argmax_counts": argmax_counts,
             "sampled_k_sum": selected_k.to(dtype).sum(),
             "argmax_k_sum": argmax_k.to(dtype).sum(),
         }
-        if not include_breakdowns:
-            return statistics
-
-        if range_edges_m is None:
-            raise ValueError("range_edges_m is required for routing breakdowns")
         edges = _validated_range_edges(range_edges_m)
         token_position_sensor = routing["token_position_sensor"].detach().float()
         is_dynamic = routing["is_dynamic"].detach().bool()

@@ -17,60 +17,18 @@ try:
 except ImportError:  # CPU/unit-test fallback remains available.
     flash_attn = None
 
-class ParallelBidirectionalCrossAttention(nn.Module):
-    """Legacy v1 full other-frame refinement with synchronous endpoint updates.
+class BidirectionalCrossAttentionBase(nn.Module):
+    """Layer stack and endpoint pairing shared by every temporal variant.
 
     Each layer forms Q/K/V for *both* directions from one immutable input
     snapshot, executes the ragged endpoint pairs, and only then commits the
-    residual/FFN update.  Attention probabilities are never interpreted as
-    correspondence and never touch coordinates.
-
-    Normalized source time conditions Q/K.  V and the residual stream remain
-    feature-only so time does not become a shortcut in static GS attributes.
-    Ref-frame position enters only through 3D RoPE.
+    residual/FFN update. Subclasses own the constructor and ``forward`` and
+    differ only in how the attention scores are formed and which head's
+    probabilities are read as correspondence.
     """
 
-    def __init__(self, cfg, dim: int):
-        super().__init__()
-        self.dim = int(dim)
-        self.num_heads = int(_cfg_get(cfg, "num_heads", 8))
-        self.n_layers = int(_cfg_get(cfg, "layers", 1))
-        self.mlp_ratio = float(_cfg_get(cfg, "mlp_ratio", 4.0))
-        self.implementation = str(
-            _cfg_get(cfg, "implementation", "flash_varlen")
-        ).lower()
-        if self.dim % self.num_heads != 0:
-            raise ValueError("dynamic token dim must be divisible by num_heads")
-        if self.n_layers < 1:
-            raise ValueError("dynamic temporal layers must be at least one")
-        self.head_dim = self.dim // self.num_heads
-        if self.head_dim % 6 != 0:
-            raise ValueError(
-                "dynamic attention head dim must be divisible by 6 for 3D RoPE"
-            )
-        self.scale = self.head_dim ** -0.5
-
-        time_dim = int(_cfg_get(cfg, "time_embedding_dim", 64))
-        time_frequencies = int(_cfg_get(cfg, "time_frequencies", 8))
-        self.time_encoder = SinusoidalScalarEncoder(time_dim, time_frequencies)
-        rope_position_scale = _cfg_get(cfg, "rope_position_scale", None)
-        if rope_position_scale is None:
-            # Legacy V1 configs specified a half-period range instead of the
-            # actual radians/metre multiplier. Preserve that exact semantics.
-            range_m = float(_cfg_get(cfg, "rope_range_m", 110.0))
-            rope_position_scale = math.pi / range_m
-        self.rope = Rotary3D(
-            self.head_dim,
-            base=float(_cfg_get(cfg, "rope_base", 10.0)),
-            position_scale=float(rope_position_scale),
-        )
-
-        # Legacy V1 is the only stack that conditions Q and K on time per layer
-        # rather than adding one time projection to the token before layer one.
-        self._build_transformer_layers(cfg, time_projection_dim=time_dim)
-
     def _build_qk_norm(self, enabled: bool) -> None:
-        """Per-layer RMSNorm on Q and K, or the historical unnormalized pair.
+        """Per-layer RMSNorm on Q and K, or no normalization at all.
 
         Nothing else bounds ``|q|`` or ``|k|``: ``input_norm`` sits before the
         projection, so the projection gain passes through unchecked and the
@@ -89,28 +47,18 @@ class ParallelBidirectionalCrossAttention(nn.Module):
             nn.RMSNorm(self.head_dim) for _ in range(self.n_layers)
         ])
 
-    def _build_transformer_layers(self, cfg, *, time_projection_dim=None):
+    def _build_transformer_layers(self, cfg):
         """The per-layer stack every temporal variant shares.
 
         Input norm, the four attention projections, the LayerScale gate, and a
         zero-initialized FFN, all built in the one order the saved checkpoints
-        expect. ``time_projection_dim`` additionally builds the legacy V1
-        per-layer ``time_to_q``/``time_to_k`` pair. Variants differ only in how
-        the scores are formed, never in which parameters exist here.
+        expect. Variants differ only in how the scores are formed, never in
+        which parameters exist here.
         """
         hidden = int(self.dim * self.mlp_ratio)
         self.input_norm = nn.ModuleList([
             nn.LayerNorm(self.dim) for _ in range(self.n_layers)
         ])
-        if time_projection_dim is not None:
-            self.time_to_q = nn.ModuleList([
-                nn.Linear(int(time_projection_dim), self.dim, bias=False)
-                for _ in range(self.n_layers)
-            ])
-            self.time_to_k = nn.ModuleList([
-                nn.Linear(int(time_projection_dim), self.dim, bias=False)
-                for _ in range(self.n_layers)
-            ])
         self.q_proj = nn.ModuleList([
             nn.Linear(self.dim, self.dim) for _ in range(self.n_layers)
         ])
@@ -225,888 +173,9 @@ class ParallelBidirectionalCrossAttention(nn.Module):
             chunks.append(out_i.squeeze(0).transpose(0, 1))
         return torch.cat(chunks, dim=0)
 
-    def forward(
-        self,
-        feature,
-        position_ref,
-        token_offset,
-        frame_batch_idx,
-        token_time_normalized,
-    ):
-        n_tokens = int(feature.shape[0])
-        if position_ref.shape != (n_tokens, 3):
-            raise ValueError("position_ref must align with dynamic token features")
-        if token_time_normalized.shape != (n_tokens,):
-            raise ValueError("token_time_normalized must provide one scalar per token")
-        q_counts, k_counts, memory_rows = self._frame_layout(
-            token_offset, frame_batch_idx
-        )
-        if int(q_counts.sum()) != n_tokens:
-            raise ValueError("token_offset does not cover all dynamic tokens")
-
-        time_embedding = self.time_encoder(token_time_normalized)
-        q_angles = self.rope.angles(position_ref)
-        k_angles = self.rope.angles(position_ref[memory_rows])
-        x = feature
-        base = feature
-        use_flash = (
-            x.is_cuda
-            and flash_attn is not None
-            and self.implementation in ("flash_varlen", "auto")
-        )
-        if (
-            x.is_cuda
-            and self.implementation == "flash_varlen"
-            and flash_attn is None
-        ):
-            raise RuntimeError(
-                "dynamic temporal attention requested flash_varlen, but "
-                "flash_attn is unavailable"
-            )
-
-        for layer in range(self.n_layers):
-            # All projections in this layer read the same old-state snapshot.
-            snapshot = x
-            normalized = self.input_norm[layer](snapshot)
-            q_input = normalized + self.time_to_q[layer](time_embedding)
-            k_input = normalized + self.time_to_k[layer](time_embedding)
-            q = self.q_proj[layer](q_input).reshape(
-                n_tokens, self.num_heads, self.head_dim
-            )
-            k = self.k_proj[layer](k_input)[memory_rows].reshape(
-                n_tokens, self.num_heads, self.head_dim
-            )
-            v = self.v_proj[layer](normalized)[memory_rows].reshape(
-                n_tokens, self.num_heads, self.head_dim
-            )
-            q = self.rope.rotate(q.float(), q_angles[:, None, :, :])
-            k = self.rope.rotate(k.float(), k_angles[:, None, :, :])
-            if use_flash:
-                attended = self._flash_attention(q, k, v, q_counts, k_counts)
-            else:
-                attended = self._sdpa_attention(q, k, v.float(), q_counts, k_counts)
-            attended = attended.reshape(n_tokens, self.dim).to(snapshot.dtype)
-            x = snapshot + self.cross_layer_scale[layer] * self.out_proj[layer](
-                attended
-            )
-            x = x + self.ffn[layer](self.ffn_norm[layer](x))
-
-        temporal_delta = x - base
-        return x, temporal_delta, time_embedding
-
-
-class TimeConditionedParallelCrossAttention(ParallelBidirectionalCrossAttention):
-    """Cross-attention with optional endpoint-time token conditioning.
-
-    A learned projection of the caller-provided source-time coordinate is added
-    once to each fused token before the Transformer layers. Q, K, and V therefore
-    all carry time information. V3 and V4 supply relative seconds divided by a
-    fixed reference second. V7/V7.1 disable that path and may provide a distinct
-    query coordinate for RoPE while keys remain at observed reference-frame
-    coordinates. V7.2 and V8 restore the V3-V5 input-time path; V8 may also
-    expose final Q/K to one sparse coordinate readout. Within each layer both
-    endpoint directions read the same immutable snapshot and are committed
-    together.
-    """
-
-    def __init__(self, cfg, dim: int):
-        nn.Module.__init__(self)
-        self.dim = int(dim)
-        self.num_heads = int(_cfg_get(cfg, "num_heads", 8))
-        self.motion_head_count = int(_cfg_get(cfg, "motion_head_count", 0))
-        self.n_layers = int(_cfg_get(cfg, "layers", 1))
-        self.mlp_ratio = float(_cfg_get(cfg, "mlp_ratio", 4.0))
-        self.implementation = str(
-            _cfg_get(cfg, "implementation", "flash_varlen")
-        ).lower()
-        self.use_time_embedding = bool(
-            _cfg_get(cfg, "use_time_embedding", True)
-        )
-        if self.dim % self.num_heads != 0:
-            raise ValueError("dynamic token dim must be divisible by num_heads")
-        if self.n_layers < 1:
-            raise ValueError("dynamic temporal layers must be at least one")
-        if not 0 <= self.motion_head_count <= self.num_heads:
-            raise ValueError(
-                "motion_head_count must be between zero and num_heads"
-            )
-        self.head_dim = self.dim // self.num_heads
-        if self.head_dim % 6 != 0:
-            raise ValueError(
-                "dynamic attention head dim must be divisible by 6 for 3D RoPE"
-            )
-        self.scale = self.head_dim ** -0.5
-
-        time_frequencies = int(_cfg_get(cfg, "time_frequencies", 8))
-        time_hidden_dim = _cfg_get(cfg, "time_hidden_dim", None)
-        if not self.use_time_embedding:
-            # V7/V7.1 supply signed physical time only through the detached Q
-            # coordinate warp. No endpoint-time parameter is constructed or
-            # added to Q/K/V or the residual stream.
-            self.time_encoder = None
-            self.time_to_feature = None
-        elif time_hidden_dim is None:
-            # Preserve the exact V3-V5 checkpoint parameterization:
-            # Fourier -> MLP(..., time_dim) -> bias-free Linear(time_dim, dim).
-            time_dim = int(_cfg_get(cfg, "time_embedding_dim", 64))
-            self.time_encoder = SinusoidalScalarEncoder(
-                time_dim, time_frequencies
-            )
-            self.time_to_feature = nn.Linear(time_dim, self.dim, bias=False)
-        else:
-            # V6 has no other consumer of a standalone 64D time embedding. Let
-            # one MLP map Fourier features directly through the compact hidden
-            # bottleneck to the token width: 17 -> 64 -> 576 by default.
-            self.time_encoder = SinusoidalScalarEncoder(
-                self.dim,
-                time_frequencies,
-                hidden_dim=int(time_hidden_dim),
-            )
-            self.time_to_feature = nn.Identity()
-        rope_position_scale = _cfg_get(cfg, "rope_position_scale", None)
-        if rope_position_scale is None:
-            # Historical configs may specify a half-period range instead of the
-            # actual radians/metre multiplier. Preserve that exact semantics.
-            range_m = float(_cfg_get(cfg, "rope_range_m", 110.0))
-            rope_position_scale = math.pi / range_m
-        self.rope = Rotary3D(
-            self.head_dim,
-            base=float(_cfg_get(cfg, "rope_base", 10.0)),
-            position_scale=float(rope_position_scale),
-        )
-
-        # V5: the motion heads solve a correspondence at the anchor spacing
-        # (~0.4 m), which the shared band above cannot resolve -- its shortest
-        # wavelength is 2*pi/position_scale metres. Giving those heads their own
-        # finer band leaves the feature heads' band untouched.
-        motion_rope_base = _cfg_get(cfg, "motion_rope_base", None)
-        motion_rope_position_scale = _cfg_get(cfg, "motion_rope_position_scale", None)
-        if (motion_rope_base is None) != (motion_rope_position_scale is None):
-            raise ValueError(
-                "motion_rope_base and motion_rope_position_scale must be set together"
-            )
-        if motion_rope_base is not None and self.motion_head_count <= 0:
-            raise ValueError(
-                "motion RoPE requires temporal.motion_head_count > 0"
-            )
-        self.motion_rope = (
-            Rotary3D(
-                self.head_dim,
-                base=float(motion_rope_base),
-                position_scale=float(motion_rope_position_scale),
-            )
-            if motion_rope_base is not None
-            else None
-        )
-
-        self._build_qk_norm(_cfg_get(cfg, "qk_norm", False))
-        self._build_transformer_layers(cfg)
-        self._tie_motion_qk_init(cfg)
-
-    def _tie_motion_qk_init(self, cfg):
-        """V8: give the final layer's motion heads a symmetric descriptor.
-
-        Q and K stay distinct Parameters, so rendering and correspondence
-        gradients can specialize them later; only their initial geometry is
-        shared. This copies existing weights and draws no new randomness, so
-        where it runs in the constructor does not affect any other parameter.
-        """
-        self.tie_motion_qk_init = bool(
-            _cfg_get(cfg, "tie_motion_qk_init", False)
-        )
-        if not self.tie_motion_qk_init:
-            return
-        if self.motion_head_count <= 0:
-            raise ValueError(
-                "tie_motion_qk_init requires motion_head_count > 0"
-            )
-        motion_width = self.motion_head_count * self.head_dim
-        with torch.no_grad():
-            self.k_proj[-1].weight[:motion_width].copy_(
-                self.q_proj[-1].weight[:motion_width]
-            )
-            self.k_proj[-1].bias[:motion_width].copy_(
-                self.q_proj[-1].bias[:motion_width]
-            )
-
-    def _rotate_heads(self, x, angles, motion_angles):
-        """Apply RoPE, giving the motion heads their own band when configured."""
-        if motion_angles is None:
-            return self.rope.rotate(x, angles[:, None, :, :])
-        split = self.motion_head_count
-        return torch.cat(
-            [
-                self.motion_rope.rotate(
-                    x[:, :split], motion_angles[:, None, :, :]
-                ),
-                self.rope.rotate(x[:, split:], angles[:, None, :, :]),
-            ],
-            dim=1,
-        )
-
-    @torch.no_grad()
-    def attention_temperature_stats(self):
-        """Softmax temperature diagnostics, free of any attention computation.
-
-        Under QK-Norm ``|q| = gamma * sqrt(head_dim)`` exactly, so the norm gains
-        alone bound the logit. Tracking them catches the V4 saturation collapse
-        long before it shows up in a render metric.
-        """
-        if not self.qk_norm:
-            return {}
-        motion = self.motion_head_count
-        stats = {}
-        bound = 0.0
-        for layer in range(self.n_layers):
-            gq = self.q_norm[layer].weight.float()
-            gk = self.k_norm[layer].weight.float()
-            rms_q = float(gq.square().mean().sqrt())
-            rms_k = float(gk.square().mean().sqrt())
-            # |q||k| * softmax_scale with |q| = rms_q * sqrt(head_dim)
-            bound = max(bound, rms_q * rms_k * self.head_dim * self.scale)
-            stats[f"qk_gamma_q_layer{layer}"] = rms_q
-            stats[f"qk_gamma_k_layer{layer}"] = rms_k
-        stats["qk_max_logit_bound"] = bound
-        stats["qk_motion_head_count"] = float(motion)
-        return stats
-
-    def _motion_displacement(
-        self,
-        q,
-        k,
-        position_ref,
-        memory_rows,
-        q_counts,
-        k_counts,
-        *,
-        use_flash,
-        motion_matcher=None,
-    ):
-        """Return source-to-opposite-frame soft displacement from selected heads.
-
-        ``q_proj`` and ``k_proj`` are stored as one full-width Linear per layer,
-        but each contiguous output block is an independent head projection. V4
-        reuses the first ``motion_head_count`` Q/K blocks from the final feature
-        attention layer. Supplying xyz as V computes the attention-weighted
-        opposite-frame position without materializing an O(N^2) score tensor.
-        """
-
-        head_count = self.motion_head_count
-        if head_count <= 0:
-            raise RuntimeError(
-                "motion displacement requested with motion_head_count=0"
-            )
-        q_motion = q[:, :head_count]
-        k_motion = k[:, :head_count]
-        if motion_matcher is not None:
-            return motion_matcher(
-                q_motion,
-                k_motion,
-                position_ref,
-                memory_rows,
-                q_counts,
-                k_counts,
-                scale=self.scale,
-            )
-        coordinate_value = F.pad(
-            position_ref[memory_rows].float(),
-            (0, self.head_dim - 3),
-        ).unsqueeze(1).expand(-1, head_count, -1).contiguous()
-        if use_flash:
-            # Metric xyz benefits from fp16's finer mantissa at driving ranges;
-            # the feature path retains its existing device-dependent dtype.
-            matched = self._flash_attention(
-                q_motion,
-                k_motion,
-                coordinate_value,
-                q_counts,
-                k_counts,
-                flash_dtype=torch.float16,
-            )
-        else:
-            matched = self._sdpa_attention(
-                q_motion,
-                k_motion,
-                coordinate_value,
-                q_counts,
-                k_counts,
-            )
-        matched_position = matched[..., :3].mean(dim=1)
-        return (matched_position - position_ref.float()).to(position_ref.dtype)
-
-    def forward(
-        self,
-        feature,
-        position_ref,
-        token_offset,
-        frame_batch_idx,
-        token_time_coordinate,
-        *,
-        return_motion_displacement=False,
-        query_position_ref=None,
-        motion_matcher=None,
-    ):
-        n_tokens = int(feature.shape[0])
-        if position_ref.shape != (n_tokens, 3):
-            raise ValueError("position_ref must align with dynamic token features")
-        if token_time_coordinate is None and self.use_time_embedding:
-            raise ValueError("time-conditioned attention requires token time")
-        if (
-            token_time_coordinate is not None
-            and token_time_coordinate.shape != (n_tokens,)
-        ):
-            raise ValueError("token_time_coordinate must provide one scalar per token")
-        if query_position_ref is None:
-            query_position_ref = position_ref
-        if query_position_ref.shape != (n_tokens, 3):
-            raise ValueError(
-                "query_position_ref must align with dynamic token features"
-            )
-        q_counts, k_counts, memory_rows = self._frame_layout(
-            token_offset, frame_batch_idx
-        )
-        if int(q_counts.sum()) != n_tokens:
-            raise ValueError("token_offset does not cover all dynamic tokens")
-        if return_motion_displacement and self.motion_head_count <= 0:
-            raise ValueError(
-                "return_motion_displacement requires motion_head_count > 0"
-            )
-
-        if self.use_time_embedding:
-            time_embedding = self.time_encoder(token_time_coordinate)
-            x = feature + self.time_to_feature(time_embedding).to(feature.dtype)
-        else:
-            x = feature
-        q_angles = self.rope.angles(query_position_ref)
-        k_angles = self.rope.angles(position_ref[memory_rows])
-        if self.motion_rope is None:
-            q_motion_angles = k_motion_angles = None
-        else:
-            q_motion_angles = self.motion_rope.angles(position_ref)
-            k_motion_angles = self.motion_rope.angles(position_ref[memory_rows])
-        use_flash = (
-            x.is_cuda
-            and flash_attn is not None
-            and self.implementation in ("flash_varlen", "auto")
-        )
-        if (
-            x.is_cuda
-            and self.implementation == "flash_varlen"
-            and flash_attn is None
-        ):
-            raise RuntimeError(
-                "dynamic temporal attention requested flash_varlen, but "
-                "flash_attn is unavailable"
-            )
-
-        motion_displacement = None
-        for layer in range(self.n_layers):
-            snapshot = x
-            conditioned = self.input_norm[layer](snapshot)
-            q = self.q_proj[layer](conditioned).reshape(
-                n_tokens, self.num_heads, self.head_dim
-            )
-            k = self.k_proj[layer](conditioned)[memory_rows].reshape(
-                n_tokens, self.num_heads, self.head_dim
-            )
-            v = self.v_proj[layer](conditioned)[memory_rows].reshape(
-                n_tokens, self.num_heads, self.head_dim
-            )
-            if self.qk_norm:
-                q = self.q_norm[layer](q)
-                k = self.k_norm[layer](k)
-            q = self._rotate_heads(q.float(), q_angles, q_motion_angles)
-            k = self._rotate_heads(k.float(), k_angles, k_motion_angles)
-            if use_flash:
-                attended = self._flash_attention(q, k, v, q_counts, k_counts)
-            else:
-                attended = self._sdpa_attention(q, k, v.float(), q_counts, k_counts)
-            if return_motion_displacement and layer == self.n_layers - 1:
-                motion_displacement = self._motion_displacement(
-                    q,
-                    k,
-                    position_ref,
-                    memory_rows,
-                    q_counts,
-                    k_counts,
-                    use_flash=use_flash,
-                    motion_matcher=motion_matcher,
-                )
-            attended = attended.reshape(n_tokens, self.dim).to(snapshot.dtype)
-            x = snapshot + self.cross_layer_scale[layer] * self.out_proj[layer](
-                attended
-            )
-            x = x + self.ffn[layer](self.ffn_norm[layer](x))
-        if return_motion_displacement:
-            return x, motion_displacement
-        return x
-
-class LayerWeightedDistanceBiasCrossAttention(
-    ParallelBidirectionalCrossAttention
-):
-    """V10 all-layer/all-head matching with a query-only global token.
-
-    For ordinary token queries, the score in every layer and head is
-
-    ``q @ k / sqrt(d) - ||x_q - x_k||^2 / (speed * duration)^2``.
-
-    The distance term replaces 3D RoPE rather than being stacked with it.  It is
-    represented exactly (up to a query-row constant, which softmax cancels) by
-    four extra Q/K channels.  This keeps the feature update and coordinate
-    expectation in one varlen FlashAttention call and avoids materializing an
-    ``O(N^2)`` bias tensor.  The V tensor carries the ordinary feature channels
-    plus xyz, so averaging the xyz outputs over all heads gives ``W_l @ xyz``.
-
-    One learned token is broadcast once per source frame and appended only to
-    that frame's query sequence.  It therefore pools the opposite endpoint but
-    cannot consume matching probability as a coordinate-less key. It receives
-    the source frame's time embedding but its four geometric Q channels are
-    zero, so no fictitious xyz or distance penalty is assigned. After each
-    layer's residual and FFN update, one shared two-linear/one-activation MLP
-    predicts ``a_l`` from the frame token.  Softmax over layers gives ``k_l``.
-    By linearity, weighting the compact per-layer coordinate expectations is
-    exactly equivalent to constructing ``W = sum_l k_l W_l`` first.
-    """
-
-    _DISTANCE_CHANNELS = 4
-    _FLASH_HEAD_ALIGNMENT = 8
-
-    def __init__(self, cfg, dim: int):
-        # Deliberately skip the parent constructors: both historical classes
-        # instantiate a Rotary3D object and impose its head-width constraint.
-        nn.Module.__init__(self)
-        self.dim = int(dim)
-        self.num_heads = int(_cfg_get(cfg, "num_heads", 8))
-        self.motion_head_count = self.num_heads
-        self.n_layers = int(_cfg_get(cfg, "layers", 1))
-        self.mlp_ratio = float(_cfg_get(cfg, "mlp_ratio", 4.0))
-        self.implementation = str(
-            _cfg_get(cfg, "implementation", "flash_varlen")
-        ).lower()
-        self.use_time_embedding = bool(
-            _cfg_get(cfg, "use_time_embedding", True)
-        )
-        self.position_encoding = str(
-            _cfg_get(cfg, "position_encoding", "distance_bias")
-        ).lower()
-        self.distance_bias_speed_mps = float(
-            _cfg_get(cfg, "distance_bias_speed_mps", 30.0)
-        )
-        self.layer_weight_hidden_dim = int(
-            _cfg_get(cfg, "layer_weight_hidden_dim", self.dim)
-        )
-
-        if self.dim <= 0 or self.num_heads <= 0:
-            raise ValueError("V10 attention dimensions must be positive")
-        if self.dim % self.num_heads != 0:
-            raise ValueError("dynamic token dim must be divisible by num_heads")
-        if self.n_layers < 1:
-            raise ValueError("dynamic temporal layers must be at least one")
-        if self.mlp_ratio <= 0.0:
-            raise ValueError("dynamic temporal mlp_ratio must be positive")
-        if not self.use_time_embedding:
-            raise ValueError("V10 temporal attention requires time embedding")
-        if self.position_encoding != "distance_bias":
-            raise ValueError(
-                "V10 temporal position_encoding must be 'distance_bias'"
-            )
-        if self.distance_bias_speed_mps <= 0.0:
-            raise ValueError("V10 distance_bias_speed_mps must be positive")
-        if self.layer_weight_hidden_dim <= 0:
-            raise ValueError("V10 layer_weight_hidden_dim must be positive")
-
-        self.head_dim = self.dim // self.num_heads
-        self.scale = self.head_dim ** -0.5
-        unpadded_head_dim = self.head_dim + self._DISTANCE_CHANNELS
-        self.attention_head_dim = (
-            (unpadded_head_dim + self._FLASH_HEAD_ALIGNMENT - 1)
-            // self._FLASH_HEAD_ALIGNMENT
-            * self._FLASH_HEAD_ALIGNMENT
-        )
-        if self.attention_head_dim > 256:
-            raise ValueError(
-                "V10 padded attention head width must not exceed 256"
-            )
-
-        time_dim = int(_cfg_get(cfg, "time_embedding_dim", 64))
-        time_frequencies = int(_cfg_get(cfg, "time_frequencies", 8))
-        self.time_encoder = SinusoidalScalarEncoder(
-            time_dim, time_frequencies
-        )
-        self.time_to_feature = nn.Linear(time_dim, self.dim, bias=False)
-
-        if not bool(_cfg_get(cfg, "qk_norm", True)):
-            raise ValueError("V10 requires qk_norm=true")
-        self._build_qk_norm(True)
-        self._build_transformer_layers(cfg)
-
-        # A single parameter is cloned per frame/query direction.  The clones
-        # become distinct states after their first cross-attention update.
-        self.global_token = nn.Parameter(torch.empty(1, self.dim))
-        nn.init.normal_(self.global_token, mean=0.0, std=0.02)
-        self.layer_score_mlp = nn.Sequential(
-            nn.Linear(self.dim, self.layer_weight_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(self.layer_weight_hidden_dim, 1),
-        )
-        # Start with an exact uniform distribution over layers.  The output
-        # layer immediately receives gradient from differences among W_l.
-        nn.init.zeros_(self.layer_score_mlp[-1].weight)
-        nn.init.zeros_(self.layer_score_mlp[-1].bias)
-
-    @staticmethod
-    def _pack_frame_queries(regular, global_state, counts):
-        """Interleave one global query after each ragged frame sequence."""
-        chunks = []
-        start = 0
-        for frame, count in enumerate(counts):
-            count = int(count)
-            chunks.append(torch.cat([
-                regular[start:start + count], global_state[frame:frame + 1]
-            ], dim=0))
-            start += count
-        return torch.cat(chunks, dim=0)
-
-    @staticmethod
-    def _unpack_frame_queries(packed, counts):
-        """Undo :meth:`_pack_frame_queries` without changing token order."""
-        regular_chunks = []
-        global_chunks = []
-        packed_start = 0
-        for count in counts:
-            count = int(count)
-            regular_chunks.append(packed[packed_start:packed_start + count])
-            global_chunks.append(
-                packed[packed_start + count:packed_start + count + 1]
-            )
-            packed_start += count + 1
-        return torch.cat(regular_chunks, dim=0), torch.cat(global_chunks, dim=0)
-
-    @staticmethod
-    def _frame_first(value, counts):
-        starts = torch.cumsum(counts, dim=0) - counts
-        return value[starts.long()]
-
-    @staticmethod
-    def _center_pair_positions(
-        position_ref, memory_rows, q_counts, k_counts
-    ):
-        """Center each directional pair for stable squared-distance algebra."""
-        query_starts = torch.cumsum(q_counts, dim=0) - q_counts
-        key_starts = torch.cumsum(k_counts, dim=0) - k_counts
-        key_position = position_ref[memory_rows].float()
-        query_chunks = []
-        key_chunks = []
-        for qs, qn, ks, kn in zip(
-            query_starts, q_counts, key_starts, k_counts
-        ):
-            qs, qn, ks, kn = map(int, (qs, qn, ks, kn))
-            if qn <= 0 or kn <= 0:
-                raise ValueError("V10 requires tokens in both endpoint frames")
-            query = position_ref[qs:qs + qn].float()
-            key = key_position[ks:ks + kn]
-            origin = 0.5 * (query.mean(dim=0) + key.mean(dim=0))
-            query_chunks.append(query - origin)
-            key_chunks.append(key - origin)
-        return torch.cat(query_chunks, dim=0), torch.cat(key_chunks, dim=0)
-
-    def _distance_features(self, position, radius, *, is_global=False):
-        """Four channels whose scaled dot product gives the distance bias."""
-        if position.shape[-1] != 3 or radius.shape != position.shape[:-1]:
-            raise ValueError("V10 distance features require aligned xyz/radius")
-        if is_global:
-            return position.new_zeros(*position.shape[:-1], 4)
-        normalized = position.float() / radius.float().unsqueeze(-1)
-        inverse_sqrt_scale = math.sqrt(1.0 / self.scale)
-        xyz = math.sqrt(2.0 / self.scale) * normalized
-        constant = torch.full_like(radius.float().unsqueeze(-1), inverse_sqrt_scale)
-        return torch.cat([xyz, constant], dim=-1)
-
-    def _distance_key_features(self, position, radius):
-        if position.shape[-1] != 3 or radius.shape != position.shape[:-1]:
-            raise ValueError("V10 distance key features require aligned xyz/radius")
-        normalized = position.float() / radius.float().unsqueeze(-1)
-        inverse_sqrt_scale = math.sqrt(1.0 / self.scale)
-        return torch.cat([
-            math.sqrt(2.0 / self.scale) * normalized,
-            -normalized.square().sum(dim=-1, keepdim=True)
-            * inverse_sqrt_scale,
-        ], dim=-1)
-
-    def _augment_attention_tensors(
-        self,
-        q,
-        k,
-        v,
-        query_position,
-        key_position,
-        key_value_position,
-        query_radius,
-        key_radius,
-        q_count_values,
-        frame_global_q,
-    ):
-        """Pad Q/K/V and carry xyz in V for one shared attention softmax."""
-        query_distance = self._distance_features(
-            query_position, query_radius
-        )
-        global_distance = self._distance_features(
-            frame_global_q.new_zeros(frame_global_q.shape[0], 3),
-            frame_global_q.new_ones(frame_global_q.shape[0]),
-            is_global=True,
-        )
-        packed_distance = self._pack_frame_queries(
-            query_distance, global_distance, q_count_values
-        )
-        key_distance = self._distance_key_features(key_position, key_radius)
-
-        padded_q = q.new_zeros(
-            q.shape[0], self.num_heads, self.attention_head_dim,
-            dtype=torch.float32,
-        )
-        padded_k = k.new_zeros(
-            k.shape[0], self.num_heads, self.attention_head_dim,
-            dtype=torch.float32,
-        )
-        padded_v = v.new_zeros(
-            v.shape[0], self.num_heads, self.attention_head_dim,
-            dtype=torch.float32,
-        )
-        padded_q[..., :self.head_dim] = q.float()
-        padded_k[..., :self.head_dim] = k.float()
-        padded_v[..., :self.head_dim] = v.float()
-        distance_slice = slice(
-            self.head_dim, self.head_dim + self._DISTANCE_CHANNELS
-        )
-        padded_q[..., distance_slice] = packed_distance[:, None, :]
-        padded_k[..., distance_slice] = key_distance[:, None, :]
-        padded_v[..., self.head_dim:self.head_dim + 3] = (
-            key_value_position.float()[:, None, :]
-        )
-        return padded_q, padded_k, padded_v
-
-    @torch.no_grad()
-    def attention_temperature_stats(self):
-        stats = {
-            "qk_motion_head_count": float(self.num_heads),
-            "distance_bias_speed_mps": self.distance_bias_speed_mps,
-        }
-        bound = 0.0
-        for layer in range(self.n_layers):
-            gq = self.q_norm[layer].weight.float()
-            gk = self.k_norm[layer].weight.float()
-            rms_q = float(gq.square().mean().sqrt())
-            rms_k = float(gk.square().mean().sqrt())
-            bound = max(bound, rms_q * rms_k * self.head_dim * self.scale)
-            stats[f"qk_gamma_q_layer{layer}"] = rms_q
-            stats[f"qk_gamma_k_layer{layer}"] = rms_k
-        stats["qk_max_logit_bound"] = bound
-        return stats
-
-    @staticmethod
-    def _combine_layer_matches(
-        layer_matched_positions, frame_logits, q_counts, position_ref
-    ):
-        """Apply the per-frame layer softmax to compact ``W_l @ xyz`` values."""
-        if layer_matched_positions.ndim != 3:
-            raise ValueError("V10 layer matches must have shape (N,L,3)")
-        if layer_matched_positions.shape[-1] != 3:
-            raise ValueError("V10 layer matches must end in xyz")
-        if frame_logits.shape != (
-            q_counts.numel(), layer_matched_positions.shape[1]
-        ):
-            raise ValueError("V10 frame logits must align with frames and layers")
-        if position_ref.shape != (layer_matched_positions.shape[0], 3):
-            raise ValueError("V10 positions must align with layer matches")
-        frame_weights = torch.softmax(frame_logits.float(), dim=-1)
-        token_weights = torch.repeat_interleave(
-            frame_weights, q_counts, dim=0
-        )
-        token_logits = torch.repeat_interleave(frame_logits, q_counts, dim=0)
-        matched_position = (
-            token_weights.unsqueeze(-1) * layer_matched_positions.float()
-        ).sum(dim=1)
-        displacement = matched_position - position_ref.float()
-        return matched_position, displacement, token_logits, token_weights
-
-    def forward(
-        self,
-        feature,
-        position_ref,
-        token_offset,
-        frame_batch_idx,
-        token_time_coordinate,
-        token_duration_sec,
-    ):
-        n_tokens = int(feature.shape[0])
-        if feature.shape != (n_tokens, self.dim):
-            raise ValueError(f"V10 feature must be (N,{self.dim})")
-        if position_ref.shape != (n_tokens, 3):
-            raise ValueError("position_ref must align with V10 token features")
-        if token_time_coordinate.shape != (n_tokens,):
-            raise ValueError("V10 token time must provide one scalar per token")
-        if token_duration_sec.shape != (n_tokens,):
-            raise ValueError("V10 duration must provide one scalar per token")
-        if not bool(torch.all(
-            torch.isfinite(token_duration_sec) & (token_duration_sec > 0.0)
-        )):
-            raise ValueError("V10 requires positive finite durations")
-
-        q_counts, k_counts, memory_rows = self._frame_layout(
-            token_offset, frame_batch_idx
-        )
-        if int(q_counts.sum()) != n_tokens:
-            raise ValueError("token_offset does not cover all V10 tokens")
-        if bool(torch.any(q_counts <= 0)) or bool(torch.any(k_counts <= 0)):
-            raise ValueError("V10 requires tokens in both endpoint frames")
-
-        time_embedding = self.time_encoder(token_time_coordinate)
-        time_feature = self.time_to_feature(time_embedding).to(feature.dtype)
-        x = feature + time_feature
-        frame_time_feature = self._frame_first(time_feature, q_counts)
-        global_state = self.global_token.to(feature.dtype).expand(
-            q_counts.numel(), -1
-        ) + frame_time_feature
-
-        query_position, key_position = self._center_pair_positions(
-            position_ref, memory_rows, q_counts, k_counts
-        )
-        key_value_position = position_ref[memory_rows]
-        frame_duration = self._frame_first(token_duration_sec, q_counts).float()
-        frame_radius = self.distance_bias_speed_mps * frame_duration
-        query_radius = torch.repeat_interleave(frame_radius, q_counts)
-        key_radius = torch.repeat_interleave(frame_radius, k_counts)
-        query_counts_with_global = q_counts + 1
-        # Convert once before the layer loop. Re-reading CUDA scalar counts in
-        # every pack/unpack call would otherwise introduce three synchronizing
-        # host round-trips per temporal layer.
-        q_count_values = [int(value) for value in q_counts.tolist()]
-
-        use_flash = (
-            x.is_cuda
-            and flash_attn is not None
-            and self.implementation in ("flash_varlen", "auto")
-        )
-        if (
-            x.is_cuda
-            and self.implementation == "flash_varlen"
-            and flash_attn is None
-        ):
-            raise RuntimeError(
-                "V10 temporal attention requested flash_varlen, but "
-                "flash_attn is unavailable"
-            )
-
-        layer_matched_positions = []
-        frame_layer_logits = []
-        for layer in range(self.n_layers):
-            token_snapshot = x
-            global_snapshot = global_state
-            token_conditioned = self.input_norm[layer](token_snapshot)
-            global_conditioned = self.input_norm[layer](global_snapshot)
-
-            token_q = self.q_proj[layer](token_conditioned).reshape(
-                n_tokens, self.num_heads, self.head_dim
-            )
-            global_q = self.q_proj[layer](global_conditioned).reshape(
-                q_counts.numel(), self.num_heads, self.head_dim
-            )
-            q = self._pack_frame_queries(token_q, global_q, q_count_values)
-            k = self.k_proj[layer](token_conditioned)[memory_rows].reshape(
-                n_tokens, self.num_heads, self.head_dim
-            )
-            v = self.v_proj[layer](token_conditioned)[memory_rows].reshape(
-                n_tokens, self.num_heads, self.head_dim
-            )
-            q = self.q_norm[layer](q)
-            k = self.k_norm[layer](k)
-            q, k, v = self._augment_attention_tensors(
-                q,
-                k,
-                v,
-                query_position,
-                key_position,
-                key_value_position,
-                query_radius,
-                key_radius,
-                q_count_values,
-                global_q,
-            )
-            if use_flash:
-                # xyz at driving range needs fp16's finer mantissa than bf16;
-                # QK-Norm keeps the feature channels safe in fp16 here.
-                attended = self._flash_attention(
-                    q,
-                    k,
-                    v,
-                    query_counts_with_global,
-                    k_counts,
-                    flash_dtype=torch.float16,
-                )
-            else:
-                attended = self._sdpa_attention(
-                    q,
-                    k,
-                    v,
-                    query_counts_with_global,
-                    k_counts,
-                )
-            token_attended, global_attended = self._unpack_frame_queries(
-                attended, q_count_values
-            )
-
-            # Every head uses the same xyz V but its own probability row.  The
-            # equal head mean is precisely W_l applied to opposite-frame xyz.
-            layer_matched_positions.append(
-                token_attended[..., self.head_dim:self.head_dim + 3].mean(dim=1)
-            )
-            token_feature = token_attended[..., :self.head_dim].reshape(
-                n_tokens, self.dim
-            ).to(token_snapshot.dtype)
-            global_feature = global_attended[..., :self.head_dim].reshape(
-                q_counts.numel(), self.dim
-            ).to(global_snapshot.dtype)
-            x = token_snapshot + self.cross_layer_scale[layer] * self.out_proj[layer](
-                token_feature
-            )
-            global_state = (
-                global_snapshot
-                + self.cross_layer_scale[layer]
-                * self.out_proj[layer](global_feature)
-            )
-            x = x + self.ffn[layer](self.ffn_norm[layer](x))
-            global_state = global_state + self.ffn[layer](
-                self.ffn_norm[layer](global_state)
-            )
-            frame_layer_logits.append(
-                self.layer_score_mlp(global_state).squeeze(-1)
-            )
-
-        frame_logits = torch.stack(frame_layer_logits, dim=-1)
-        layer_matched_position = torch.stack(
-            layer_matched_positions, dim=1
-        ).float()
-        (
-            matched_position,
-            displacement,
-            token_logits,
-            token_weights,
-        ) = self._combine_layer_matches(
-            layer_matched_position,
-            frame_logits,
-            q_counts,
-            position_ref,
-        )
-        return x, {
-            "delta_p_match": displacement,
-            "delta_p_init": displacement,
-            "matched_position": matched_position,
-            "motion_layer_logits": token_logits,
-            "motion_layer_weights": token_weights,
-        }
 
 class MaxSpeedBarrierLayerWeightedCrossAttention(
-    ParallelBidirectionalCrossAttention
+    BidirectionalCrossAttentionBase
 ):
     """V11 split position encoding with a parameter-only layer mixture.
 
@@ -1118,9 +187,9 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
 
     which is exactly zero inside the radius a ``v_max`` object could cover over
     the endpoint interval and grows outside it -- quadratically at ``p=2``
-    (V11's shipped form), linearly at ``p=1``.  Unlike V10's
-    ``-(d/R)^2`` prior the hinge is not a bilinear form, so it cannot be folded
-    into extra Q/K channels; this head therefore runs as an explicit softmax,
+    (V11's shipped form), linearly at ``p=1``.  Unlike a ``-(d/R)^2`` prior
+    the hinge is not a bilinear form, so it cannot be folded into extra Q/K
+    channels; this head therefore runs as an explicit softmax,
     chunked over queries and recomputed in backward.  Its V carries the ordinary
     feature channels plus opposite-frame xyz, so one pass returns both the
     feature update and ``W_l @ xyz``.
@@ -1143,10 +212,7 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
         return value[starts.long()]
 
     def __init__(self, cfg, dim: int):
-        # Skip both parent constructors: the base class builds one RoPE across
-        # every head and a per-layer time_to_q/time_to_k pair this variant does
-        # not use.
-        nn.Module.__init__(self)
+        super().__init__()
         self.dim = int(dim)
         self.num_heads = int(_cfg_get(cfg, "num_heads", 8))
         self.n_layers = int(_cfg_get(cfg, "layers", 1))
@@ -1213,9 +279,9 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
             position_scale=float(rope_position_scale),
         )
 
-        # Preserve the V5/V9 endpoint-time parameterization exactly:
-        # Fourier -> MLP(..., time_dim) -> bias-free Linear(time_dim, dim),
-        # added once to the fused token before layer one.
+        # Endpoint time: Fourier -> MLP(..., time_dim) -> bias-free
+        # Linear(time_dim, dim), added once to the fused token before layer one.
+        # Every temporal variant shares this parameterization.
         time_dim = int(_cfg_get(cfg, "time_embedding_dim", 64))
         time_frequencies = int(_cfg_get(cfg, "time_frequencies", 8))
         self.time_encoder = SinusoidalScalarEncoder(time_dim, time_frequencies)
@@ -1319,7 +385,7 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
 
         Retaining every chunk's ``N_q x N_k`` probabilities across twelve layers
         would dominate activation memory, so each chunk is recomputed in
-        backward exactly as V9's dense proposal does. The ragged layout and the
+        backward. The ragged layout and the
         per-frame radius arrive as Python scalars the caller resolved once, so
         no layer costs a host synchronization.
         """
@@ -2059,7 +1125,7 @@ class FixedMotionGainLearnableMaxSpeedBarrierCrossAttention(
 
 
 class CosineRoPELayerWeightedCrossAttention(
-    ParallelBidirectionalCrossAttention
+    BidirectionalCrossAttentionBase
 ):
     """V13 all-head RoPE refinement with a cosine motion head.
 
@@ -2092,9 +1158,7 @@ class CosineRoPELayerWeightedCrossAttention(
     _VARIANT_LABEL = "V13"
 
     def __init__(self, cfg, dim: int):
-        # The legacy parent constructor builds per-layer time-to-Q/K projections,
-        # while V13 uses one V5-style time feature before layer one.
-        nn.Module.__init__(self)
+        super().__init__()
         self.dim = int(dim)
         self.num_heads = int(_cfg_get(cfg, "num_heads", 8))
         self.n_layers = int(_cfg_get(cfg, "layers", 1))
@@ -2642,9 +1706,7 @@ class GroupedGainBarrierCrossAttention(
         return stats
 
 __all__ = [
-    "ParallelBidirectionalCrossAttention",
-    "TimeConditionedParallelCrossAttention",
-    "LayerWeightedDistanceBiasCrossAttention",
+    "BidirectionalCrossAttentionBase",
     "MaxSpeedBarrierLayerWeightedCrossAttention",
     "FinalFeatureBarrierCrossAttention",
     "CosineRoPELayerWeightedCrossAttention",

@@ -6,19 +6,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "nuscene_train.yaml"
 
-LEGACY_VARIANT = "bbox_rigid_v1"
-DYNAMIC_VARIANT_V1 = "dynamic_2dgs_direct_velocity_v1"
-DYNAMIC_VARIANT_V3 = "dynamic_2dgs_physical_velocity_v3"
-DYNAMIC_VARIANT_V3_1 = "dynamic_2dgs_physical_velocity_v3_1"
-DYNAMIC_VARIANT_V4 = "dynamic_2dgs_attention_velocity_v4"
-DYNAMIC_VARIANT_V5 = "dynamic_2dgs_attention_velocity_v5"
-DYNAMIC_VARIANT_V6 = "dynamic_2dgs_attention_velocity_v6"
-DYNAMIC_VARIANT_V7 = "dynamic_2dgs_attention_velocity_v7"
-DYNAMIC_VARIANT_V7_1 = "dynamic_2dgs_attention_velocity_v7_1"
-DYNAMIC_VARIANT_V7_2 = "dynamic_2dgs_attention_velocity_v7_2"
-DYNAMIC_VARIANT_V8 = "dynamic_2dgs_attention_velocity_v8"
-DYNAMIC_VARIANT_V9 = "dynamic_2dgs_attention_velocity_v9"
-DYNAMIC_VARIANT_V10 = "dynamic_2dgs_attention_velocity_v10"
 DYNAMIC_VARIANT_V11 = "dynamic_2dgs_attention_velocity_v11"
 DYNAMIC_VARIANT_V11_1 = "dynamic_2dgs_attention_velocity_v11_1"
 DYNAMIC_VARIANT_V11_2 = "dynamic_2dgs_attention_velocity_v11_2"
@@ -34,47 +21,21 @@ DYNAMIC_VARIANT_V13_2 = "dynamic_2dgs_attention_velocity_v13_2"
 DYNAMIC_VARIANT_V13_3 = "dynamic_2dgs_attention_velocity_v13_3"
 DYNAMIC_VARIANT_V13_4 = "dynamic_2dgs_attention_velocity_v13_4"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
-# explicit constant for each predecessor so checkpoint semantics stay exact.
-DYNAMIC_VARIANT = DYNAMIC_VARIANT_V7_2
-# V4/V5 use a dense coordinate expectation from selected attention heads. V8
-# reuses selected final-layer heads with a consensus readout; V10 reads every
-# head at every layer and therefore has no `motion_head_count` config key. V11
-# reads head 0 at every layer, as do V11.3 and the V13 family; V11.2 gives every
-# layer head RoPE and reads one dedicated head after refinement. In every case
-# the match head is fixed rather than configured.
-_SELECTED_HEAD_ATTENTION_VELOCITY_VARIANTS = (
-    DYNAMIC_VARIANT_V4,
-    DYNAMIC_VARIANT_V5,
-    DYNAMIC_VARIANT_V8,
-)
-ATTENTION_VELOCITY_VARIANTS = (
-    *_SELECTED_HEAD_ATTENTION_VELOCITY_VARIANTS,
-    DYNAMIC_VARIANT_V10,
-    DYNAMIC_VARIANT_V11,
-    DYNAMIC_VARIANT_V11_1,
-    DYNAMIC_VARIANT_V11_2,
-    DYNAMIC_VARIANT_V11_3,
-    DYNAMIC_VARIANT_V11_4,
-    DYNAMIC_VARIANT_V11_5,
-    DYNAMIC_VARIANT_V11_6,
-    DYNAMIC_VARIANT_V12,
-    DYNAMIC_VARIANT_V12_1,
-    DYNAMIC_VARIANT_V13,
-    DYNAMIC_VARIANT_V13_1,
-    DYNAMIC_VARIANT_V13_2,
-    DYNAMIC_VARIANT_V13_3,
-    DYNAMIC_VARIANT_V13_4,
-)
+# explicit constant for each variant so checkpoint semantics stay exact.
+DYNAMIC_VARIANT = DYNAMIC_VARIANT_V11_4
+# Every variant reads correspondence from a fixed match head rather than a
+# configured one: head 0 at every temporal layer, except V11.2, which gives every
+# layer head RoPE and reads one dedicated head after refinement.
+#
 # Variants whose backend owns the learned_gumbel K={1,2,3} grid Gaussian head,
 # and can therefore let a router decide how many Gaussians each token becomes.
-# Every other dynamic variant emits a fixed count per token. Which of the two a
-# run uses is still a config decision (p2g.grid_query.count_mode) for the
-# variants listed here. V11.3 shares V11's backend class but is deliberately
-# absent: its identity is the fixed two Gaussians per token, so asking it for
-# the router is rejected rather than quietly turning it back into V11. V11.5 and
-# V11.6 are absent for the same reason relative to V11.4.
+# Every other variant emits a fixed count per token. Which of the two a run
+# uses is still a config decision (p2g.grid_query.count_mode) for the variants
+# listed here. V11.3 shares V11's backend class but is deliberately absent: its
+# identity is the fixed two Gaussians per token, so asking it for the router is
+# rejected rather than quietly turning it back into V11. V11.5 and V11.6 are
+# absent for the same reason relative to V11.4.
 ROUTER_CAPABLE_DYNAMIC_VARIANTS = (
-    DYNAMIC_VARIANT_V10,
     DYNAMIC_VARIANT_V11,
     DYNAMIC_VARIANT_V11_2,
     DYNAMIC_VARIANT_V11_4,
@@ -85,10 +46,6 @@ ROUTER_CAPABLE_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13_3,
     DYNAMIC_VARIANT_V13_4,
 )
-# Historical public name retained for scripts and configs that imported it.
-# The tuple describes backend capability; the selected count mode still comes
-# from p2g.grid_query.
-ADAPTIVE_COUNT_DYNAMIC_VARIANTS = ROUTER_CAPABLE_DYNAMIC_VARIANTS
 # V13-family correspondence reads head 0 at every temporal layer, but unlike
 # the barrier family all heads carry 3D RoPE and share one FlashAttention call.
 # In V13/V13.1 only, head 0 is L2-normalized and temperature-scaled.
@@ -148,18 +105,6 @@ BARRIER_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V12_1,
 )
 DYNAMIC_VARIANTS = (
-    DYNAMIC_VARIANT_V1,
-    DYNAMIC_VARIANT_V3,
-    DYNAMIC_VARIANT_V3_1,
-    DYNAMIC_VARIANT_V4,
-    DYNAMIC_VARIANT_V5,
-    DYNAMIC_VARIANT_V6,
-    DYNAMIC_VARIANT_V7,
-    DYNAMIC_VARIANT_V7_1,
-    DYNAMIC_VARIANT_V7_2,
-    DYNAMIC_VARIANT_V8,
-    DYNAMIC_VARIANT_V9,
-    DYNAMIC_VARIANT_V10,
     DYNAMIC_VARIANT_V11,
     DYNAMIC_VARIANT_V11_1,
     DYNAMIC_VARIANT_V11_2,
@@ -176,143 +121,15 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13_4,
 )
 
-# V3 and later share the physical-time contract. V4/V5 add attention-derived
-# initialization; V6 uses an independent proposal branch.
-PHYSICAL_VELOCITY_VARIANTS = (
-    DYNAMIC_VARIANT_V3,
-    DYNAMIC_VARIANT_V3_1,
-    DYNAMIC_VARIANT_V4,
-    DYNAMIC_VARIANT_V5,
-    DYNAMIC_VARIANT_V6,
-    DYNAMIC_VARIANT_V7,
-    DYNAMIC_VARIANT_V7_1,
-    DYNAMIC_VARIANT_V7_2,
-    DYNAMIC_VARIANT_V8,
-    DYNAMIC_VARIANT_V9,
-    DYNAMIC_VARIANT_V10,
-    DYNAMIC_VARIANT_V11,
-    DYNAMIC_VARIANT_V11_1,
-    DYNAMIC_VARIANT_V11_2,
-    DYNAMIC_VARIANT_V11_3,
-    DYNAMIC_VARIANT_V11_4,
-    DYNAMIC_VARIANT_V11_5,
-    DYNAMIC_VARIANT_V11_6,
-    DYNAMIC_VARIANT_V12,
-    DYNAMIC_VARIANT_V12_1,
-    DYNAMIC_VARIANT_V13,
-    DYNAMIC_VARIANT_V13_1,
-    DYNAMIC_VARIANT_V13_2,
-    DYNAMIC_VARIANT_V13_3,
-    DYNAMIC_VARIANT_V13_4,
-)
-
-WARPED_PROPOSAL_VELOCITY_VARIANTS = (
-    DYNAMIC_VARIANT_V7,
-    DYNAMIC_VARIANT_V7_1,
-    DYNAMIC_VARIANT_V7_2,
-)
-DURATION_OFFSET_VELOCITY_VARIANTS = (
-    DYNAMIC_VARIANT_V7,
-    DYNAMIC_VARIANT_V7_1,
-)
-# These proposals run *before* temporal attention on raw LoRA Utonia tokens,
-# which is what makes them need a detached query warp to reach the trunk.
-PROPOSAL_VELOCITY_VARIANTS = (
-    DYNAMIC_VARIANT_V6,
-    *WARPED_PROPOSAL_VELOCITY_VARIANTS,
-)
-# V9 keeps a standalone proposal branch but reads the refined feature instead,
-# so it shares the `motion_proposal` config root and nothing else with the above.
-REFINED_PROPOSAL_VELOCITY_VARIANTS = (
-    DYNAMIC_VARIANT_V9,
-)
-
+# The overlay allow-list: one config/variants/<variant>.yaml per variant.
 VARIANT_CONFIG_PATHS = {
-    LEGACY_VARIANT: REPO_ROOT / "config" / "variants" / f"{LEGACY_VARIANT}.yaml",
-    DYNAMIC_VARIANT_V1: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V1}.yaml"
-    ),
-    DYNAMIC_VARIANT_V3: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V3}.yaml"
-    ),
-    DYNAMIC_VARIANT_V3_1: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V3_1}.yaml"
-    ),
-    DYNAMIC_VARIANT_V4: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V4}.yaml"
-    ),
-    DYNAMIC_VARIANT_V5: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V5}.yaml"
-    ),
-    DYNAMIC_VARIANT_V6: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V6}.yaml"
-    ),
-    DYNAMIC_VARIANT_V7: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V7}.yaml"
-    ),
-    DYNAMIC_VARIANT_V7_1: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V7_1}.yaml"
-    ),
-    DYNAMIC_VARIANT_V7_2: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V7_2}.yaml"
-    ),
-    DYNAMIC_VARIANT_V8: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V8}.yaml"
-    ),
-    DYNAMIC_VARIANT_V9: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V9}.yaml"
-    ),
-    DYNAMIC_VARIANT_V10: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V10}.yaml"
-    ),
-    DYNAMIC_VARIANT_V11: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V11}.yaml"
-    ),
-    DYNAMIC_VARIANT_V11_1: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V11_1}.yaml"
-    ),
-    DYNAMIC_VARIANT_V11_2: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V11_2}.yaml"
-    ),
-    DYNAMIC_VARIANT_V11_3: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V11_3}.yaml"
-    ),
-    DYNAMIC_VARIANT_V11_4: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V11_4}.yaml"
-    ),
-    DYNAMIC_VARIANT_V11_5: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V11_5}.yaml"
-    ),
-    DYNAMIC_VARIANT_V11_6: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V11_6}.yaml"
-    ),
-    DYNAMIC_VARIANT_V12: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V12}.yaml"
-    ),
-    DYNAMIC_VARIANT_V12_1: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V12_1}.yaml"
-    ),
-    DYNAMIC_VARIANT_V13: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13}.yaml"
-    ),
-    DYNAMIC_VARIANT_V13_1: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13_1}.yaml"
-    ),
-    DYNAMIC_VARIANT_V13_2: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13_2}.yaml"
-    ),
-    DYNAMIC_VARIANT_V13_3: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13_3}.yaml"
-    ),
-    DYNAMIC_VARIANT_V13_4: (
-        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V13_4}.yaml"
-    ),
+    variant: REPO_ROOT / "config" / "variants" / f"{variant}.yaml"
+    for variant in DYNAMIC_VARIANTS
 }
 
-# W&B omits empty mappings, and configs saved before model variants existed have
-# no model block.  Left-merging these defaults restores the historical contract.
+# W&B omits empty mappings, so a config restored from its W&B fallback may
+# have no g2g block. Left-merging these defaults restores the stored contract.
 STRUCTURAL_DEFAULTS = {
-    "model": {"variant": LEGACY_VARIANT},
     "g2g": {},
 }
 
@@ -359,13 +176,11 @@ _CHECKPOINT_PROTECTED_PATHS = (
     "data.dynamic_window",
 )
 
-_IMPLEMENTED_VARIANTS = {LEGACY_VARIANT, *DYNAMIC_VARIANTS}
-
-# Pointcept/Utonia encoder widths from config/utonia_pretrained.yaml. LoRA mode
-# exits at the configured encoder stage and bypasses the legacy fusion MLP, so
-# static config validation must use this width for downstream attention.
+# Pointcept/Utonia encoder widths from config/utonia_pretrained.yaml. The token
+# width that reaches temporal attention is the width of the configured encoder
+# exit stage, so static config validation reads it from here.
 _UTONIA_ENCODER_STAGE_DIMS = (54, 108, 216, 432, 576)
 
 
 LEGACY_COUNT_MODE = "legacy"
-LEARNED_COUNT_MODES = ("learned_gumbel", "learned_gumbel_viewpt")
+LEARNED_COUNT_MODES = ("learned_gumbel",)

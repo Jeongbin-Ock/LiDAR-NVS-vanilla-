@@ -39,18 +39,14 @@ from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 
 from src.model_wrapper import ModelWrapper
-from src.config_loader import (
-    DYNAMIC_VARIANTS,
-    assert_model_variant_implemented,
-    resolve_eval_config,
-)
+from src.config_loader import resolve_eval_config
 from src.dataloader.nuscene import multiframe_collate_fn
 from src.dataloader.nuscene_lidar4d_test import LiDAR4DNuScenesTestDataset
 from src.eval.gslidar_metrics import (
     MetricBackends, depth_errors, intensity_errors, raydrop_errors, point_metrics,
 )
 from src.eval.gaussian_viz import (
-    gaussians_from_output, save_sequence_html,
+    save_sequence_html,
     surfels_from_output, save_sequence_surfel_html,
     velocity_transport_from_output,
 )
@@ -276,24 +272,9 @@ def main(cfg, config_source="unspecified"):
         device,
         allow_checkpoint_mismatch=bool(cfg.get("allow_checkpoint_mismatch", False)),
     )
-    transport_mode = getattr(model.g2p_model, "transport_mode", None)
-    if transport_mode not in {"bbox", "velocity"}:
-        raise RuntimeError(
-            "Gaussian renderer must declare transport_mode as bbox or velocity"
-        )
-    show_velocity_vectors = transport_mode == "velocity"
-    if velocity_source != "total" and not show_velocity_vectors:
-        raise ValueError(
-            "Non-total test.velocity_source ablations are only available for "
-            "velocity-transport models"
-        )
     print(
-        f"[setup] gaussian_transport={transport_mode} "
-        f"velocity_arrows={'on' if show_velocity_vectors else 'off'}"
-        + (
-            " (source + velocity * actual signed delta_t -> target)"
-            if show_velocity_vectors else ""
-        )
+        "[setup] gaussian_transport=velocity velocity_arrows=on "
+        "(source + velocity * actual signed delta_t -> target)"
     )
     print(
         f"[setup] render_velocity={velocity_source}"
@@ -337,19 +318,12 @@ def main(cfg, config_source="unspecified"):
         batch = to_device(batch, device)
         _input, gt = batch["input"], batch["gt"]
 
-        out = model.p2g_model(
-            _input,
-            target_pose=gt.get("pose"),
-            target_timestamps=gt.get("timestamps"),
+        out = model.p2g_model(_input)
+        out = model.g2g_model(
+            out,
+            _input["timestamps_sec"],
+            _input["window_duration_sec"],
         )
-        if model.model_variant in DYNAMIC_VARIANTS:
-            out = model.g2g_model(
-                out,
-                _input["timestamps_sec"],
-                _input["window_duration_sec"],
-            )
-        else:
-            out = model.g2g_model(out, _input["timestamps"])
         out = select_render_velocity(out, velocity_source)
         renders = model.g2p_model(out, gt)
 
@@ -409,47 +383,33 @@ def main(cfg, config_source="unspecified"):
         gt_pts = gt["lidar_points"][gt_start:gt_off[target_cam], :3].detach().cpu().numpy()
 
         # Gaussian centers + 1σ surfels at this window's target time (per-seq HTML).
-        # Viewpoint mode stores Common once and Additional per target view;
-        # diagnostics must build the same transient union as the renderer.
-        target_gaussians = model.g2p_model.select_target_view(out[b], target_cam)
+        target_gaussians = out[b]
         render_t = float(model.g2p_model.render_timestamp(gt_cam))
-        if show_velocity_vectors:
-            transport = velocity_transport_from_output(
-                model.g2p_model, target_gaussians, render_t
-            )
-            source_times = transport["source_times_sec"]
-            source_delta_t = render_t - source_times
-            delta_label = ", ".join(
-                f"{float(value):+.6f}" for value in source_delta_t
-            )
-            center_frame = {
-                "label": (
-                    f"T={target_s}s | target={render_t:.6f}s | "
-                    f"source→target Δt=[{delta_label}]s"
-                ),
-                "source_frame_centers": transport[
-                    "target_centers_by_source_frame"
-                ],
-                "velocity_origins": transport["source_centers"],
-                "velocity_mps": transport["velocity_mps"],
-                "velocity_delta_t_sec": transport["delta_t_sec"],
-                "velocity_source_frame_index": transport[
-                    "source_frame_index"
-                ],
-                "input_points": in_pts,
-                "gt_points": gt_pts,
-            }
-        else:
-            static_xyz, dynamic_xyz = gaussians_from_output(
-                model.g2p_model, target_gaussians, render_t
-            )
-            center_frame = {
-                "label": f"T={target_s}s",
-                "static": static_xyz,
-                "dynamic": dynamic_xyz,
-                "input_points": in_pts,
-                "gt_points": gt_pts,
-            }
+        transport = velocity_transport_from_output(
+            model.g2p_model, target_gaussians, render_t
+        )
+        source_times = transport["source_times_sec"]
+        source_delta_t = render_t - source_times
+        delta_label = ", ".join(
+            f"{float(value):+.6f}" for value in source_delta_t
+        )
+        center_frame = {
+            "label": (
+                f"T={target_s}s | target={render_t:.6f}s | "
+                f"source→target Δt=[{delta_label}]s"
+            ),
+            "source_frame_centers": transport[
+                "target_centers_by_source_frame"
+            ],
+            "velocity_origins": transport["source_centers"],
+            "velocity_mps": transport["velocity_mps"],
+            "velocity_delta_t_sec": transport["delta_t_sec"],
+            "velocity_source_frame_index": transport[
+                "source_frame_index"
+            ],
+            "input_points": in_pts,
+            "gt_points": gt_pts,
+        }
         seq_gauss[seq_name].append(center_frame)
         # GT boxes at the target-second frame, interpolated to the sweep time
         # (not the stale parent-keyframe anns) and in the Gaussian ref frame, so
@@ -462,7 +422,7 @@ def main(cfg, config_source="unspecified"):
         seq_surfel[seq_name].append({
             "label": f"T={target_s}s", "static": surf["static"],
             "dynamic": surf["dynamic"], "dynamic_in_box": surf["dynamic_in_box"],
-            "boxes": surf["boxes"], "gt_boxes": surf["gt_boxes"],
+            "gt_boxes": surf["gt_boxes"],
             "input_points": in_pts, "gt_points": gt_pts,
             "pred_points": pred_pts})
 
@@ -569,6 +529,5 @@ def main(cfg, config_source="unspecified"):
 if __name__ == "__main__":
     cli = OmegaConf.from_cli()
     cfg, config_source = resolve_eval_config(cli)
-    assert_model_variant_implemented(cfg)
     cfg.mode = "test"
     main(cfg, config_source=config_source)

@@ -35,13 +35,8 @@ def to_device(value, device):
 
 def forward_loss(model, batch):
     source, target = batch["input"], batch["gt"]
-    p2g = model.p2g_model(
-        source,
-        target_pose=target.get("pose"),
-        target_timestamps=target.get("timestamps"),
-    )
+    p2g = model.p2g_model(source)
     p2g.pop("routing_stats", None)
-    p2g.pop("routing_budget_logits", None)
     gaussians = model.g2g_model(
         p2g,
         source["timestamps_sec"],
@@ -64,14 +59,9 @@ def forward_loss(model, batch):
 
 def forward_memory_probe(model, batch):
     """Keep the full P2G graph while avoiding rasterizer-build dependencies."""
-    source, target = batch["input"], batch["gt"]
-    p2g = model.p2g_model(
-        source,
-        target_pose=target.get("pose"),
-        target_timestamps=target.get("timestamps"),
-    )
+    source = batch["input"]
+    p2g = model.p2g_model(source)
     p2g.pop("routing_stats", None)
-    p2g.pop("routing_budget_logits", None)
     gaussians = model.g2g_model(
         p2g,
         source["timestamps_sec"],
@@ -234,15 +224,6 @@ def main():
     p2g = model.p2g_model
     if not p2g.utonia_lora_enabled:
         raise RuntimeError("dynamic smoke requires Utonia XYZI LoRA")
-    if any(module is not None for module in (
-        p2g.anchor_builder.intensity_encoder,
-        p2g.utonia_adapter,
-        p2g.intensity_agg_mlp,
-        p2g.joint_refiner,
-    )):
-        raise RuntimeError(
-            "Utonia LoRA path constructed a legacy intensity/fusion/refiner module"
-        )
     utonia_named_parameters = list(
         p2g.feature_extractor.named_parameters()
     )

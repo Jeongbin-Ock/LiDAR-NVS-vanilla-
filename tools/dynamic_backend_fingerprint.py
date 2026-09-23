@@ -23,25 +23,23 @@ from src import config_loader as cl  # noqa: E402
 from src.models_new.module import dynamic_gaussian as dg  # noqa: E402
 
 BACKENDS = {
-    cl.DYNAMIC_VARIANT_V1: dg.DynamicGaussianBackend,
-    cl.DYNAMIC_VARIANT_V3: dg.PhysicalVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V3_1: dg.PhysicalVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V4: dg.AttentionInitializedVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V5: dg.AttentionInitializedVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V6: dg.ProposalInitializedVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V7: dg.WarpedProposalVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V7_1: dg.WarpedProposalVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V7_2: dg.StraightThroughProposalVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V8: dg.ConsensusAttentionVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V9: dg.PostAttentionProposalVelocityGaussianBackend,
-    cl.DYNAMIC_VARIANT_V10: dg.LayerWeightedAttentionVelocityGaussianBackend,
     cl.DYNAMIC_VARIANT_V11: dg.MaxSpeedBarrierVelocityGaussianBackend,
     cl.DYNAMIC_VARIANT_V11_1: dg.SingleGaussianBarrierVelocityGaussianBackend,
     cl.DYNAMIC_VARIANT_V11_2: dg.FinalFeatureBarrierVelocityGaussianBackend,
     cl.DYNAMIC_VARIANT_V11_3: dg.SeedConditionedBarrierVelocityGaussianBackend,
     cl.DYNAMIC_VARIANT_V11_4: dg.MaxSpeedBarrierVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V11_5: dg.SeedConditionedBarrierVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V11_6: dg.SeedConditionedBarrierVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V12: dg.LearnableMaxSpeedBarrierVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V12_1: (
+        dg.FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend
+    ),
+    cl.DYNAMIC_VARIANT_V13: dg.CosineRoPEVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V13_1: dg.SeedConditionedCosineRoPEVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V13_2: dg.RawQKRoPEVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V13_3: dg.RMSNormRoPEVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V13_4: dg.RMSNormFeatureRoPEVelocityGaussianBackend,
 }
-PROPOSAL_VARIANTS = set(cl.PROPOSAL_VELOCITY_VARIANTS)
 
 DIM = 72
 HEADS = 6
@@ -61,19 +59,8 @@ def _shrink(cfg):
     temporal.layers = LAYERS
     temporal.num_heads = HEADS
     temporal.mlp_ratio = 2
-    if "layer_weight_hidden_dim" in temporal:
-        temporal.layer_weight_hidden_dim = 16
     if "match_chunk_size" in temporal:
         temporal.match_chunk_size = 4
-    for block in ("motion_proposal", "motion_matching"):
-        if block in cfg:
-            node = cfg[block]
-            for key in ("score_chunk_size",):
-                if key in node:
-                    node[key] = 4
-            for key in ("candidate_count", "match_count"):
-                if key in node:
-                    node[key] = min(int(node[key]), 4)
     return cfg
 
 
@@ -102,10 +89,6 @@ def _inputs(variant, backend, generator):
     frame_batch_idx = torch.zeros(n_frames, dtype=torch.long)
     pose = [[torch.eye(4), torch.eye(4)]]
     kwargs = {}
-    if variant in PROPOSAL_VARIANTS:
-        kwargs["motion_proposal_feature"] = torch.randn(
-            total, DIM, generator=generator
-        )
     if delta is not None:
         kwargs["seed_delta_sensor"] = delta
     return (
@@ -122,8 +105,6 @@ def main():
             {"shs": 4, "opacity": 1, "scaling": 2, "rotation": 4, "offset": 3}
         )
         kwargs = {}
-        if variant in PROPOSAL_VARIANTS:
-            kwargs["proposal_dim"] = DIM
         count = OmegaConf.select(overlay, "p2g.grid_query")
         count_mode = str(
             OmegaConf.select(overlay, "p2g.grid_query.count_mode") or "legacy"

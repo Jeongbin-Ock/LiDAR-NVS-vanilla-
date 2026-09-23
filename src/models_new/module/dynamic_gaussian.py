@@ -1,82 +1,51 @@
-"""Compatibility facade for the Dynamic 2DGS implementation.
+"""Stable import path for the Dynamic 2DGS implementation.
 
-The implementation lives in :mod:`.dynamic`; this module keeps the historical
-import and pickle lookup path available to existing configs and checkpoints.
+The implementation lives in :mod:`.dynamic`; this module re-exports its public
+symbols so ``Point2Gaus``, the tests and the analysis tools import them from one
+place.
 """
 from __future__ import annotations
 
 from .dynamic.common import SinusoidalScalarEncoder, _cfg_get
-from .dynamic.attention_matching import ConsensusAttentionMotionMatcher
 from .dynamic.temporal import (
+    BidirectionalCrossAttentionBase,
     CosineRoPELayerWeightedCrossAttention,
     FinalFeatureBarrierCrossAttention,
     FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
     FixedMotionHeadRMSNorm,
     GroupedGainBarrierCrossAttention,
     GroupedHeadRMSNorm,
-    LayerWeightedDistanceBiasCrossAttention,
     LearnableMaxSpeedBarrierLayerWeightedCrossAttention,
     MaxSpeedBarrierLayerWeightedCrossAttention,
-    ParallelBidirectionalCrossAttention,
     RawQKRoPELayerWeightedCrossAttention,
     RMSNormFeatureRoPELayerWeightedCrossAttention,
     RMSNormRoPELayerWeightedCrossAttention,
-    TimeConditionedParallelCrossAttention,
 )
-from .dynamic.heads import (
-    EmbeddedInitDurationVelocityHead,
-    EmbeddedInitVelocityHead,
-    FeatureOnlyVelocityOffsetHead,
-    GaussianAttributeHead,
-    InitConditionedVelocityHead,
-    MotionConditionedVelocityHead,
-    PhysicalVelocityHead,
-    SeedConditionedGaussianAttributeHead,
-)
-from .dynamic.motion_proposals import (
-    ChunkedDenseMotionProposal,
-    PairedFrameMotionProposal,
-    ProjectedDenseMotionProposal,
-    SparseMotionProposal,
-    StraightThroughTop4MotionProposal,
-)
+from .dynamic.heads import EmbeddedInitVelocityHead, GaussianAttributeHead
 from .dynamic.backends import (
-    AttentionInitializedVelocityGaussianBackend,
-    ConsensusAttentionVelocityGaussianBackend,
     CosineRoPEVelocityGaussianBackend,
     DynamicGaussianBackend,
     FinalFeatureBarrierVelocityGaussianBackend,
     FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
-    LayerMixtureMotionMixin,
-    LayerWeightedAttentionVelocityGaussianBackend,
     LearnableMaxSpeedBarrierVelocityGaussianBackend,
     MaxSpeedBarrierVelocityGaussianBackend,
-    PhysicalVelocityGaussianBackend,
-    PostAttentionProposalVelocityGaussianBackend,
-    ProposalInitializedVelocityGaussianBackend,
     RawQKRoPEVelocityGaussianBackend,
     RMSNormFeatureRoPEVelocityGaussianBackend,
     RMSNormRoPEVelocityGaussianBackend,
+    RouterCapableGaussianBackend,
     SeedConditionedBarrierVelocityGaussianBackend,
     SeedConditionedCosineRoPEVelocityGaussianBackend,
     SingleGaussianBarrierVelocityGaussianBackend,
-    StraightThroughProposalVelocityGaussianBackend,
-    WarpedProposalVelocityGaussianBackend,
 )
 from .dynamic.trajectory import DynamicGausTemp
 
 __all__ = [
-    "AttentionInitializedVelocityGaussianBackend",
-    "ChunkedDenseMotionProposal",
-    "ConsensusAttentionMotionMatcher",
-    "ConsensusAttentionVelocityGaussianBackend",
+    "BidirectionalCrossAttentionBase",
     "CosineRoPELayerWeightedCrossAttention",
     "CosineRoPEVelocityGaussianBackend",
     "DynamicGaussianBackend",
     "DynamicGausTemp",
-    "EmbeddedInitDurationVelocityHead",
     "EmbeddedInitVelocityHead",
-    "FeatureOnlyVelocityOffsetHead",
     "FinalFeatureBarrierCrossAttention",
     "FinalFeatureBarrierVelocityGaussianBackend",
     "FixedMotionGainLearnableMaxSpeedBarrierCrossAttention",
@@ -85,36 +54,19 @@ __all__ = [
     "GaussianAttributeHead",
     "GroupedGainBarrierCrossAttention",
     "GroupedHeadRMSNorm",
-    "InitConditionedVelocityHead",
-    "LayerMixtureMotionMixin",
-    "LayerWeightedAttentionVelocityGaussianBackend",
-    "LayerWeightedDistanceBiasCrossAttention",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend",
     "MaxSpeedBarrierLayerWeightedCrossAttention",
     "MaxSpeedBarrierVelocityGaussianBackend",
-    "MotionConditionedVelocityHead",
-    "PairedFrameMotionProposal",
-    "ParallelBidirectionalCrossAttention",
-    "PhysicalVelocityGaussianBackend",
-    "PhysicalVelocityHead",
-    "PostAttentionProposalVelocityGaussianBackend",
-    "ProjectedDenseMotionProposal",
-    "ProposalInitializedVelocityGaussianBackend",
     "RawQKRoPELayerWeightedCrossAttention",
     "RawQKRoPEVelocityGaussianBackend",
     "RMSNormFeatureRoPELayerWeightedCrossAttention",
     "RMSNormFeatureRoPEVelocityGaussianBackend",
     "RMSNormRoPELayerWeightedCrossAttention",
     "RMSNormRoPEVelocityGaussianBackend",
+    "RouterCapableGaussianBackend",
     "SeedConditionedBarrierVelocityGaussianBackend",
     "SeedConditionedCosineRoPEVelocityGaussianBackend",
-    "SeedConditionedGaussianAttributeHead",
     "SingleGaussianBarrierVelocityGaussianBackend",
     "SinusoidalScalarEncoder",
-    "SparseMotionProposal",
-    "StraightThroughProposalVelocityGaussianBackend",
-    "StraightThroughTop4MotionProposal",
-    "TimeConditionedParallelCrossAttention",
-    "WarpedProposalVelocityGaussianBackend",
 ]
