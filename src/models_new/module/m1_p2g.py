@@ -206,6 +206,7 @@ class Point2Gaus(nn.Module):
                 DYNAMIC_VARIANT_V11_3,
                 DYNAMIC_VARIANT_V11_4,
                 DYNAMIC_VARIANT_V11_5,
+                DYNAMIC_VARIANT_V11_6,
                 DYNAMIC_VARIANT_V12,
                 DYNAMIC_VARIANT_V12_1,
                 DYNAMIC_VARIANT_V13,
@@ -303,6 +304,9 @@ class Point2Gaus(nn.Module):
                 ),
                 DYNAMIC_VARIANT_V11_4: MaxSpeedBarrierVelocityGaussianBackend,
                 DYNAMIC_VARIANT_V11_5: (
+                    SeedConditionedBarrierVelocityGaussianBackend
+                ),
+                DYNAMIC_VARIANT_V11_6: (
                     SeedConditionedBarrierVelocityGaussianBackend
                 ),
                 DYNAMIC_VARIANT_V12: (

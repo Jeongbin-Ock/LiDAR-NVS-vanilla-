@@ -36,6 +36,7 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V11_3,
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V11_5,
+    DYNAMIC_VARIANT_V11_6,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V13,
@@ -52,8 +53,8 @@ from src.config_loader import (
     resolve_main_config,
 )
 
-# No shipped overlay selects the random-duration loader any more; this opts a
-# barrier-family overlay into it. Its holdouts live under dynamic_window, so the
+# Opts a barrier-family overlay into the random-duration loader, the contract
+# the V11.6 overlay ships with. Its holdouts live under dynamic_window, so the
 # legacy loader's data.train_excluded_scenes has to be cleared.
 DYNAMIC_LOADER_CLI = (
     "data.dataset_name=nuscenes_dynamic_lidar4d",
@@ -647,6 +648,61 @@ class ConfigLoaderTest(unittest.TestCase):
                 "p2g.grid_query.count_mode=learned_gumbel",
             ]))
         self.assertIn("V11.5", str(raised.exception))
+        self.assertIn("count router", str(raised.exception))
+
+    def test_v11_6_is_v11_5_at_k3_on_the_dynamic_loader(self):
+        """V11.5's model with three Gaussians, on the random-duration loader."""
+        v11_5, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_5}",
+        ]))
+        # The data contract the V11.4 dynamic-loader run was launched with.
+        v11_4_dynamic, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_4}", *DYNAMIC_LOADER_CLI,
+        ]))
+        v11_6, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_6}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V11_6}.yaml", source)
+
+        left = OmegaConf.to_container(v11_5, resolve=False)
+        right = OmegaConf.to_container(v11_6, resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        left_count = left["p2g"].pop("grid_query")
+        right_count = right["p2g"].pop("grid_query")
+        left.pop("data")
+        right.pop("data")
+        self.assertEqual(left, right)
+        self.assertEqual(left_count, {**right_count, "K_max": 2})
+        self.assertEqual(right_count["count_mode"], "legacy")
+        self.assertEqual(right_count["K_max"], 3)
+        self.assertIsNone(right_count["exp"])
+
+        self.assertEqual(
+            OmegaConf.to_container(v11_6.data, resolve=True),
+            OmegaConf.to_container(v11_4_dynamic.data, resolve=True),
+        )
+        self.assertEqual(v11_6.data.dataset_name, "nuscenes_dynamic_lidar4d")
+        self.assertEqual(v11_6.data.mode, "nvs")
+        self.assertIsNone(v11_6.data.train_excluded_scenes)
+        self.assertEqual(
+            list(v11_6.data.dynamic_window.train_excluded_scenes),
+            ["scene-0757", "scene-1094"],
+        )
+
+        for group in (
+            ATTENTION_VELOCITY_VARIANTS,
+            BARRIER_MATCH_DYNAMIC_VARIANTS,
+            PHYSICAL_VELOCITY_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V11_6, group)
+        self.assertNotIn(DYNAMIC_VARIANT_V11_6, ROUTER_CAPABLE_DYNAMIC_VARIANTS)
+
+        with self.assertRaises(ValueError) as raised:
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V11_6}",
+                "p2g.grid_query.count_mode=learned_gumbel",
+            ]))
+        self.assertIn("V11.6", str(raised.exception))
         self.assertIn("count router", str(raised.exception))
 
     def test_v12_composes_to_v11_4_and_only_learns_the_speed(self):

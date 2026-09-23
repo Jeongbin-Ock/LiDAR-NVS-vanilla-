@@ -25,6 +25,7 @@ DYNAMIC_VARIANT_V11_2 = "dynamic_2dgs_attention_velocity_v11_2"
 DYNAMIC_VARIANT_V11_3 = "dynamic_2dgs_attention_velocity_v11_3"
 DYNAMIC_VARIANT_V11_4 = "dynamic_2dgs_attention_velocity_v11_4"
 DYNAMIC_VARIANT_V11_5 = "dynamic_2dgs_attention_velocity_v11_5"
+DYNAMIC_VARIANT_V11_6 = "dynamic_2dgs_attention_velocity_v11_6"
 DYNAMIC_VARIANT_V12 = "dynamic_2dgs_attention_velocity_v12"
 DYNAMIC_VARIANT_V12_1 = "dynamic_2dgs_attention_velocity_v12_1"
 DYNAMIC_VARIANT_V13 = "dynamic_2dgs_attention_velocity_v13"
@@ -55,6 +56,7 @@ ATTENTION_VELOCITY_VARIANTS = (
     DYNAMIC_VARIANT_V11_3,
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V11_5,
+    DYNAMIC_VARIANT_V11_6,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V13,
@@ -69,8 +71,8 @@ ATTENTION_VELOCITY_VARIANTS = (
 # run uses is still a config decision (p2g.grid_query.count_mode) for the
 # variants listed here. V11.3 shares V11's backend class but is deliberately
 # absent: its identity is the fixed two Gaussians per token, so asking it for
-# the router is rejected rather than quietly turning it back into V11. V11.5 is
-# absent for the same reason relative to V11.4.
+# the router is rejected rather than quietly turning it back into V11. V11.5 and
+# V11.6 are absent for the same reason relative to V11.4.
 ROUTER_CAPABLE_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V10,
     DYNAMIC_VARIANT_V11,
@@ -126,6 +128,7 @@ FLASH_ROPE_MATCH_DYNAMIC_VARIANTS = (
 # V11.3 is V11's correspondence exactly, differing only in Gaussian count.
 # V11.4 is V11 with the hinge made linear: barrier_exponent=1 at weight 1.
 # V11.5 is V11.3's fixed K=2 decoder under V11.4's linear hinge.
+# V11.6 is V11.5 with K=3, trained on the random-duration loader.
 # V12 keeps V11.4's linear hinge and shared QK-Norm gains, but learns its one
 # global max-speed radius in log space from an initial 30 m/s.
 # V12.1 keeps V12's learned radius, fixes head 0's RMS gain to one, and lets
@@ -140,6 +143,7 @@ BARRIER_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11_3,
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V11_5,
+    DYNAMIC_VARIANT_V11_6,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
 )
@@ -162,6 +166,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11_3,
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V11_5,
+    DYNAMIC_VARIANT_V11_6,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V13,
@@ -191,6 +196,7 @@ PHYSICAL_VELOCITY_VARIANTS = (
     DYNAMIC_VARIANT_V11_3,
     DYNAMIC_VARIANT_V11_4,
     DYNAMIC_VARIANT_V11_5,
+    DYNAMIC_VARIANT_V11_6,
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V13,
@@ -276,6 +282,9 @@ VARIANT_CONFIG_PATHS = {
     ),
     DYNAMIC_VARIANT_V11_5: (
         REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V11_5}.yaml"
+    ),
+    DYNAMIC_VARIANT_V11_6: (
+        REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V11_6}.yaml"
     ),
     DYNAMIC_VARIANT_V12: (
         REPO_ROOT / "config" / "variants" / f"{DYNAMIC_VARIANT_V12}.yaml"

@@ -35,6 +35,7 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v11_2
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_3
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_4
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_5
+python main.py model.variant=dynamic_2dgs_attention_velocity_v11_6
 python main.py model.variant=dynamic_2dgs_attention_velocity_v12
 python main.py model.variant=dynamic_2dgs_attention_velocity_v12_1
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13
@@ -46,23 +47,23 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v13_4
 
 This `/4d` worktree defaults to `dynamic_2dgs_attention_velocity_v7_2` for a
 fresh run. `bbox_rigid_v1` is the historical box-routed model. V1 through V7.1,
-V8, V9, V10, V11, V11.1, V11.2, V11.3, V11.4, V11.5, V12, V12.1, V13, V13.1,
-V13.2, V13.3, and V13.4 remain available for exact checkpoint reconstruction
-and controlled A/B runs.
+V8, V9, V10, V11, V11.1, V11.2, V11.3, V11.4, V11.5, V11.6, V12, V12.1, V13,
+V13.1, V13.2, V13.3, and V13.4 remain available for exact checkpoint
+reconstruction and controlled A/B runs.
 V4/V5 reuse temporal cross-attention heads for velocity initialization. V6 does
 not: it adds an independent, time-free Siamese motion proposal before temporal
 cross-attention and uses the latter only for feature refinement. Its overlay
 defaults to `device=[0]` and `data.bbox_json_path=null`; both remain ordinary
 CLI-overridable runtime settings.
 
-Dynamic V1-V9, V11.1, V11.3, V11.5 and V13.1 emit a fixed number of Gaussians
-per occupied endpoint token -- one observed-medoid seed by default, and two
-range quantiles in V11.3/V11.5/V13.1; V10, V11, V11.2, V11.4, V12, V12.1, V13,
-V13.2, V13.3 and V13.4 let a router select one to three range-quantile-seeded
-Gaussians instead. `p2g.grid_query` chooses between the two and sets the fixed
-count -- see "Gaussians per token" below. V3 through V6, V7.2, V8, V9, V10,
-V11, V11.2, V11.3, V11.4, V11.5, V12, V12.1, V13, V13.1, V13.2, V13.3 and V13.4
-embed `time_coordinate = relative_seconds / time_reference_sec`, where
+Dynamic V1-V9, V11.1, V11.3, V11.5, V11.6 and V13.1 emit a fixed number of
+Gaussians per occupied endpoint token -- one observed-medoid seed by default,
+two range quantiles in V11.3/V11.5/V13.1 and three in V11.6; V10, V11, V11.2,
+V11.4, V12, V12.1, V13, V13.2, V13.3 and V13.4 let a router select one to three
+range-quantile-seeded Gaussians instead. `p2g.grid_query` chooses between the
+two and sets the fixed count -- see "Gaussians per token" below. V3 through V6,
+V7.2, V8, V9, V10, V11, V11.2, V11.3, V11.4, V11.5, V11.6, V12, V12.1, V13,
+V13.1, V13.2, V13.3 and V13.4 embed `time_coordinate = relative_seconds / time_reference_sec`, where
 `time_reference_sec=1.0` is fixed across samples. An irregular 0.8-second pair
 therefore supplies endpoint coordinates `[0, 0.8]`, rather than `[0, 1]`. Its
 scalar time becomes 17 raw Fourier values and passes through one
@@ -619,6 +620,27 @@ Like V11.3, V11.5 is not router-capable, so `count_mode=learned_gumbel` is
 rejected. On the smoke pair at 12 layers and `batch_size=2` it emits 58,686
 Gaussians and peaks at 31.2 GiB, the same as V11.3.
 
+**V11.6** is V11.5 with a fixed count of **three** range-quantile Gaussians per
+occupied token, at raw-point ranks `floor(N/6)`, `floor(N/2)` and
+`floor(5N/6)` (the adaptive router's K=3 candidate row), trained on the
+random-duration `nuscenes_dynamic_lidar4d` loader instead of `nuscene.py`. The
+temporal stack, linear hinge, correspondence, offset head, 0.4 m offset bound,
+velocity regularizer and loss weights are V11.5's. It reuses
+`SeedConditionedBarrierVelocityGaussianBackend`, so its parameter names and
+their order are V11.5's, but the trunk reads 9 seed-delta columns instead of 6
+and every attribute projection is three slots wide. A V11.5 checkpoint
+therefore does not load into V11.6.
+
+Its data block is exactly the contract the V11.4 dynamic-loader run was
+launched with from the CLI: `dataset_name: nuscenes_dynamic_lidar4d`,
+`mode: nvs`, `bbox_json_path: null`, an empty legacy
+`train_excluded_scenes`, and `dynamic_window` with endpoints 0.2-1.2 s,
+`eval_seed: 42` and the `scene-0757`/`scene-1094` holdouts. Like V11.5 it is not
+router-capable. On the smoke pair (val indices 0 and 1 under its own loader) at
+12 layers and `batch_size=2` it emits 87,807 Gaussians from 29,269 tokens, and
+the `--memory-only` probe, which runs P2G and G2G without the rasterizer, peaks
+at 31.2 GiB.
+
 **V12** is V11.4 with only that fixed max-speed scalar made learnable. The
 temporal module registers one scalar parameter shared by every layer, both
 endpoint directions, and all samples:
@@ -636,12 +658,13 @@ not the speed used as a fixed hyperparameter after construction. The learned
 `barrier_speed_mps`, and the initialization as `barrier_speed_initial_mps`.
 
 V12 uses the legacy `src/dataloader/nuscene.py` contract, as every V11-V13
-overlay now does. Its overlay inherits `data.dataset_name: nuscenes` and the
-fixed keyframe/window settings from `nuscene_train.yaml`, while setting
+overlay except V11.6 does. Its overlay inherits `data.dataset_name: nuscenes`
+and the fixed keyframe/window settings from `nuscene_train.yaml`, while setting
 `data.mode: bbox` and `data.bbox_json_path: null`. V11, V11.1-V11.5, V12,
 V12.1, V13, V13.1, V13.2, V13.3 and V13.4 additionally set
 `data.train_excluded_scenes: [scene-0757, scene-1094]`; `nuscene.py` removes
-those complete scenes only when constructing the train split. Validation and
+those complete scenes only when constructing the train split. V11.6 holds out
+the same two scenes under `data.dynamic_window`, where its loader reads them. Validation and
 test scenes remain unchanged. The key is checkpoint-protected sampling state,
 so a resume cannot silently put either held-out scene back.
 
@@ -877,20 +900,21 @@ exactly `K_max` Gaussians, which is required whenever the block is present.
 
 Seeds that coincide are not redundant: the Gaussian head owns one parameter
 block per slot, including the bounded position offset, so slots starting at the
-same coordinate learn independent geometry. V11.3, V11.5 and V13.1 additionally
-feed every slot's seed delta into that head, so their slots also differ by
-input and not only by parameters; every other fixed-count variant reads the
-token feature alone. Under `exp: null` a token holding fewer raw points than
+same coordinate learn independent geometry. V11.3, V11.5, V11.6 and V13.1
+additionally feed every slot's seed delta into that head, so their slots also
+differ by input and not only by parameters; every other fixed-count variant
+reads the token feature alone. Under `exp: null` a token holding fewer raw points than
 slots repeats observed points, the same way the learned-count candidate bank
 does.
 
 Omitting the whole `p2g.grid_query` block means `K_max: 1, exp: 1`: one
 Gaussian per token at its medoid. That is what every fixed-count Dynamic
-variant except V11.3/V11.5/V13.1 (V1, V3-V9, V11.1) has always done, so their
-existing configs and checkpoints are unaffected. V11.3, V11.5 and V13.1 ship
-the block explicitly at `K_max: 2, exp: null`. V1 remains limited to `K_max: 1`
-because its seed-conditioned head refines features at token resolution; V3-V9,
-V11.1, V11.3, V11.5 and V13.1 support larger fixed counts.
+variant except V11.3/V11.5/V11.6/V13.1 (V1, V3-V9, V11.1) has always done, so
+their existing configs and checkpoints are unaffected. V11.3, V11.5 and V13.1
+ship the block explicitly at `K_max: 2, exp: null`, and V11.6 at `K_max: 3,
+exp: null`. V1 remains limited to `K_max: 1` because its seed-conditioned head
+refines features at token resolution; V3-V9, V11.1, V11.3, V11.5, V11.6 and
+V13.1 support larger fixed counts.
 `points_per_gaussian` is read only by the grid *anchor* head, where K varies
 per token as `ceil(raw_count / points_per_gaussian)`; a fixed count never
 consults it.
@@ -918,8 +942,8 @@ V11.3 emits that same 58,686 from its shipped `K_max: 2`.
 through the grid `GridSlotHead` and a hard Gumbel-Softmax over K={1,2,3} picks
 one K-specific joint head per token. Only V10, V11, V11.2, V11.4, V12, V12.1,
 V13, V13.2, V13.3 and V13.4 may use it; asking any other variant for it is
-rejected at config time rather than silently ignored. V11.3, V11.5 and V13.1
-are rejected too because their identities are the fixed count. The seed
+rejected at config time rather than silently ignored. V11.3, V11.5, V11.6 and
+V13.1 are rejected too because their identities are the fixed count. The seed
 geometry it consumes is the K-specific candidate bank, not the padded
 fixed-count seed set, so the two contracts cannot be mixed.
 
@@ -928,11 +952,11 @@ evaluation cannot change how many Gaussians a checkpoint's tokens produce.
 
 ## Random-duration windows (`data.dataset_name=nuscenes_dynamic_lidar4d`)
 
-`src/dataloader/nuscene_dynamic_lidar4d.py` is an opt-in alternative to the
-legacy bbox-compatible `nuscene.py` for the barrier-family variants (V11-V11.5,
-V12, V12.1). No shipped overlay selects it: V11-V11.4 used it briefly and have
-returned to `nuscene.py` with the scene holdouts, like every later variant. The
-loader retains the old flat index's keyframe start sweep and 0.5-second sliding
+`src/dataloader/nuscene_dynamic_lidar4d.py` is the barrier family's
+alternative to the legacy bbox-compatible `nuscene.py`. V11.6 is the only
+overlay that ships with it; the other barrier-family variants (V11-V11.5, V12,
+V12.1) train on `nuscene.py` with the scene holdouts and can opt into this
+loader from the CLI, as V11-V11.4 briefly did. The loader retains the old flat index's keyframe start sweep and 0.5-second sliding
 stride, but samples the actual second endpoint uniformly from the available
 0.1-second-grid sweeps whose measured timestamp is between 0.2 and 1.2 seconds
 after that start. Selecting it replaces the data block; its holdouts live under
@@ -1046,8 +1070,9 @@ the physical interval varies under that loader.
 `enable: false` restores full-split validation. `train`/`test` dataloaders are
 untouched.
 
-Every Dynamic overlay uses the shared bbox-compatible loader; the minimal
-dynamic loader above (`data.mode=nvs`) is opt-in. Both loader contracts expose
+Every Dynamic overlay except V11.6 uses the shared bbox-compatible loader;
+V11.6 ships the minimal dynamic loader above (`data.mode=nvs`), which the other
+barrier-family overlays can opt into. Both loader contracts expose
 relative `timestamps_sec` plus `window_duration_sec`; V3 and later use those
 physical values for time conditioning and transport. Normalized endpoint
 timestamps remain only as a small historical backend-API field.
