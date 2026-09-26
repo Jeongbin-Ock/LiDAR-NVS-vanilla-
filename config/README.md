@@ -783,13 +783,19 @@ rows from depth, median-depth, intensity, raydrop, and image metrics. It never
 duplicates a target view to make shapes match. Chamfer already consumes ragged
 per-sample point lists and needs no padding.
 
-The dynamic loader returns only sensor-frame endpoint XYZI, frame layout,
-endpoint poses/physical times, the minimal XYZI Utonia input, and GT `Camera`
-objects. It does not load boxes, assign point instance IDs, create raw
-reference-frame point copies, or collate redundant GT point tensors. Historical
-checkpoints keep the `data.dataset_name` embedded when they were saved, so an
-old fixed-duration V11 checkpoint still reconstructs with `nuscene.py`; the
-loader and dynamic-window block are checkpoint-protected sampling semantics.
+The dynamic loader returns endpoint XYZI in ego and LiDAR coordinates, frame
+layout, local-to-reference poses/physical times, the minimal XYZI Utonia input,
+and GT `Camera` objects. With `data.coordinate_frame: ego_vehicle`, each sweep
+is transformed from its calibrated LiDAR frame into its own ego frame before
+Utonia; the backend maps those local tokens through `E_i -> E_0`, and each
+target camera uses `E_0 -> LiDAR_j` when rendering. The exact per-sweep nuScenes
+calibration rotation and translation are used because LIDAR_TOP axes do not
+align with ego axes. `data.coordinate_frame: lidar_sensor` preserves the old
+contract for checkpoints that do not embed this setting. The loader does not
+load boxes, assign point instance IDs, create raw reference-frame point copies,
+or collate redundant GT point tensors. Historical checkpoints keep their
+`data.dataset_name` and use the historical LiDAR coordinate contract; the
+loader and dynamic-window block remain checkpoint-protected sampling semantics.
 
 Two of the five LiDAR4D Table-S6 sequences are located in the official nuScenes
 train split: `seq_1600_1650` belongs to `scene-0757`, and `seq_3180_3230`

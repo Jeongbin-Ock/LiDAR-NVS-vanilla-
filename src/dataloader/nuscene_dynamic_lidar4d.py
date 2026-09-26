@@ -31,10 +31,18 @@ import numpy as np
 import torch
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.splits import create_splits_scenes
-from pyquaternion import Quaternion
 from torch.utils.data import Dataset
 
 from . import compact_val
+from .nuscenes_frames import (
+    COORDINATE_FRAME_EGO,
+    ego_to_world,
+    reference_to_sensor as make_reference_to_sensor,
+    resolve_coordinate_frame,
+    sensor_to_ego,
+    sensor_to_world,
+    transform_points,
+)
 from ..models_new import utonia
 from ..models_new.utils.camera import Camera
 
@@ -90,18 +98,7 @@ def relative_time_coordinates(timestamps_us, start_us, end_us):
 
 
 def _sensor_to_world(nusc, sample_data_token: str) -> np.ndarray:
-    sd = nusc.get("sample_data", sample_data_token)
-    cs = nusc.get("calibrated_sensor", sd["calibrated_sensor_token"])
-    ep = nusc.get("ego_pose", sd["ego_pose_token"])
-
-    sensor_to_ego = np.eye(4, dtype=np.float32)
-    sensor_to_ego[:3, :3] = Quaternion(cs["rotation"]).rotation_matrix
-    sensor_to_ego[:3, 3] = cs["translation"]
-
-    ego_to_world = np.eye(4, dtype=np.float32)
-    ego_to_world[:3, :3] = Quaternion(ep["rotation"]).rotation_matrix
-    ego_to_world[:3, 3] = ep["translation"]
-    return (ego_to_world @ sensor_to_ego).astype(np.float32)
+    return sensor_to_world(nusc, sample_data_token)
 
 
 def _load_points(nusc, dataroot: str, sample_data_token: str, ego_radius: float):
@@ -361,16 +358,40 @@ class NuScenesDynamicLiDAR4DDataset(Dataset):
         lidar_tokens = [frame[0] for frame in used]
         timestamps_us = [frame[1] for frame in used]
 
-        sensor_to_world = [_sensor_to_world(self.nusc, token) for token in lidar_tokens]
-        world_to_reference = np.linalg.inv(sensor_to_world[0])
+        coordinate_frame = resolve_coordinate_frame(self.cfg)
+        sensor_to_ego_matrices = [
+            sensor_to_ego(self.nusc, token) for token in lidar_tokens
+        ]
+        ego_to_world_matrices = [
+            ego_to_world(self.nusc, token) for token in lidar_tokens
+        ]
+        sensor_to_world_matrices = [
+            (ego_pose @ sensor_pose).astype(np.float32)
+            for ego_pose, sensor_pose in zip(
+                ego_to_world_matrices, sensor_to_ego_matrices
+            )
+        ]
+        local_to_world_matrices = (
+            ego_to_world_matrices
+            if coordinate_frame == COORDINATE_FRAME_EGO
+            else sensor_to_world_matrices
+        )
+        reference_to_world = local_to_world_matrices[0]
+        world_to_reference = np.linalg.inv(reference_to_world)
         pose = torch.stack(
             [
                 torch.from_numpy(
-                    (world_to_reference @ transform).astype(np.float32)
+                    (world_to_reference @ local_to_world).astype(np.float32)
                 )
-                for transform in sensor_to_world
+                for local_to_world in local_to_world_matrices
             ]
         )
+        pose_lidar_to_ref = torch.stack([
+            torch.from_numpy(
+                (world_to_reference @ transform).astype(np.float32)
+            )
+            for transform in sensor_to_world_matrices
+        ])
 
         timestamps, timestamps_sec, window_duration_sec = relative_time_coordinates(
             timestamps_us,
@@ -384,18 +405,35 @@ class NuScenesDynamicLiDAR4DDataset(Dataset):
         ]
         all_points_sensor = [item[0] for item in loaded]
         all_lidar_ring = [item[1] for item in loaded]
+        all_points_ego = [
+            transform_points(points, sensor_pose)
+            for points, sensor_pose in zip(
+                all_points_sensor, sensor_to_ego_matrices
+            )
+        ]
+        all_points_local = (
+            all_points_ego
+            if coordinate_frame == COORDINATE_FRAME_EGO
+            else all_points_sensor
+        )
 
         # Chronological ``used`` always starts/ends at the model endpoints.
         input_indices = (0, len(used) - 1)
-        input_points = [all_points_sensor[i] for i in input_indices]
+        input_points_local = [all_points_local[i] for i in input_indices]
+        input_points_ego = [all_points_ego[i] for i in input_indices]
+        input_points_sensor = [all_points_sensor[i] for i in input_indices]
         input_pose = pose[list(input_indices)]
+        input_pose_lidar_to_ref = pose_lidar_to_ref[list(input_indices)]
         input_timestamps = timestamps[list(input_indices)]
         input_timestamps_sec = timestamps_sec[list(input_indices)]
         input_frame_counts = torch.tensor(
-            [points.shape[0] for points in input_points], dtype=torch.long
+            [points.shape[0] for points in input_points_local], dtype=torch.long
         )
 
-        reference_to_sensor = torch.linalg.inv(pose)
+        reference_to_sensor = [
+            make_reference_to_sensor(self.nusc, token, reference_to_world)
+            for token in lidar_tokens
+        ]
         gt_cameras = [
             Camera.from_nuscenes(
                 nusc=self.nusc,
@@ -406,7 +444,7 @@ class NuScenesDynamicLiDAR4DDataset(Dataset):
                 lidar_ring=lidar_ring,
                 cfg=self.cfg,
                 uid=uid,
-                ref_to_sensor=ref_pose.numpy(),
+                ref_to_sensor=ref_pose,
             )
             for uid, (
                 lidar_token,
@@ -429,9 +467,12 @@ class NuScenesDynamicLiDAR4DDataset(Dataset):
 
         return {
             "input": {
-                "lidar_points_sensor": torch.cat(input_points, dim=0),
+                "lidar_points_local": torch.cat(input_points_local, dim=0),
+                "lidar_points_ego": torch.cat(input_points_ego, dim=0),
+                "lidar_points_sensor": torch.cat(input_points_sensor, dim=0),
                 "frame_counts": input_frame_counts,
                 "pose": input_pose,
+                "pose_lidar_to_ref": input_pose_lidar_to_ref,
                 # Normalized time remains a tiny compatibility field in the
                 # shared Dynamic backend payload; V11 conditions on seconds.
                 "timestamps": input_timestamps,
@@ -468,10 +509,13 @@ dynamic_transform = utonia.transform.Compose(
 
 def dynamic_lidar4d_multiframe_collate_fn(batch):
     """Pack the minimal variable-point V11 batch consumed by ModelWrapper."""
-    input_points = []
+    input_points_local = []
+    input_points_ego = []
+    input_points_sensor = []
     input_frame_counts = []
     input_batch_index = []
     input_pose = []
+    input_pose_lidar_to_ref = []
     input_timestamps = []
     input_timestamps_sec = []
     input_duration_sec = []
@@ -479,19 +523,25 @@ def dynamic_lidar4d_multiframe_collate_fn(batch):
 
     for batch_idx, item in enumerate(batch):
         source = item["input"]
-        points = source["lidar_points_sensor"]
-        input_points.append(points)
+        points_local = source["lidar_points_local"]
+        points_sensor = source["lidar_points_sensor"]
+        input_points_local.append(points_local)
+        input_points_ego.append(source["lidar_points_ego"])
+        input_points_sensor.append(points_sensor)
         input_frame_counts.append(source["frame_counts"])
         input_batch_index.append(
-            torch.full((points.shape[0],), batch_idx, dtype=torch.long)
+            torch.full((points_local.shape[0],), batch_idx, dtype=torch.long)
         )
         input_pose.append(source["pose"])
+        input_pose_lidar_to_ref.append(source["pose_lidar_to_ref"])
         input_timestamps.append(source["timestamps"])
         input_timestamps_sec.append(source["timestamps_sec"])
         input_duration_sec.append(source["window_duration_sec"])
         gt_cameras.append(item["gt"]["cameras"])
 
-    lidar_points_sensor = torch.cat(input_points, dim=0)
+    lidar_points_local = torch.cat(input_points_local, dim=0)
+    lidar_points_ego = torch.cat(input_points_ego, dim=0)
+    lidar_points_sensor = torch.cat(input_points_sensor, dim=0)
     flat_counts = torch.cat(input_frame_counts, dim=0)
     offset = torch.cumsum(flat_counts, dim=0)
     batch_idx = torch.cat(input_batch_index, dim=0)
@@ -502,7 +552,7 @@ def dynamic_lidar4d_multiframe_collate_fn(batch):
     ptv3_strength = []
     starts = torch.cat([torch.zeros(1, dtype=offset.dtype), offset[:-1]])
     for start, end in zip(starts.tolist(), offset.tolist()):
-        frame_points = lidar_points_sensor[start:end]
+        frame_points = lidar_points_local[start:end]
         transformed = dynamic_transform(
             {
                 "coord": frame_points[:, :3].detach().cpu().numpy().copy(),
@@ -527,10 +577,13 @@ def dynamic_lidar4d_multiframe_collate_fn(batch):
 
     return {
         "input": {
+            "lidar_points_local": lidar_points_local,
+            "lidar_points_ego": lidar_points_ego,
             "lidar_points_sensor": lidar_points_sensor,
             "batch_idx": batch_idx,
             "offset": offset,
             "pose": input_pose,
+            "pose_lidar_to_ref": input_pose_lidar_to_ref,
             "timestamps": input_timestamps,
             "timestamps_sec": input_timestamps_sec,
             "window_duration_sec": torch.stack(input_duration_sec),

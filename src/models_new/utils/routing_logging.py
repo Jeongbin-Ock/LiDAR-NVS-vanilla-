@@ -57,14 +57,14 @@ def routing_sufficient_statistics(
             "argmax_k_sum": argmax_k.to(dtype).sum(),
         }
         edges = _validated_range_edges(range_edges_m)
-        token_position_sensor = routing["token_position_sensor"].detach().float()
-        if tuple(token_position_sensor.shape) != (token_count, 3):
+        token_position_local = routing["token_position_local"].detach().float()
+        if tuple(token_position_local.shape) != (token_count, 3):
             raise ValueError(
-                "routing token_position_sensor must have shape (N, 3)"
+                "routing token_position_local must have shape (N, 3)"
             )
 
         device = logits.device
-        ranges = token_position_sensor.norm(dim=-1)
+        ranges = token_position_local.norm(dim=-1)
         boundaries = torch.tensor(
             edges[1:], device=device, dtype=ranges.dtype
         )

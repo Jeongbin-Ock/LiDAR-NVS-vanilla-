@@ -133,11 +133,16 @@ VARIANT_CONFIG_PATHS = {
     for variant in DYNAMIC_VARIANTS
 }
 
-# W&B omits empty mappings, so a config restored from its W&B fallback may
-# have no g2g block. Left-merging these defaults restores the stored contract.
+# W&B omits empty mappings, so a restored config may have no g2g block. The
+# coordinate fallback preserves pre-key checkpoints' LiDAR-frame data contract.
 STRUCTURAL_DEFAULTS = {
     "g2g": {},
+    # Checkpoints saved before the coordinate-frame key used LiDAR sensor
+    # coordinates for both Utonia and the frame-0 temporal reference.
+    "data": {"coordinate_frame": "lidar_sensor"},
 }
+
+COORDINATE_FRAMES = ("ego_vehicle", "lidar_sensor")
 
 _REQUIRED_ROOTS = (
     "model",
@@ -164,6 +169,7 @@ _CHECKPOINT_STRUCTURAL_ROOTS = (
 
 _CHECKPOINT_PROTECTED_PATHS = (
     "data.dataset_name",
+    "data.coordinate_frame",
     "data.window_us",
     "data.sample_gap_us",
     "data.gt_middle_count",

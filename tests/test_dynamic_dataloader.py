@@ -163,11 +163,15 @@ class DynamicCollateTest(unittest.TestCase):
                 for i in range(second_count)
             ]
         )
+        points = torch.cat([first, second])
         return {
             "input": {
-                "lidar_points_sensor": torch.cat([first, second]),
+                "lidar_points_local": points,
+                "lidar_points_ego": points,
+                "lidar_points_sensor": points,
                 "frame_counts": torch.tensor([first_count, second_count]),
                 "pose": torch.eye(4).repeat(2, 1, 1),
+                "pose_lidar_to_ref": torch.eye(4).repeat(2, 1, 1),
                 "timestamps": torch.tensor([0.0, 1.0]),
                 "timestamps_sec": torch.tensor([0.0, 0.4]),
                 "window_duration_sec": torch.tensor(0.4),
@@ -183,7 +187,8 @@ class DynamicCollateTest(unittest.TestCase):
         self.assertEqual(
             set(source),
             {
-                "lidar_points_sensor", "batch_idx", "offset", "pose",
+                "lidar_points_local", "lidar_points_ego", "lidar_points_sensor",
+                "batch_idx", "offset", "pose", "pose_lidar_to_ref",
                 "timestamps", "timestamps_sec", "window_duration_sec",
                 "ptv3_input",
             },

@@ -8,6 +8,15 @@ from nuscenes.utils.splits import create_splits_scenes
 from pyquaternion import Quaternion
 
 from . import compact_val
+from .nuscenes_frames import (
+    COORDINATE_FRAME_EGO,
+    ego_to_world as _ego_to_world,
+    reference_to_sensor as _reference_to_sensor,
+    resolve_coordinate_frame as _resolve_coordinate_frame,
+    sensor_to_ego as _sensor_to_ego,
+    sensor_to_world as _shared_sensor_to_world,
+    transform_points as _transform_points,
+)
 from ..models_new import utonia 
 from ..models_new.utils.camera import Camera
 # ────────────────────────────────────────────────────────────────────────────
@@ -48,19 +57,7 @@ def relative_time_coordinates(timestamps_us, window_start_us, window_end_us):
  
 def _sensor_to_world(nusc, sample_data_token: str) -> np.ndarray:
     """Returns (4,4) float32 T_sensor_to_world."""
-    sd  = nusc.get('sample_data', sample_data_token)
-    cs  = nusc.get('calibrated_sensor', sd['calibrated_sensor_token'])
-    ep  = nusc.get('ego_pose', sd['ego_pose_token'])
- 
-    s2e = np.eye(4, dtype=np.float32)
-    s2e[:3, :3] = Quaternion(cs['rotation']).rotation_matrix
-    s2e[:3,  3] = cs['translation']
- 
-    e2w = np.eye(4, dtype=np.float32)
-    e2w[:3, :3] = Quaternion(ep['rotation']).rotation_matrix
-    e2w[:3,  3] = ep['translation']
- 
-    return (e2w @ s2e).astype(np.float32)
+    return _shared_sensor_to_world(nusc, sample_data_token)
  
  
 def _load_points(
@@ -301,7 +298,7 @@ class NuScenesNVSDataset(Dataset):
     batch_idx    : Tensor(N,)        which batch sample each point belongs to
     bbox         : List[Tensor(B_f, 7)]  per-frame boxes in sensor frame
     point_iid    : Tensor(N,)        instance id per point (-1 = background)
-    pose         : Tensor(V, 4, 4)   frame_i → ref_frame (frame_0) rel pose
+    pose         : Tensor(V, 4, 4)   local frame_i → configured frame-0 reference
     timestamps   : Tensor(V,)        normalised to [0, 1]
     timestamps_sec: Tensor(V,)       seconds relative to window start
     window_duration_sec: Tensor(())  actual endpoint interval in seconds
@@ -584,15 +581,40 @@ class NuScenesNVSDataset(Dataset):
         timestamps_us = [f[2] for f in used]
         source_window_indices = [int(i) for i in gt_window_indices]
  
-        # ── Poses ────────────────────────────────────────────────────────────
-        s2w_list  = [_sensor_to_world(self.nusc, t) for t in lidar_tokens]
-        world_to_ref = np.linalg.inv(s2w_list[0])              # ref = frame 0
- 
-        poses = []
-        for s2w in s2w_list:
-            rel = (world_to_ref @ s2w).astype(np.float32)      # frame_i → frame_0
-            poses.append(torch.from_numpy(rel))
-        pose = torch.stack(poses)                               # (V, 4, 4)
+        # ── Poses: fresh runs use ego_i -> ego_0; old checkpoints use L_i -> L_0 ─
+        coordinate_frame = _resolve_coordinate_frame(self.cfg)
+        sensor_to_ego_list = [
+            _sensor_to_ego(self.nusc, token) for token in lidar_tokens
+        ]
+        ego_to_world_list = [
+            _ego_to_world(self.nusc, token) for token in lidar_tokens
+        ]
+        sensor_to_world_list = [
+            (ego_to_world @ sensor_to_ego).astype(np.float32)
+            for ego_to_world, sensor_to_ego in zip(
+                ego_to_world_list, sensor_to_ego_list
+            )
+        ]
+        local_to_world_list = (
+            ego_to_world_list
+            if coordinate_frame == COORDINATE_FRAME_EGO
+            else sensor_to_world_list
+        )
+        reference_to_world = local_to_world_list[0]
+        world_to_reference = np.linalg.inv(reference_to_world)
+        poses = [
+            torch.from_numpy(
+                (world_to_reference @ local_to_world).astype(np.float32)
+            )
+            for local_to_world in local_to_world_list
+        ]
+        pose = torch.stack(poses)  # frame-i local coordinates -> frame-0 reference
+        pose_lidar_to_ref = torch.stack([
+            torch.from_numpy(
+                (world_to_reference @ sensor_to_world).astype(np.float32)
+            )
+            for sensor_to_world in sensor_to_world_list
+        ])
  
         # Keep both coordinate systems. Legacy bbox/V1 experiments consume the
         # per-window normalized coordinate; physical-velocity V3 conditions on
@@ -604,7 +626,7 @@ class NuScenesNVSDataset(Dataset):
             relative_time_coordinates(timestamps_us, t0, t_last)
         )
  
-        # ── Points (transform each frame into ref frame) ──────────────────
+        # ── Points (keep sensor, ego, local, and reference copies explicit) ─
         ego_radius = float(_cfg_get(self.cfg, "ego_radius", 0.0) or 0.0)
         loaded_points = [
             _load_points(self.nusc, self.dataroot, t, ego_radius=ego_radius)
@@ -612,14 +634,21 @@ class NuScenesNVSDataset(Dataset):
         ]
         all_pts_sensor = [item[0] for item in loaded_points]     # List[Tensor(N_i,4)]
         all_lidar_ring = [item[1] for item in loaded_points]     # List[Tensor(N_i,)]
- 
-        all_pts_ref = []
-        for pts, rel_pose in zip(all_pts_sensor, poses):
-            xyz1 = torch.cat(
-                [pts[:, :3], torch.ones(pts.shape[0], 1)], dim=1)  # (N,4)
-            xyz_ref = (rel_pose @ xyz1.T).T[:, :3]                  # (N,3)
-            all_pts_ref.append(
-                torch.cat([xyz_ref, pts[:, 3:4]], dim=1))           # (N,4)
+        all_pts_ego = [
+            _transform_points(points, sensor_to_ego)
+            for points, sensor_to_ego in zip(
+                all_pts_sensor, sensor_to_ego_list
+            )
+        ]
+        all_pts_local = (
+            all_pts_ego
+            if coordinate_frame == COORDINATE_FRAME_EGO
+            else all_pts_sensor
+        )
+        all_pts_ref = [
+            _transform_points(points_local, pose_i.numpy())
+            for points_local, pose_i in zip(all_pts_local, poses)
+        ]
  
         # ── BBoxes & point_iid ───────────────────────────────────────────
         bbox_list       = []
@@ -649,16 +678,22 @@ class NuScenesNVSDataset(Dataset):
  
         # ── input frames ─────────────────────────────────────────────────────
         input_pts_ref    = [all_pts_ref[i]    for i in input_indices]
+        input_pts_local  = [all_pts_local[i]  for i in input_indices]
+        input_pts_ego    = [all_pts_ego[i]    for i in input_indices]
         input_pts_sensor = [all_pts_sensor[i] for i in input_indices]
         input_bbox       = [bbox_list[i]      for i in input_indices]
         input_bbox_iids  = [torch.tensor(assigned[i], dtype=torch.long) for i in input_indices]
         input_iid        = [iid_list[i]       for i in input_indices]
         input_ring       = [all_lidar_ring[i] for i in input_indices]
         input_pose       = pose[input_indices]                  # (n_input, 4, 4)
+        input_pose_lidar_to_ref = pose_lidar_to_ref[input_indices]
         input_timestamps = timestamps[input_indices]            # (n_input,)
         input_timestamps_sec = timestamps_sec[input_indices]    # (n_input,)
         input_frame_counts = torch.tensor([p.shape[0] for p in input_pts_ref])
-        ref_to_sensor = torch.linalg.inv(pose)
+        ref_to_sensor = [
+            _reference_to_sensor(self.nusc, lidar_token, reference_to_world)
+            for lidar_token in lidar_tokens
+        ]
 
         # ── gt = input endpoints + selected middle sweeps ───────────────────
         gt_frame_counts = torch.tensor([p.shape[0] for p in all_pts_ref])
@@ -674,7 +709,7 @@ class NuScenesNVSDataset(Dataset):
                 lidar_ring=ring,
                 cfg=self.cfg,
                 uid=uid,
-                ref_to_sensor=ref_pose.numpy(),
+                ref_to_sensor=ref_pose,
             )
             for uid, (lidar_tok, pts_sensor, ring, ts_norm, ts_sec, ref_pose) in enumerate(
                 zip(
@@ -692,6 +727,8 @@ class NuScenesNVSDataset(Dataset):
             "input": {
             # ── input ────────────────────────────────────────────────────────
             'lidar_points':           torch.cat(input_pts_ref,    dim=0),  # (N_in, 4)
+            'lidar_points_local':     torch.cat(input_pts_local,  dim=0),  # own ego or legacy sensor frame
+            'lidar_points_ego':       torch.cat(input_pts_ego,    dim=0),  # each frame's ego frame
             'lidar_points_sensor':    torch.cat(input_pts_sensor, dim=0),  # (N_in, 4)
             'lidar_ring':             torch.cat(input_ring, dim=0),
             'frame_counts':           input_frame_counts,                  # (n_input,)
@@ -699,6 +736,7 @@ class NuScenesNVSDataset(Dataset):
             'bbox_instance_ids':       input_bbox_iids,
             'point_iid':              torch.cat(input_iid, dim=0),
             'pose':                   input_pose,                          # (n_input, 4, 4)
+            'pose_lidar_to_ref':      input_pose_lidar_to_ref,
             'timestamps':             input_timestamps,                    # (n_input,)
             'timestamps_sec':         input_timestamps_sec,                # (n_input,)
             'window_duration_sec':    window_duration_sec,                 # scalar
@@ -708,6 +746,7 @@ class NuScenesNVSDataset(Dataset):
             "gt":{
             # ── gt (input endpoints + selected middle sweeps) ───────────────
             'gt_lidar_points':        torch.cat(all_pts_ref,    dim=0),   # (N_all, 4)
+            'gt_lidar_points_ego':    torch.cat(all_pts_ego,    dim=0),
             'gt_lidar_points_sensor': torch.cat(all_pts_sensor, dim=0),
             'gt_lidar_ring':          torch.cat(all_lidar_ring, dim=0),
             'gt_frame_counts':        gt_frame_counts,                    # (V,)
@@ -715,6 +754,7 @@ class NuScenesNVSDataset(Dataset):
             'gt_bbox_instance_ids':    [torch.tensor(ids, dtype=torch.long) for ids in assigned],
             'gt_point_iid':           torch.cat(iid_list, dim=0),
             'gt_pose':                pose,                               # (V, 4, 4)
+            'gt_pose_lidar_to_ref':   pose_lidar_to_ref,
             'gt_timestamps':          timestamps,                         # (V,)
             'gt_timestamps_sec':      timestamps_sec,                     # (V,)
             'window_duration_sec':    window_duration_sec,                # scalar
@@ -732,6 +772,8 @@ transform = utonia.transform.default(0.2, apply_z_positive=False, keep_strength=
 
 def multiframe_collate_fn(batch):
     all_input_pts        = []
+    all_input_local_pts  = []
+    all_input_ego_pts    = []
     all_input_sensor_pts = []
     all_input_ring       = []
     all_input_iid        = []
@@ -740,6 +782,7 @@ def multiframe_collate_fn(batch):
     all_input_bbox       = []
     all_input_bbox_iids  = []
     all_input_pose       = []
+    all_input_pose_lidar_to_ref = []
     all_input_timestamps = []
     all_input_timestamps_sec = []
     all_input_window_duration_sec = []
@@ -747,6 +790,7 @@ def multiframe_collate_fn(batch):
     all_input_window_indices = []
 
     all_gt_pts        = []
+    all_gt_ego_pts    = []
     all_gt_sensor_pts = []
     all_gt_ring       = []
     all_gt_iid        = []
@@ -754,6 +798,7 @@ def multiframe_collate_fn(batch):
     all_gt_bbox       = []
     all_gt_bbox_iids  = []
     all_gt_pose       = []
+    all_gt_pose_lidar_to_ref = []
     all_gt_timestamps = []
     all_gt_timestamps_sec = []
     all_gt_window_duration_sec = []
@@ -766,6 +811,8 @@ def multiframe_collate_fn(batch):
 
         N_in = inp["lidar_points"].shape[0]
         all_input_pts.append(inp["lidar_points"])
+        all_input_local_pts.append(inp["lidar_points_local"])
+        all_input_ego_pts.append(inp["lidar_points_ego"])
         all_input_sensor_pts.append(inp["lidar_points_sensor"])
         all_input_ring.append(inp["lidar_ring"])
         all_input_iid.append(inp["point_iid"])
@@ -774,6 +821,7 @@ def multiframe_collate_fn(batch):
         all_input_bbox.append(inp["bbox"])
         all_input_bbox_iids.append(inp["bbox_instance_ids"])
         all_input_pose.append(inp["pose"])
+        all_input_pose_lidar_to_ref.append(inp["pose_lidar_to_ref"])
         all_input_timestamps.append(inp["timestamps"])
         all_input_timestamps_sec.append(inp["timestamps_sec"])
         all_input_window_duration_sec.append(inp["window_duration_sec"])
@@ -781,6 +829,7 @@ def multiframe_collate_fn(batch):
         all_input_window_indices.append(inp["input_window_indices"])
 
         all_gt_pts.append(gt["gt_lidar_points"])
+        all_gt_ego_pts.append(gt["gt_lidar_points_ego"])
         all_gt_sensor_pts.append(gt["gt_lidar_points_sensor"])
         all_gt_ring.append(gt["gt_lidar_ring"])
         all_gt_iid.append(gt["gt_point_iid"])
@@ -788,6 +837,7 @@ def multiframe_collate_fn(batch):
         all_gt_bbox.append(gt["gt_bbox"])
         all_gt_bbox_iids.append(gt["gt_bbox_instance_ids"])
         all_gt_pose.append(gt["gt_pose"])
+        all_gt_pose_lidar_to_ref.append(gt["gt_pose_lidar_to_ref"])
         all_gt_timestamps.append(gt["gt_timestamps"])
         all_gt_timestamps_sec.append(gt["gt_timestamps_sec"])
         all_gt_window_duration_sec.append(gt["window_duration_sec"])
@@ -796,6 +846,8 @@ def multiframe_collate_fn(batch):
 
     # ── input concat ─────────────────────────────────────────────────────────
     lidar_points        = torch.cat(all_input_pts,        dim=0)
+    lidar_points_local  = torch.cat(all_input_local_pts,  dim=0)
+    lidar_points_ego    = torch.cat(all_input_ego_pts,    dim=0)
     lidar_points_sensor = torch.cat(all_input_sensor_pts, dim=0)
     lidar_ring          = torch.cat(all_input_ring,       dim=0)
     point_iid           = torch.cat(all_input_iid,        dim=0)
@@ -805,6 +857,7 @@ def multiframe_collate_fn(batch):
 
     # ── gt concat ────────────────────────────────────────────────────────────
     gt_lidar_points        = torch.cat(all_gt_pts,        dim=0)
+    gt_lidar_points_ego    = torch.cat(all_gt_ego_pts,    dim=0)
     gt_lidar_points_sensor = torch.cat(all_gt_sensor_pts, dim=0)
     gt_lidar_ring          = torch.cat(all_gt_ring,       dim=0)
     gt_point_iid           = torch.cat(all_gt_iid,        dim=0)
@@ -817,12 +870,12 @@ def multiframe_collate_fn(batch):
     starts = torch.cat([torch.tensor([0]), offset[:-1]])
 
     for start, end in zip(starts.tolist(), offset.tolist()):
-        pts_slice_sensor = lidar_points_sensor[start:end]
-        coords_sensor    = pts_slice_sensor[:, :3]
-        coords_np = coords_sensor.detach().cpu().numpy().copy()
+        pts_slice_local = lidar_points_local[start:end]
+        coords_local = pts_slice_local[:, :3]
+        coords_np = coords_local.detach().cpu().numpy().copy()
         # per-point intensity ("strength"): rides through GridSample so the KEPT
-        # point's intensity is aligned to the sampled coord (Utonia's own point).
-        strength_np = pts_slice_sensor[:, 3:4].detach().cpu().numpy().copy()
+        # point's intensity is aligned to the sampled local-frame coord.
+        strength_np = pts_slice_local[:, 3:4].detach().cpu().numpy().copy()
         d = {
             "coord": coords_np,
             "color": np.zeros_like(coords_np),
@@ -853,6 +906,8 @@ def multiframe_collate_fn(batch):
     return {
         "input": {
             "lidar_points":        lidar_points,         # (N_in, 4)
+            "lidar_points_local":  lidar_points_local,
+            "lidar_points_ego":    lidar_points_ego,
             "lidar_points_sensor": lidar_points_sensor,  # (N_in, 4)
             "lidar_ring":          lidar_ring,           # (N_in,)
             "point_iid":           point_iid,            # (N_in,)
@@ -861,6 +916,7 @@ def multiframe_collate_fn(batch):
             "bbox":                all_input_bbox,       # List[List[Tensor(B_f, 7)]]
             "bbox_instance_ids":    all_input_bbox_iids,  # List[List[Tensor(B_f,)]]
             "pose":                all_input_pose,       # List[Tensor(n_input, 4, 4)]
+            "pose_lidar_to_ref":   all_input_pose_lidar_to_ref,
             "timestamps":          all_input_timestamps, # List[Tensor(n_input,)]
             "timestamps_sec":      all_input_timestamps_sec,
             "window_duration_sec": torch.stack(all_input_window_duration_sec),
@@ -870,6 +926,7 @@ def multiframe_collate_fn(batch):
         },
         "gt": {
             "lidar_points":        gt_lidar_points,         # (N_all, 4)
+            "lidar_points_ego":    gt_lidar_points_ego,
             "lidar_points_sensor": gt_lidar_points_sensor,  # (N_all, 4)
             "lidar_ring":          gt_lidar_ring,           # (N_all,)
             "point_iid":           gt_point_iid,            # (N_all,)
@@ -877,6 +934,7 @@ def multiframe_collate_fn(batch):
             "bbox":                all_gt_bbox,             # List[List[Tensor(B_f, 7)]]
             "bbox_instance_ids":    all_gt_bbox_iids,        # List[List[Tensor(B_f,)]]
             "pose":                all_gt_pose,             # List[Tensor(V, 4, 4)]
+            "pose_lidar_to_ref":   all_gt_pose_lidar_to_ref,
             "timestamps":          all_gt_timestamps,       # List[Tensor(V,)]
             "timestamps_sec":      all_gt_timestamps_sec,
             "window_duration_sec": torch.stack(all_gt_window_duration_sec),

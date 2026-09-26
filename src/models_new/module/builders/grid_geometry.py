@@ -5,7 +5,7 @@ import torch
 
 
 def xyz_to_theta_phi_r(xyz):
-    """(...,3) sensor-frame xyz -> (...,3) [theta, phi, r] about the sensor origin."""
+    """Frame-local xyz -> [theta, phi, r] about that frame's origin."""
     r = xyz.norm(dim=-1).clamp_min(1e-6)
     phi = torch.atan2(xyz[..., 1], xyz[..., 0])              # [-pi, pi]
     theta = torch.asin((xyz[..., 2] / r).clamp(-1.0, 1.0))   # [-pi/2, pi/2]
@@ -13,7 +13,7 @@ def xyz_to_theta_phi_r(xyz):
 
 
 class UtoniaGridMapper:
-    """Maps metric (sensor-frame) points to the Utonia bottleneck feature grid,
+    """Maps metric frame-local points to the Utonia bottleneck feature grid,
     i.e. the same integer cell index space as features['grid_coord'].
 
     feature_grid_size (metric) = input_grid_size / coord_scale * stride_factor.
@@ -54,4 +54,3 @@ def _cell_centers(grid_coord, occupied, metric_origin, mapper, dtype):
     )
 
 __all__ = ["UtoniaGridMapper", "xyz_to_theta_phi_r"]
-

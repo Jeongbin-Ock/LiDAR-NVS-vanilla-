@@ -875,7 +875,7 @@ class RouterBackendTest(unittest.TestCase):
             [torch.tensor([0.0, 1.0])],
             [torch.tensor([0.0, 0.8])],
             torch.tensor([0.8]),
-            seed_delta_sensor=seed_delta,
+            seed_delta_local=seed_delta,
         )
         # Translation cancels from a delta; +x rotates to +y in frame 1.
         torch.testing.assert_close(

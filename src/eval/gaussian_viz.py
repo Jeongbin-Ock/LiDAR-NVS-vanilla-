@@ -3,7 +3,7 @@
 One self-contained HTML per sequence (Plotly.js from CDN, no python dep). The
 1/2/3/4 buttons toggle the Gaussian point cloud of each target second
 (T=1,2,3,4s). Points are Gaussian *centers* (means3D) at that window's target
-time, in the window's ref frame (frame-0 sensor frame, z-up). Target-time
+time, in the window's ref frame (frame-0 ego frame, z-up). Target-time
 centers are colored by their source endpoint frame and each actual
 source-to-target transport is drawn as an arrow.
 """

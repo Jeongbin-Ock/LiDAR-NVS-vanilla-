@@ -32,7 +32,9 @@ class Point2Gaus(nn.Module):
 
     Utonia runs on XYZI input with LoRA adapters on its frozen base. Every
     occupied Utonia cell becomes one token, and the variant's backend turns the
-    two endpoint frames' tokens into Gaussians with a per-token velocity.
+    two endpoint frames' tokens into Gaussians with a per-token velocity. New
+    configs feed each scan in its own ego frame; backend poses map those local
+    coordinates into the frame-0 ego reference before temporal matching.
     """
 
     def __init__(self, cfg, dynamic_cfg, dynamic_variant):
@@ -297,14 +299,15 @@ class Point2Gaus(nn.Module):
         Train/eval behaviour follows ``nn.Module.training``, so this module
         needs neither a split name nor a step counter from the caller.
         """
-        # Do not use ``dict.get(key, _input[legacy_key])`` here: Python eagerly
-        # evaluates that fallback and would force bbox-era loaders to retain a
-        # reference-frame point copy even when sensor-frame points are present.
-        lidar_points = (
-            _input["lidar_points_sensor"]
-            if "lidar_points_sensor" in _input
-            else _input["lidar_points"]
-        )
+        # ``lidar_points_local`` is ego_i in the current config and the
+        # historical LiDAR sensor frame for checkpoint configs saved before
+        # data.coordinate_frame existed. Tokens and seeds share this basis.
+        if "lidar_points_local" in _input:
+            lidar_points = _input["lidar_points_local"]
+        elif "lidar_points_sensor" in _input:
+            lidar_points = _input["lidar_points_sensor"]
+        else:
+            lidar_points = _input["lidar_points"]
         offset = _input["offset"]
         point_batch_idx = _input["batch_idx"]
         pose = _input["pose"]
@@ -334,11 +337,11 @@ class Point2Gaus(nn.Module):
         frame_batch_idx = frame_batch_idx.to(
             device=all_ufeat.device, dtype=torch.long
         )
-        all_seed_sensor = torch.cat(
-            [item.seed_sensor for item in grid_seed_list], dim=0
+        all_seed_local = torch.cat(
+            [item.seed_local for item in grid_seed_list], dim=0
         )
-        all_delta_sensor = torch.cat(
-            [item.delta_sensor for item in grid_seed_list], dim=0
+        all_delta_local = torch.cat(
+            [item.delta_local for item in grid_seed_list], dim=0
         )
 
         if all_ufeat.shape[1] != self.utonia_feature_dim:
@@ -361,11 +364,11 @@ class Point2Gaus(nn.Module):
         if self.dynamic_adaptive_count or getattr(
             self.dynamic_backend, "seed_conditioned_head", False
         ):
-            dynamic_kwargs["seed_delta_sensor"] = all_delta_sensor
+            dynamic_kwargs["seed_delta_local"] = all_delta_local
         dynamic_out = self.dynamic_backend(
             all_ufeat,
             all_pos,
-            all_seed_sensor,
+            all_seed_local,
             new_offset,
             frame_batch_idx,
             pose,

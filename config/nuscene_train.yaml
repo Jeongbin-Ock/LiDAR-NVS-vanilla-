@@ -40,6 +40,7 @@ test:
 data:
   dataset_name: "nuscenes"
   dataroot: "/data1/nuScenes"
+  coordinate_frame: "ego_vehicle"  # per-sweep Utonia frame and frame-0 temporal reference
   version: "v1.0-trainval"
   test_version: "v1.0-test"
   train_split: "train"

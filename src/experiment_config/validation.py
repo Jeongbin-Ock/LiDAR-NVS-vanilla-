@@ -8,6 +8,7 @@ from omegaconf import ListConfig, OmegaConf
 from .definitions import (
     BARRIER_MATCH_DYNAMIC_VARIANTS,
     COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
+    COORDINATE_FRAMES,
     DYNAMIC_VARIANT_V12_1,
     FEATURE_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
     FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
@@ -485,6 +486,15 @@ def validate_experiment_config(config) -> None:
             f"Unknown model.variant={variant!r}; expected one of: {allowed}"
         )
     label = _variant_label(variant)
+
+    coordinate_frame = str(OmegaConf.select(
+        config, "data.coordinate_frame", default="lidar_sensor"
+    )).lower()
+    if coordinate_frame not in COORDINATE_FRAMES:
+        raise ValueError(
+            "data.coordinate_frame must be one of "
+            f"{COORDINATE_FRAMES}, got {coordinate_frame!r}"
+        )
 
     _validate_dynamic_window_loader(config, variant)
     _validate_legacy_train_exclusions(config)

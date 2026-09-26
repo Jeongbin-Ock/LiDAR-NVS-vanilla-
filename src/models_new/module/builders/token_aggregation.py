@@ -13,8 +13,13 @@ from .grid_seeds import GridSeedData, _build_seed_data
 class RawTokenMembership:
     """Own-frame raw points and their compact occupied-token row indices."""
 
-    points_sensor: torch.Tensor
+    points_local: torch.Tensor
     token_index: torch.Tensor
+
+    @property
+    def points_sensor(self):
+        """Backward-compatible alias; the coordinate basis is frame-local."""
+        return self.points_local
 
 
 def split_by_offset(tensor, offset):
@@ -54,7 +59,7 @@ def _aggregate_points_to_cells(points_xyz, intensity, grid_coord, voxel_feats,
         )
         if return_membership:
             empty_membership = RawTokenMembership(
-                points_sensor=points_xyz.new_zeros((0, 3)),
+                points_local=points_xyz.new_zeros((0, 3)),
                 token_index=torch.zeros((0,), dtype=torch.long, device=device),
             )
             result = result + (empty_membership,)
@@ -127,7 +132,7 @@ def _aggregate_points_to_cells(points_xyz, intensity, grid_coord, voxel_feats,
         )
         full_to_compact[occ] = torch.cumsum(occ.to(torch.long), dim=0)[occ] - 1
         result = result + (RawTokenMembership(
-            points_sensor=pts,
+            points_local=pts,
             token_index=full_to_compact[cell_idx],
         ),)
     if seed_config is not None:

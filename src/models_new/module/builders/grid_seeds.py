@@ -20,9 +20,19 @@ class GridSeedData:
     feature fusion.
     """
 
-    seed_sensor: torch.Tensor
-    delta_sensor: torch.Tensor
+    seed_local: torch.Tensor
+    delta_local: torch.Tensor
     anchor_k: torch.Tensor | None
+
+    @property
+    def seed_sensor(self):
+        """Backward-compatible alias; these rows use the frame-local basis."""
+        return self.seed_local
+
+    @property
+    def delta_sensor(self):
+        """Backward-compatible alias; these deltas use the frame-local basis."""
+        return self.delta_local
 
 
 def _r_quantile_seed_data(points, cell_idx, counts, grid_coord, occupied,

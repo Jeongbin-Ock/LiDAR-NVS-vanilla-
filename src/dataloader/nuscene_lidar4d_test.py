@@ -38,6 +38,11 @@ from .nuscene import (
     MAX_WIN_US,
     MIN_GAP_US,
 )
+from .nuscenes_frames import (
+    COORDINATE_FRAME_EGO,
+    ego_to_world,
+    resolve_coordinate_frame,
+)
 
 # (name, start LIDAR_TOP sweep timestamp in microseconds). The start frame is
 # LiDAR4D "frame index 0" of each Table S6 sequence.
@@ -232,8 +237,8 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
         by up to ~0.5 s (metres of drift). ``nusc.get_boxes`` instead linearly
         interpolates each annotation to the sweep timestamp, so the boxes line
         up with the target-time LiDAR. Returned as ``(M, 7)``
-        ``[x,y,z,w,l,h,yaw]`` in the ref frame = the input-before endpoint
-        sensor frame (the same ref ``__getitem__`` builds its poses/points in).
+        ``[x,y,z,w,l,h,yaw]`` in the configured frame-0 reference: ego frame
+        for new configs, or LiDAR sensor frame for historical checkpoints.
         """
         scene_idx, anchor = self.index[window_index]
         window = self._sample_frames(scene_idx, anchor)
@@ -241,9 +246,11 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
         ref_token = used[0][0]
         target_token = used[self.target_cam_index][0]
 
-        world_to_ref = np.linalg.inv(
-            _sensor_to_world(self.nusc, ref_token).astype(np.float64)
-        )
+        if resolve_coordinate_frame(self.cfg) == COORDINATE_FRAME_EGO:
+            reference_to_world = ego_to_world(self.nusc, ref_token)
+        else:
+            reference_to_world = _sensor_to_world(self.nusc, ref_token)
+        world_to_ref = np.linalg.inv(reference_to_world.astype(np.float64))
         rot, trans = world_to_ref[:3, :3], world_to_ref[:3, 3]
         yaw_offset = float(np.arctan2(rot[1, 0], rot[0, 0]))
 

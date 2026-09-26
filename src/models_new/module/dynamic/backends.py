@@ -56,7 +56,7 @@ class DynamicGaussianBackend(nn.Module):
         """The cross-attention stack this variant refines its tokens with."""
         raise NotImplementedError
 
-    def _check_fixed_count_seeds(self, seed_sensor, token_position_sensor):
+    def _check_fixed_count_seeds(self, seed_local, token_position_local):
         """Normalize the source seeds to ``(N, G, 3)`` and check the count.
 
         The token builder always emits a padded slot axis; a backend that emits
@@ -64,18 +64,18 @@ class DynamicGaussianBackend(nn.Module):
         a mismatch here means the config's Gaussian count and the seed contract
         have drifted apart.
         """
-        if token_position_sensor.ndim != 2 or token_position_sensor.shape[1] != 3:
+        if token_position_local.ndim != 2 or token_position_local.shape[1] != 3:
             raise ValueError("dynamic token positions must be (N,3)")
         slots = self.gaussians_per_token
-        if seed_sensor.ndim == 2:
-            seed_sensor = seed_sensor.unsqueeze(1)
-        expected = (token_position_sensor.shape[0], slots, 3)
-        if tuple(seed_sensor.shape) != expected:
+        if seed_local.ndim == 2:
+            seed_local = seed_local.unsqueeze(1)
+        expected = (token_position_local.shape[0], slots, 3)
+        if tuple(seed_local.shape) != expected:
             raise ValueError(
                 f"Dynamic 2DGS expects {slots} seed(s) per token with shape "
-                f"{expected}, got {tuple(seed_sensor.shape)}"
+                f"{expected}, got {tuple(seed_local.shape)}"
             )
-        return seed_sensor
+        return seed_local
 
     def _expand_to_gaussians(self, value):
         """Repeat one per-token row for each of that token's Gaussians."""
@@ -158,30 +158,31 @@ class DynamicGaussianBackend(nn.Module):
 
     def _reference_geometry_and_time(
         self,
-        token_sensor,
-        seed_sensor,
+        token_local,
+        seed_local,
         token_offset,
         frame_batch_idx,
         pose_list,
         timestamps_normalized,
         timestamps_sec,
         window_duration_sec,
-        seed_delta_sensor=None,
+        seed_delta_local=None,
     ):
-        device, dtype = token_sensor.device, token_sensor.dtype
-        token_ref = torch.empty_like(token_sensor)
-        seed_ref = torch.empty_like(seed_sensor)
+        """Map frame-local token and seed coordinates into the window reference."""
+        device, dtype = token_local.device, token_local.dtype
+        token_ref = torch.empty_like(token_local)
+        seed_ref = torch.empty_like(seed_local)
         seed_delta_ref = (
-            torch.empty_like(seed_delta_sensor)
-            if seed_delta_sensor is not None else None
+            torch.empty_like(seed_delta_local)
+            if seed_delta_local is not None else None
         )
-        if seed_delta_sensor is not None and seed_delta_sensor.shape != seed_sensor.shape:
-            raise ValueError("seed_delta_sensor must have the same shape as seeds")
-        token_time_norm = torch.empty(token_sensor.shape[0], device=device, dtype=dtype)
+        if seed_delta_local is not None and seed_delta_local.shape != seed_local.shape:
+            raise ValueError("seed_delta_local must have the same shape as seeds")
+        token_time_norm = torch.empty(token_local.shape[0], device=device, dtype=dtype)
         token_time_sec = torch.empty_like(token_time_norm)
         token_duration = torch.empty_like(token_time_norm)
         token_batch = torch.empty(
-            token_sensor.shape[0], device=device, dtype=torch.long
+            token_local.shape[0], device=device, dtype=torch.long
         )
         local_frame_index = torch.empty_like(token_batch)
         seen = defaultdict(int)
@@ -192,14 +193,14 @@ class DynamicGaussianBackend(nn.Module):
             start, end = self._frame_bounds(token_offset, global_frame)
             pose = pose_list[batch_id][local_frame].to(device=device, dtype=dtype)
             token_ref[start:end] = box_utils.apply_pose(
-                token_sensor[start:end], pose
+                token_local[start:end], pose
             )
-            seed_frame = seed_sensor[start:end]
+            seed_frame = seed_local[start:end]
             seed_ref[start:end] = box_utils.apply_pose(
                 seed_frame.reshape(-1, 3), pose
             ).reshape_as(seed_frame)
             if seed_delta_ref is not None:
-                delta_frame = seed_delta_sensor[start:end]
+                delta_frame = seed_delta_local[start:end]
                 center_frame = seed_frame - delta_frame
                 center_ref = box_utils.apply_pose(
                     center_frame.reshape(-1, 3), pose
@@ -304,36 +305,41 @@ class DynamicGaussianBackend(nn.Module):
     def forward(
         self,
         fused_feature,
-        token_position_sensor,
-        seed_sensor,
+        token_position_local,
+        seed_local,
         token_offset,
         frame_batch_idx,
         pose_list,
         timestamps_normalized,
         timestamps_sec,
         window_duration_sec,
+        seed_delta_local=None,
         seed_delta_sensor=None,
     ):
+        if seed_delta_local is not None and seed_delta_sensor is not None:
+            raise ValueError("pass only one of seed_delta_local and seed_delta_sensor")
+        if seed_delta_local is None:
+            seed_delta_local = seed_delta_sensor
         if fused_feature.ndim != 2 or fused_feature.shape[1] != self.dim:
             raise ValueError(f"dynamic fused_feature must be (N,{self.dim})")
-        seed_sensor = self._check_fixed_count_seeds(
-            seed_sensor, token_position_sensor
+        seed_local = self._check_fixed_count_seeds(
+            seed_local, token_position_local
         )
-        if seed_delta_sensor is not None:
-            seed_delta_sensor = self._check_fixed_count_seeds(
-                seed_delta_sensor, token_position_sensor
+        if seed_delta_local is not None:
+            seed_delta_local = self._check_fixed_count_seeds(
+                seed_delta_local, token_position_local
             )
 
         geometry = self._reference_geometry_and_time(
-            token_position_sensor,
-            seed_sensor,
+            token_position_local,
+            seed_local,
             token_offset,
             frame_batch_idx,
             pose_list,
             timestamps_normalized,
             timestamps_sec,
             window_duration_sec,
-            seed_delta_sensor=seed_delta_sensor,
+            seed_delta_local=seed_delta_local,
         )
         refined, temporal_fields = self._temporal_refine(
             fused_feature,
@@ -513,16 +519,21 @@ class RouterCapableGaussianBackend(DynamicGaussianBackend):
     def forward(
         self,
         fused_feature,
-        token_position_sensor,
-        seed_sensor,
+        token_position_local,
+        seed_local,
         token_offset,
         frame_batch_idx,
         pose_list,
         timestamps_normalized,
         timestamps_sec,
         window_duration_sec,
+        seed_delta_local=None,
         seed_delta_sensor=None,
     ):
+        if seed_delta_local is not None and seed_delta_sensor is not None:
+            raise ValueError("pass only one of seed_delta_local and seed_delta_sensor")
+        if seed_delta_local is None:
+            seed_delta_local = seed_delta_sensor
         if not self.adaptive_count:
             # Without a router this backend is an ordinary fixed-count variant;
             # the shared forward already implements that. Deltas are then the
@@ -530,7 +541,7 @@ class RouterCapableGaussianBackend(DynamicGaussianBackend):
             # ``(N, G, 3)`` set a seed-conditioned head reads, never the
             # K-specific ``(N, K, K, 3)`` bank, and the shared forward
             # validates that shape.
-            if seed_delta_sensor is not None and not getattr(
+            if seed_delta_local is not None and not getattr(
                 self, "seed_conditioned_head", False
             ):
                 raise ValueError(
@@ -538,15 +549,15 @@ class RouterCapableGaussianBackend(DynamicGaussianBackend):
                 )
             return super().forward(
                 fused_feature,
-                token_position_sensor,
-                seed_sensor,
+                token_position_local,
+                seed_local,
                 token_offset,
                 frame_batch_idx,
                 pose_list,
                 timestamps_normalized,
                 timestamps_sec,
                 window_duration_sec,
-                seed_delta_sensor=seed_delta_sensor,
+                seed_delta_local=seed_delta_local,
             )
         if fused_feature.ndim != 2 or fused_feature.shape[1] != self.dim:
             raise ValueError(f"dynamic fused_feature must be (N,{self.dim})")
@@ -556,31 +567,31 @@ class RouterCapableGaussianBackend(DynamicGaussianBackend):
             self.gaussian_head.k_max,
             3,
         )
-        if tuple(seed_sensor.shape) != expected_seed_shape:
+        if tuple(seed_local.shape) != expected_seed_shape:
             raise ValueError(
                 "adaptive-K dynamic backend requires the learned-count seed bank with shape "
-                f"{expected_seed_shape}, got {tuple(seed_sensor.shape)}"
+                f"{expected_seed_shape}, got {tuple(seed_local.shape)}"
             )
-        if seed_delta_sensor is None or tuple(
-            seed_delta_sensor.shape
+        if seed_delta_local is None or tuple(
+            seed_delta_local.shape
         ) != expected_seed_shape:
             raise ValueError(
                 "adaptive-K dynamic backend requires a learned-count seed-delta bank with shape "
                 f"{expected_seed_shape}"
             )
-        if token_position_sensor.shape != (fused_feature.shape[0], 3):
+        if token_position_local.shape != (fused_feature.shape[0], 3):
             raise ValueError("adaptive-K token positions must align with features")
 
         geometry = self._reference_geometry_and_time(
-            token_position_sensor,
-            seed_sensor,
+            token_position_local,
+            seed_local,
             token_offset,
             frame_batch_idx,
             pose_list,
             timestamps_normalized,
             timestamps_sec,
             window_duration_sec,
-            seed_delta_sensor=seed_delta_sensor,
+            seed_delta_local=seed_delta_local,
         )
         refined, temporal_fields = self._temporal_refine(
             fused_feature,
@@ -637,7 +648,7 @@ class RouterCapableGaussianBackend(DynamicGaussianBackend):
         routing_stats = {
             "k_logits": packing["k_logits"].detach(),
             "selected_k": packing["anchor_k"].detach(),
-            "token_position_sensor": token_position_sensor.detach(),
+            "token_position_local": token_position_local.detach(),
         }
         return {
             "batch_gaussians": batch_gaussians,
@@ -807,7 +818,7 @@ class SeedConditionedBarrierVelocityGaussianBackend(
             raise ValueError(
                 f"{self.fixed_variant_label} requires the transformed per-slot "
                 "seed deltas; "
-                "Point2Gaus must pass seed_delta_sensor"
+                "Point2Gaus must pass seed_delta_local"
             )
         return self.gaussian_head(refined, seed_delta_ref)
 
