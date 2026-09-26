@@ -46,7 +46,8 @@ Gaussians per occupied endpoint token -- one observed-medoid seed by default,
 two range quantiles in V11.3/V11.5/V13.1 and three in V11.6; V11, V11.2, V11.4,
 V12, V12.1, V12.2, V13, V13.2, V13.3 and V13.4 let a router select one to three
 range-quantile-seeded Gaussians instead. `p2g.grid_query` chooses between the
-two and sets the fixed count -- see "Gaussians per token" below.
+two, sets the fixed count and selects where seeds start (`seed_mode`) -- see
+"Gaussians per token" below.
 
 Every variant embeds `time_coordinate = relative_seconds / time_reference_sec`,
 where `time_reference_sec=1.0` is fixed across samples. An irregular 0.8-second
@@ -299,13 +300,15 @@ The offset projection stays zero-initialized, so a fresh run still starts every
 Gaussian exactly on its own seed.
 
 `seed_conditioned` and `trunk` are properties of the V11.3 backend, not config
-keys, and both default to off in `GaussianAttributeHead`. V11.1 checkpoints
-were saved from the plain affine form and restore unchanged.
+keys, and both default to off in `GaussianAttributeHead`. The backend turns
+`seed_conditioned` on only under `seed_mode: range_quantile`; the shared-anchor
+modes build `Linear(dim, dim) -> SiLU` and read the token feature alone. V11.1
+checkpoints were saved from the plain affine form and restore unchanged.
 
 V11.3 is deliberately absent from `ROUTER_CAPABLE_DYNAMIC_VARIANTS` even though
 its backend class owns the router: `count_mode=learned_gumbel` is rejected
 rather than quietly turning V11.3 back into V11. `p2g.grid_query.K_max` and
-`exp` remain overridable to select another fixed count or seed rule.
+`seed_mode` remain overridable to select another fixed count or seed rule.
 
 V11's trained router settled at a mean K of 1.638 (58.7% K=1, 18.8% K=2, 22.5%
 K=3) and 91.6k Gaussians per step at `batch_size=2`, so a fixed two is about 22%
@@ -556,7 +559,8 @@ candidate bank and hard Gumbel-Softmax STE; no count-budget objective exists.
 
 **V13.1** is V13 with only the count mechanism changed. The router, count
 predictor, opacity STE gate and K-specific output heads are removed; every token
-emits exactly two Gaussians. `grid_query.K_max=2, exp=null` chooses the token's
+emits exactly two Gaussians. `grid_query.K_max=2, seed_mode=range_quantile`
+chooses the token's
 raw points at `floor(N/4)` and `floor(3N/4)`, exactly the adaptive bank's K=2
 range-quantile row. The fixed Gaussian decoder remains seed-conditioned, so the
 two slots see their six metric seed-delta channels. Temporal parameters,
@@ -685,40 +689,56 @@ run them.
 
 **Fixed count (`count_mode: legacy`, the default).** Every occupied token emits
 exactly `K_max` Gaussians, which is required whenever the block is present.
-`exp` says where those seeds start:
+`seed_mode` says where those seeds start:
 
-| `exp` | seed placement |
+| `seed_mode` | seed placement |
 | --- | --- |
-| `1` | the token's observed medoid -- the raw point nearest its own-frame Cartesian mean |
-| `2` | the token's Utonia cell coordinate |
-| `null` | `K_max` deterministic range quantiles over the token's own raw points |
+| `range_quantile` (default) | `K_max` deterministic range quantiles over the token's own raw points |
+| `medoid` | every slot on the token's observed medoid -- the raw point nearest its own-frame Cartesian mean |
+| `token` | every slot on the token's Utonia position -- the pooled cell coordinate temporal attention also uses |
 
-Seeds that coincide are not redundant: the Gaussian head owns one parameter
-block per slot, including the bounded position offset, so slots starting at the
-same coordinate learn independent geometry. V11.3, V11.5, V11.6 and V13.1
-additionally feed every slot's seed delta into that head, so their slots also
-differ by input and not only by parameters; every other fixed-count variant
-reads the token feature alone. Under `exp: null` a token holding fewer raw points than
+`medoid` and `token` are shared anchors. Every slot of a token starts there,
+and its Gaussian lands at `anchor + head_offset_bound * tanh(offset_k)` per
+axis, the anchor-plus-bounded-offset form of anchor-based Gaussian decoders
+(Scaffold-GS, SCube, TRELLIS). Seeds that coincide are not redundant: the
+Gaussian head owns one parameter block per slot, including the bounded
+position offset, so slots starting at the same coordinate learn independent
+geometry. V11.3, V11.5, V11.6 and V13.1 additionally feed every slot's seed
+delta into that head under `range_quantile`, so their slots also differ by
+input; under a shared anchor every slot's delta would be the same vector,
+which only records where the anchor sits in its voxel, so those heads read the
+token feature alone. Every other fixed-count variant always reads the token
+feature alone. Under `range_quantile` a token holding fewer raw points than
 slots repeats observed points, the same way the learned-count candidate bank
 does.
 
-Omitting the whole `p2g.grid_query` block means `K_max: 1, exp: 1`: one
-Gaussian per token at its medoid, which is what V11.1 ships. V11.3, V11.5 and
-V13.1 ship the block explicitly at `K_max: 2, exp: null`, and V11.6 at
-`K_max: 3, exp: null`. Every fixed-count variant supports larger counts.
+`seed_mode` replaced the numeric `exp` key (`null` -> `range_quantile`,
+`1` -> `medoid`, `2` -> `token`). Checkpoint configs that still spell `exp`
+are rewritten on restore and build the same model; fresh configs must use
+`seed_mode`.
+
+Omitting the whole `p2g.grid_query` block means `K_max: 1, seed_mode: medoid`:
+one Gaussian per token at its medoid, which is what V11.1 ships. V11.3, V11.5
+and V13.1 ship the block explicitly at `K_max: 2, seed_mode: range_quantile`,
+and V11.6 at `K_max: 3, seed_mode: range_quantile`. Every fixed-count variant
+supports larger counts.
 
 Because the count is fixed and identical for every token, a mean over Gaussians
 is exactly a mean over tokens. `velocity_l2` and the motion diagnostics stay
 unweighted no matter what `K_max` is set to.
 
 ```bash
+# V11.6's three Gaussians per token, anchored at the Utonia token position.
+python main.py model.variant=dynamic_2dgs_attention_velocity_v11_6 \
+  p2g.grid_query.seed_mode=token
+
 # Two Gaussians per token, both starting at the token's observed medoid.
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_1 \
-  p2g.grid_query.K_max=2 p2g.grid_query.exp=1
+  p2g.grid_query.K_max=2 p2g.grid_query.seed_mode=medoid
 
 # Three Gaussians per token, spread over that token's raw points by range.
 python main.py model.variant=dynamic_2dgs_attention_velocity_v11_1 \
-  p2g.grid_query.K_max=3 p2g.grid_query.exp=null
+  p2g.grid_query.K_max=3 p2g.grid_query.seed_mode=range_quantile
 ```
 
 Peak memory and step time scale with the Gaussian count, not the token count.
@@ -734,6 +754,11 @@ rejected at config time rather than silently ignored. V11.3, V11.5, V11.6 and
 V13.1 are rejected too because their identities are the fixed count. The seed
 geometry it consumes is the K-specific candidate bank, not the padded
 fixed-count seed set, so the two contracts cannot be mixed.
+`learned_count.seed_mode` fills that bank: `range_quantile` gives each row its
+own raw-point quantiles, which the router trunk reads beside the token
+feature, and `token` puts every slot of every row on the token anchor, so the
+trunk reads the feature alone (`Linear(dim, dim)` instead of
+`Linear(dim + 3 * K_max, dim)`).
 
 Both counts are structural: `p2g` is a checkpoint-protected root, so a resume or
 evaluation cannot change how many Gaussians a checkpoint's tokens produce.

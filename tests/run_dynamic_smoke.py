@@ -182,7 +182,7 @@ def parse_args():
         metavar="KEY=VALUE",
         help=(
             "extra OmegaConf dot-list overrides, e.g. "
-            "p2g.grid_query.K_max=2 p2g.grid_query.exp=1"
+            "p2g.grid_query.K_max=2 p2g.grid_query.seed_mode=medoid"
         ),
     )
     return parser.parse_args()

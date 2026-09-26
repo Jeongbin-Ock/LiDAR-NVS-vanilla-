@@ -41,13 +41,15 @@ p2g:
     rank: 16
     alpha: 16
     dropout: 0.0
-  # exp: null is the fixed range-quantile rule. This variant has no count
+  # seed_mode: range_quantile is the fixed range-quantile rule; seed_mode:
+  # token anchors all three slots at the Utonia token position and drops the
+  # per-slot seed deltas from the Gaussian head. This variant has no count
   # router, so count_mode=learned_gumbel is rejected rather than ignored -- run
   # V11.4 itself for the routed count.
   grid_query:
     count_mode: legacy
     K_max: 3
-    exp: null
+    seed_mode: range_quantile
 
 data:
   dataset_name: nuscenes_dynamic_lidar4d

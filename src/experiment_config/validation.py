@@ -11,8 +11,10 @@ from .definitions import (
     COORDINATE_FRAMES,
     DYNAMIC_VARIANT_V12_1,
     FEATURE_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
+    FIXED_COUNT_SEED_MODES,
     FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
     LEARNED_COUNT_MODES,
+    LEARNED_COUNT_SEED_MODES,
     LEGACY_COUNT_MODE,
     RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS,
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
@@ -151,28 +153,35 @@ def _configured_count_mode(config) -> str:
 def _validate_fixed_gaussian_count(config, label: str) -> None:
     """The per-token Gaussian count and seed placement, when both are fixed.
 
-    ``K_max`` is how many Gaussians every occupied token emits, and ``exp``
-    says where they start: ``1`` on the token's observed medoid, ``2`` on its
-    Utonia cell coordinate, and ``null`` spread over the token's own raw points
-    by range quantile. Slots that coincide are separated by the independent
-    parameter block each one owns in the Gaussian head.
+    ``K_max`` is how many Gaussians every occupied token emits, and
+    ``seed_mode`` says where they start: ``range_quantile`` (the default when
+    the key is absent) spreads them over the token's own raw points by range
+    quantile, ``medoid`` puts every slot on the token's observed medoid, and
+    ``token`` puts every slot on the token's Utonia position. Slots that
+    coincide are separated by the independent parameter block each one owns in
+    the Gaussian head.
     """
     count_path = "p2g.grid_query"
     if not _has_path(config, count_path):
         return
-    _reject_unknown_keys(config, count_path, {"count_mode", "K_max", "exp"})
+    if _has_path(config, f"{count_path}.exp"):
+        raise ValueError(
+            f"{label} p2g.grid_query.exp was renamed to "
+            "p2g.grid_query.seed_mode (null -> range_quantile, 1 -> medoid, "
+            "2 -> token)"
+        )
+    _reject_unknown_keys(
+        config, count_path, {"count_mode", "K_max", "seed_mode"}
+    )
     k_max = OmegaConf.select(config, f"{count_path}.K_max")
     if k_max is None or int(k_max) < 1:
         raise ValueError(
             f"{label} requires a positive p2g.grid_query.K_max Gaussians "
             "per token"
         )
-    exp = OmegaConf.select(config, f"{count_path}.exp")
-    if exp is not None and int(exp) not in (1, 2):
-        raise ValueError(f"{label} grid_query.exp must be null, 1, or 2")
-    if exp is not None and int(exp) > int(k_max):
-        raise ValueError(
-            f"{label} grid_query.exp={int(exp)} requires K_max >= {int(exp)}"
+    if _has_path(config, f"{count_path}.seed_mode"):
+        _require_choice(
+            config, f"{count_path}.seed_mode", FIXED_COUNT_SEED_MODES
         )
 
 
@@ -218,13 +227,9 @@ def _validate_adaptive_gaussian_count(config, label: str) -> None:
     if int(OmegaConf.select(config, f"{learned_path}.K_max")) != 3:
         raise ValueError(f"{label} requires grid_query.learned_count.K_max=3")
     _require_positive(config, f"{learned_path}.tau")
-    if str(OmegaConf.select(
-        config, f"{learned_path}.seed_mode"
-    )).lower() != "range_quantile":
-        raise ValueError(
-            f"{label} grid_query.learned_count.seed_mode must be "
-            "'range_quantile'"
-        )
+    _require_choice(
+        config, f"{learned_path}.seed_mode", LEARNED_COUNT_SEED_MODES
+    )
     _require_choice(
         config, f"{learned_path}.grad_balance_scope", ("output", "token")
     )

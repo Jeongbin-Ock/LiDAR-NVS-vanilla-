@@ -217,7 +217,7 @@ class ConfigLoaderTest(unittest.TestCase):
         count = v11_3.p2g.grid_query
         self.assertEqual(count.count_mode, "legacy")
         self.assertEqual(count.K_max, 2)
-        self.assertIsNone(count.exp)
+        self.assertEqual(count.seed_mode, "range_quantile")
 
         for group in (
             BARRIER_MATCH_DYNAMIC_VARIANTS,
@@ -295,7 +295,7 @@ class ConfigLoaderTest(unittest.TestCase):
         )
         self.assertEqual(right_count["count_mode"], "legacy")
         self.assertEqual(right_count["K_max"], 2)
-        self.assertIsNone(right_count["exp"])
+        self.assertEqual(right_count["seed_mode"], "range_quantile")
 
         temporal = v11_5.dynamic_2dgs.temporal
         self.assertEqual(temporal.barrier_weight, 1.0)
@@ -354,7 +354,7 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(left_count, {**right_count, "K_max": 2})
         self.assertEqual(right_count["count_mode"], "legacy")
         self.assertEqual(right_count["K_max"], 3)
-        self.assertIsNone(right_count["exp"])
+        self.assertEqual(right_count["seed_mode"], "range_quantile")
 
         self.assertEqual(
             OmegaConf.to_container(v11_6.data, resolve=True),
@@ -591,7 +591,7 @@ class ConfigLoaderTest(unittest.TestCase):
         )
         self.assertEqual(right_count["count_mode"], "legacy")
         self.assertEqual(right_count["K_max"], 2)
-        self.assertIsNone(right_count["exp"])
+        self.assertEqual(right_count["seed_mode"], "range_quantile")
         self.assertEqual(v13_1.p2g.head_offset_bound, 0.4)
 
         for group in (
@@ -881,21 +881,26 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertIn("V11.1", str(raised.exception))
 
     def test_grid_query_sets_the_per_token_gaussian_count(self):
-        """K_max is how many Gaussians each token becomes; exp seeds them."""
+        """K_max is how many Gaussians each token becomes; seed_mode seeds them."""
         for variant in (
             DYNAMIC_VARIANT_V11_1, DYNAMIC_VARIANT_V11_3, DYNAMIC_VARIANT_V11_5,
         ):
-            for k_max, exp in ((1, 1), (2, 1), (2, 2), (4, None)):
-                with self.subTest(variant=variant, K_max=k_max, exp=exp):
+            for k_max, seed_mode in (
+                (1, "medoid"), (2, "medoid"), (1, "token"), (3, "token"),
+                (4, "range_quantile"),
+            ):
+                with self.subTest(
+                    variant=variant, K_max=k_max, seed_mode=seed_mode
+                ):
                     config, _source = compose_fresh_config(
                         OmegaConf.from_dotlist([
                             f"model.variant={variant}",
                             f"p2g.grid_query.K_max={k_max}",
-                            f"p2g.grid_query.exp={'null' if exp is None else exp}",
+                            f"p2g.grid_query.seed_mode={seed_mode}",
                         ])
                     )
                     self.assertEqual(config.p2g.grid_query.K_max, k_max)
-                    self.assertEqual(config.p2g.grid_query.exp, exp)
+                    self.assertEqual(config.p2g.grid_query.seed_mode, seed_mode)
 
     def test_absent_grid_query_is_one_gaussian_per_token(self):
         config, _source = compose_fresh_config(OmegaConf.from_dotlist([
@@ -906,8 +911,14 @@ class ConfigLoaderTest(unittest.TestCase):
     def test_fixed_gaussian_count_rejects_impossible_settings(self):
         invalid = (
             ("p2g.grid_query.K_max=0", "positive"),
-            ("p2g.grid_query.K_max=1 p2g.grid_query.exp=2", "K_max >= 2"),
-            ("p2g.grid_query.K_max=2 p2g.grid_query.exp=3", "null, 1, or 2"),
+            (
+                "p2g.grid_query.K_max=2 p2g.grid_query.exp=1",
+                "renamed to p2g.grid_query.seed_mode",
+            ),
+            (
+                "p2g.grid_query.K_max=2 p2g.grid_query.seed_mode=quantile",
+                "must be one of",
+            ),
             (
                 "p2g.grid_query.K_max=2 p2g.grid_query.points_per_gaussian=2",
                 "Unsupported keys",
@@ -923,6 +934,19 @@ class ConfigLoaderTest(unittest.TestCase):
                     f"model.variant={DYNAMIC_VARIANT_V11_1}",
                     *override.split(),
                 ]))
+
+    def test_router_seed_mode_accepts_the_token_anchor_only(self):
+        """The learned-count bank has range-quantile and token rows, no medoid."""
+        config, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_4}",
+            "p2g.grid_query.learned_count.seed_mode=token",
+        ]))
+        self.assertEqual(config.p2g.grid_query.learned_count.seed_mode, "token")
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V11_4}",
+                "p2g.grid_query.learned_count.seed_mode=medoid",
+            ]))
 
     def test_no_barrier_variant_accepts_the_removed_gate_keys(self):
         """The gate is gone from every barrier variant, not just V11."""
@@ -1275,6 +1299,37 @@ class ConfigLoaderTest(unittest.TestCase):
             self.assertEqual(config.data.dataset_name, "nuscenes")
             self.assertNotIn("train_excluded_scenes", config.data)
             self.assertNotIn("dynamic_window", config.data)
+
+    def test_checkpoint_exp_key_restores_as_seed_mode(self):
+        """Checkpoints saved before the rename keep their placement rule."""
+        for exp, seed_mode in ((None, "range_quantile"), (1, "medoid"), (2, "token")):
+            with self.subTest(exp=exp), tempfile.TemporaryDirectory() as tmp:
+                checkpoint = Path(tmp) / "epoch=1.ckpt"
+                stored, _ = compose_fresh_config(OmegaConf.from_dotlist([
+                    f"model.variant={DYNAMIC_VARIANT_V11_6}",
+                ]))
+                stored = OmegaConf.to_container(stored, resolve=True)
+                stored["p2g"]["grid_query"].pop("seed_mode")
+                stored["p2g"]["grid_query"]["exp"] = exp
+                torch.save({"experiment_config": stored}, checkpoint)
+
+                config, _source = load_checkpoint_config(checkpoint)
+
+                self.assertNotIn("exp", config.p2g.grid_query)
+                self.assertEqual(config.p2g.grid_query.seed_mode, seed_mode)
+                self.assertEqual(config.p2g.grid_query.K_max, 3)
+
+    def test_checkpoint_with_both_exp_and_seed_mode_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "epoch=1.ckpt"
+            stored, _ = compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V11_6}",
+            ]))
+            stored = OmegaConf.to_container(stored, resolve=True)
+            stored["p2g"]["grid_query"]["exp"] = None
+            torch.save({"experiment_config": stored}, checkpoint)
+            with self.assertRaisesRegex(ValueError, "both the retired exp"):
+                load_checkpoint_config(checkpoint)
 
     def test_dynamic_loader_sampling_contract_is_immutable_on_resume(self):
         with tempfile.TemporaryDirectory() as tmp:

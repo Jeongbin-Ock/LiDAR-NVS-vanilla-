@@ -80,8 +80,8 @@ def _inputs(variant, backend, generator):
         delta = torch.randn(total, k_max, k_max, 3, generator=generator) * 0.1
     else:
         # A fixed count fills exactly that many slots. Repeated coordinates
-        # are the real contract for exp=1/2, and the per-slot parameter
-        # blocks are what separate them.
+        # are the real contract for seed_mode=medoid/token, and the per-slot
+        # parameter blocks are what separate them.
         slots = backend.gaussians_per_token
         seed = token_position.clone().unsqueeze(1).repeat(1, slots, 1)
         delta = (

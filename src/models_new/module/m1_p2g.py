@@ -204,7 +204,11 @@ class Point2Gaus(nn.Module):
             raise ValueError(
                 f"Unsupported dynamic model variant={self.dynamic_variant!r}"
             )
-        backend_kwargs = {}
+        # The seed mode decides whether the Gaussian head reads per-slot seed
+        # deltas (range quantiles) or the token feature alone (shared anchors).
+        backend_kwargs = {
+            "seed_mode": self.anchor_builder.grid_seed_config.seed_mode,
+        }
         if self.dynamic_adaptive_count:
             backend_kwargs["gaussian_count_cfg"] = cfg.grid_query
         else:

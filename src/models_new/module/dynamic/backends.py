@@ -7,6 +7,11 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 
+from src.experiment_config.definitions import (
+    FIXED_COUNT_SEED_MODES,
+    SEED_MODE_RANGE_QUANTILE,
+)
+
 from ...utils import boxes as box_utils
 from .common import _cfg_get
 from .heads import EmbeddedInitVelocityHead, GaussianAttributeHead
@@ -35,11 +40,18 @@ class DynamicGaussianBackend(nn.Module):
     """
 
     def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
-                 gaussians_per_token: int = 1, gaussian_count_cfg=None):
+                 gaussians_per_token: int = 1, gaussian_count_cfg=None,
+                 seed_mode: str = SEED_MODE_RANGE_QUANTILE):
         super().__init__()
         self.cfg = cfg
         self.dim = int(dim)
         self.gaussians_per_token = int(gaussians_per_token)
+        self.seed_mode = str(seed_mode).lower()
+        if self.seed_mode not in FIXED_COUNT_SEED_MODES:
+            raise ValueError(
+                f"dynamic seed_mode must be one of {FIXED_COUNT_SEED_MODES}, "
+                f"got {seed_mode!r}"
+            )
         self.temporal = self._build_temporal(cfg)
         self.time_reference_sec = float(
             _cfg_get(cfg.temporal, "time_reference_sec", 1.0)
@@ -55,6 +67,27 @@ class DynamicGaussianBackend(nn.Module):
     def _build_temporal(self, cfg):
         """The cross-attention stack this variant refines its tokens with."""
         raise NotImplementedError
+
+    @property
+    def distinct_slot_seeds(self) -> bool:
+        """Whether a token's slots start from different seeds.
+
+        Only range-quantile seeds differ per slot. ``medoid`` and ``token``
+        share one anchor, so their seed deltas carry nothing slot-specific and
+        a decoder reads the token feature alone.
+        """
+        return self.seed_mode == SEED_MODE_RANGE_QUANTILE
+
+    @property
+    def seed_conditioned_head(self) -> bool:
+        """Whether the fixed-count head reads per-slot seed deltas.
+
+        ``Point2Gaus`` reads this to decide whether to send the deltas. The
+        learned-count router always receives its candidate bank.
+        """
+        return not self.adaptive_count and bool(
+            getattr(self.gaussian_head, "seed_conditioned", False)
+        )
 
     def _check_fixed_count_seeds(self, seed_local, token_position_local):
         """Normalize the source seeds to ``(N, G, 3)`` and check the count.
@@ -411,7 +444,10 @@ class RouterCapableGaussianBackend(DynamicGaussianBackend):
         from ..grid_query_head import GridSlotHead
 
         self.gaussian_output_norm = nn.LayerNorm(self.dim)
-        head = GridSlotHead(gaussian_count_cfg, gs_params, dim=self.dim)
+        head = GridSlotHead(
+            gaussian_count_cfg, gs_params, dim=self.dim,
+            seed_conditioned=self.distinct_slot_seeds,
+        )
         if head.count_mode != "learned_gumbel":
             raise ValueError("adaptive-K Gaussian count must use learned_gumbel")
         if head.k_max != 3:
@@ -778,21 +814,20 @@ class SeedConditionedBarrierVelocityGaussianBackend(
 
     * Its trunk was the only place V11 fed seed geometry into the decoder,
       concatenating the selected candidate row's ``3 * K_max`` deltas to the
-      normalized token feature. The head is therefore built seed-conditioned,
-      at ``3 * gaussians_per_token`` channels, one row per slot it owns.
-      Without them a token's slots would receive identical input and could
-      only diverge through their own parameter rows.
+      normalized token feature. With range-quantile seeds the head is
+      therefore built seed-conditioned, at ``3 * gaussians_per_token``
+      channels, one row per slot it owns. Shared-anchor seed modes
+      (``medoid``, ``token``) give every slot the same delta, so their head
+      reads the token feature alone, as anchor-based Gaussian decoders do,
+      and the slots diverge through their own parameter rows.
     * That trunk was also the decoder's only nonlinearity. The head therefore
       keeps it: ``Linear(dim + 3 * G, dim) -> SiLU`` before the attribute
       projections, which is V11's shape with ``G`` slots in place of ``K_max``
-      candidates.
+      candidates, or ``Linear(dim, dim) -> SiLU`` without seed conditioning.
     """
 
     #: Subclasses keep the same fixed-count decoder under another temporal stack.
     fixed_variant_label = "V11.3/V11.5/V11.6"
-
-    #: ``Point2Gaus`` reads this to decide whether to send the seed deltas.
-    seed_conditioned_head = True
 
     def _build_gaussian_head(self, cfg, gs_params, offset_bound,
                              gaussian_count_cfg):
@@ -808,11 +843,13 @@ class SeedConditionedBarrierVelocityGaussianBackend(
             self.dim,
             offset_bound,
             gaussians_per_token=self.gaussians_per_token,
-            seed_conditioned=True,
+            seed_conditioned=self.distinct_slot_seeds,
             trunk=True,
         )
 
     def _predict_gaussian(self, refined, geometry):
+        if not self.gaussian_head.seed_conditioned:
+            return self.gaussian_head(refined)
         seed_delta_ref = geometry.get("seed_delta_ref")
         if seed_delta_ref is None:
             raise ValueError(

@@ -196,3 +196,25 @@ _UTONIA_ENCODER_STAGE_DIMS = (54, 108, 216, 432, 576)
 
 LEGACY_COUNT_MODE = "legacy"
 LEARNED_COUNT_MODES = ("learned_gumbel",)
+
+# Where a token's Gaussians start. ``range_quantile`` spreads distinct seeds
+# over the token's raw points; ``medoid`` and ``token`` give every slot one
+# shared anchor (the observed medoid, or the Utonia token position) from which
+# the Gaussian head's bounded offsets place each slot.
+SEED_MODE_RANGE_QUANTILE = "range_quantile"
+SEED_MODE_MEDOID = "medoid"
+SEED_MODE_TOKEN = "token"
+FIXED_COUNT_SEED_MODES = (
+    SEED_MODE_RANGE_QUANTILE,
+    SEED_MODE_MEDOID,
+    SEED_MODE_TOKEN,
+)
+LEARNED_COUNT_SEED_MODES = (SEED_MODE_RANGE_QUANTILE, SEED_MODE_TOKEN)
+
+# ``p2g.grid_query.exp`` before it was renamed to ``seed_mode``. Checkpoint
+# configs are rewritten on restore; fresh configs must use the new name.
+LEGACY_EXP_SEED_MODES = {
+    None: SEED_MODE_RANGE_QUANTILE,
+    1: SEED_MODE_MEDOID,
+    2: SEED_MODE_TOKEN,
+}

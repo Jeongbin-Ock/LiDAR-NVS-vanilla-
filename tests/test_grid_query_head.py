@@ -50,9 +50,8 @@ def _aggregate_seed_cell(
     points,
     k_max=3,
     voxel_coord=None,
-    exp=None,
     count_mode="legacy",
-    seed_mode=None,
+    seed_mode="range_quantile",
 ):
     intensity = torch.arange(1, points.shape[0] + 1, dtype=points.dtype)
     grid_coord = torch.tensor([[0, 0, 0]])
@@ -65,7 +64,6 @@ def _aggregate_seed_cell(
         GridSeedConfig(
             count_mode=count_mode,
             k_max=k_max,
-            exp=exp,
             seed_mode=seed_mode,
         ),
     )
@@ -213,12 +211,12 @@ def test_r_quantile_seeds_for_k1_k2_k3():
     torch.testing.assert_close(seed_k3[0], points[[1, 3, 5]])
 
 
-def test_exp1_seeds_the_observed_centroid_medoid():
+def test_medoid_mode_seeds_the_observed_centroid_medoid():
     points = torch.tensor([
         [0.05, 0.1, 0.1], [0.15, 0.1, 0.1], [0.25, 0.1, 0.1],
         [0.35, 0.1, 0.1], [0.45, 0.1, 0.1],
     ])
-    seed_data = _aggregate_seed_cell(points, k_max=1, exp=1)[-1]
+    seed_data = _aggregate_seed_cell(points, k_max=1, seed_mode="medoid")[-1]
 
     # The mean is x=0.25, so the observed medoid is that raw point, not a
     # synthetic cell center.
@@ -226,11 +224,11 @@ def test_exp1_seeds_the_observed_centroid_medoid():
     torch.testing.assert_close(seed_data.seed_sensor[0, 0], points[2])
 
 
-def test_exp2_uses_identical_token_coordinate_seeds():
+def test_token_mode_anchors_every_slot_at_the_token_position():
     points = torch.tensor([[0.1, 0.1, 0.1], [0.9, 0.1, 0.1]])
     token_coord = torch.tensor([[0.2, 0.3, 0.4]])
     seed_data = _aggregate_seed_cell(
-        points, k_max=2, voxel_coord=token_coord, exp=2
+        points, k_max=2, voxel_coord=token_coord, seed_mode="token"
     )[-1]
 
     assert seed_data.anchor_k.tolist() == [2]
@@ -277,7 +275,7 @@ def test_learned_count_builds_k1_to_k4_range_quantile_seed_bank():
 
 def test_fixed_count_gives_every_token_k_max_medoid_slots():
     points = torch.tensor([[0.1, 0.1, 0.1], [0.9, 0.9, 0.9], [0.5, 0.5, 0.5]])
-    seed_data = _aggregate_seed_cell(points, k_max=3, exp=1)[-1]
+    seed_data = _aggregate_seed_cell(points, k_max=3, seed_mode="medoid")[-1]
     medoid = seed_data.seed_sensor[0, 0]
     assert seed_data.anchor_k.tolist() == [3]
     torch.testing.assert_close(
@@ -294,7 +292,7 @@ def test_fixed_count_gives_every_token_k_max_token_coordinate_slots():
     points = torch.tensor([[0.1, 0.1, 0.1], [0.9, 0.9, 0.9]])
     token_coord = torch.tensor([[0.3, 0.4, 0.6]])
     seed_data = _aggregate_seed_cell(
-        points, k_max=3, voxel_coord=token_coord, exp=2,
+        points, k_max=3, voxel_coord=token_coord, seed_mode="token",
     )[-1]
     assert seed_data.anchor_k.tolist() == [3]
     torch.testing.assert_close(
@@ -310,11 +308,11 @@ def test_fixed_count_range_quantiles_ignore_the_raw_point_total():
         [0.40, 0.1, 0.1], [0.50, 0.1, 0.1], [0.60, 0.1, 0.1],
     ])
     for points in (sparse, dense):
-        seed_data = _aggregate_seed_cell(points, k_max=4, exp=None)[-1]
+        seed_data = _aggregate_seed_cell(points, k_max=4)[-1]
         assert seed_data.anchor_k.tolist() == [4]
         assert seed_data.seed_sensor.shape == (1, 4, 3)
     # Two observations for four slots repeat observed points: ranks [0,0,1,1].
-    sparse_seed = _aggregate_seed_cell(sparse, k_max=4, exp=None)[-1]
+    sparse_seed = _aggregate_seed_cell(sparse, k_max=4)[-1]
     torch.testing.assert_close(
         sparse_seed.seed_sensor[0], sparse[[0, 0, 1, 1]]
     )
@@ -324,13 +322,13 @@ def test_absent_grid_query_is_one_medoid_gaussian_per_token():
     """An absent grid_query block keeps the historical fixed-count contract."""
     builder = OccupiedGridTokenBuilder(SimpleNamespace())
     assert builder.grid_seed_config == GridSeedConfig(
-        count_mode="legacy", k_max=1, exp=1,
+        count_mode="legacy", k_max=1, seed_mode="medoid",
     )
     assert builder.grid_seed_config.gaussians_per_token == 1
 
 
 def test_fixed_count_builder_reads_k_max_from_config():
-    builder = OccupiedGridTokenBuilder(_builder_cfg(K_max=3, exp=1))
+    builder = OccupiedGridTokenBuilder(_builder_cfg(K_max=3, seed_mode="medoid"))
     assert builder.grid_seed_config.gaussians_per_token == 3
 
 
@@ -344,11 +342,12 @@ def test_learned_count_has_no_single_gaussian_count():
         raise AssertionError("a learned count must not report a fixed count")
 
 
-def test_grid_builder_exp_switches_only_fixed_count_seed_construction():
-    grid_builder = OccupiedGridTokenBuilder(_builder_cfg(exp=2))
+def test_grid_builder_seed_mode_switches_only_fixed_count_seeds():
+    grid_builder = OccupiedGridTokenBuilder(_builder_cfg(seed_mode="token"))
     assert grid_builder.grid_seed_config == GridSeedConfig(
-        count_mode="legacy", k_max=3, exp=2,
+        count_mode="legacy", k_max=3, seed_mode="token",
     )
+    assert not grid_builder.grid_seed_config.distinct_slot_seeds
     learned_builder = OccupiedGridTokenBuilder(_builder_cfg(
         count_mode="learned_gumbel",
         # These invalid fixed-count values prove this branch does not read them.
@@ -361,6 +360,83 @@ def test_grid_builder_exp_switches_only_fixed_count_seed_construction():
     assert learned_builder.grid_seed_config == GridSeedConfig(
         count_mode="learned_gumbel", k_max=4, seed_mode="range_quantile",
     )
+
+
+def test_token_mode_anchors_a_single_slot_too():
+    points = torch.tensor([[0.1, 0.1, 0.1], [0.9, 0.1, 0.1]])
+    token_coord = torch.tensor([[0.2, 0.3, 0.4]])
+    seed_data = _aggregate_seed_cell(
+        points, k_max=1, voxel_coord=token_coord, seed_mode="token"
+    )[-1]
+    assert seed_data.anchor_k.tolist() == [1]
+    torch.testing.assert_close(seed_data.seed_sensor[0], token_coord)
+
+
+def test_learned_token_bank_repeats_the_anchor_in_every_row():
+    points = torch.tensor([[0.1, 0.1, 0.1], [0.9, 0.1, 0.1]])
+    token_coord = torch.tensor([[0.2, 0.3, 0.4]])
+    seed_data = _aggregate_seed_cell(
+        points,
+        k_max=3,
+        voxel_coord=token_coord,
+        count_mode="learned_gumbel",
+        seed_mode="token",
+    )[-1]
+
+    assert seed_data.anchor_k is None
+    assert seed_data.seed_sensor.shape == (1, 3, 3, 3)
+    center = torch.tensor([0.5, 0.5, 0.5])
+    for k in (1, 2, 3):
+        torch.testing.assert_close(
+            seed_data.seed_sensor[0, k - 1, :k], token_coord.expand(k, -1)
+        )
+        torch.testing.assert_close(
+            seed_data.delta_sensor[0, k - 1, :k],
+            (token_coord - center).expand(k, -1),
+        )
+        torch.testing.assert_close(
+            seed_data.seed_sensor[0, k - 1, k:], torch.zeros(3 - k, 3)
+        )
+
+
+def test_fixed_count_rejects_the_retired_exp_key():
+    try:
+        OccupiedGridTokenBuilder(_builder_cfg(exp=2))
+    except ValueError as error:
+        assert "renamed to p2g.grid_query.seed_mode" in str(error)
+    else:
+        raise AssertionError("the retired exp key must not be read silently")
+
+
+def test_router_seed_modes_exclude_the_medoid():
+    try:
+        GridSeedConfig(count_mode="learned_gumbel", k_max=3, seed_mode="medoid")
+    except ValueError as error:
+        assert "seed_mode" in str(error)
+    else:
+        raise AssertionError("the router has no medoid candidate bank")
+
+
+def test_router_without_seed_conditioning_reads_the_feature_alone():
+    torch.manual_seed(3)
+    conditioned = _FixedKHead(_learned_cfg(k_max=3), _gs_params(), dim=8)
+    anchored = _FixedKHead(
+        _learned_cfg(k_max=3), _gs_params(), dim=8, seed_conditioned=False,
+    )
+    assert conditioned.trunk[0].in_features == 8 + 9
+    assert anchored.trunk[0].in_features == 8
+    assert not anchored.seed_conditioned
+    anchored.selected_k = [2, 3]
+    anchored.eval()
+
+    feature = torch.randn(2, 8)
+    offsets = torch.tensor([2])
+    with torch.no_grad():
+        first, _ = anchored(feature, torch.zeros(2, 3, 3, 3), offsets)
+        second, _ = anchored(feature, torch.randn(2, 3, 3, 3), offsets)
+    # The candidate bank still has to match the contract, but its values are
+    # never read without seed conditioning.
+    torch.testing.assert_close(first, second)
 
 
 def test_equal_range_ties_use_xyz_order_and_ignore_input_permutation():

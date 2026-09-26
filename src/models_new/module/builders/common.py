@@ -11,6 +11,7 @@ from .grid_seeds import (
     _medoid_seed_data,
     _r_quantile_seed_bank,
     _r_quantile_seed_data,
+    _token_position_seed_bank,
     _token_position_seed_data,
 )
 from .token_aggregation import (

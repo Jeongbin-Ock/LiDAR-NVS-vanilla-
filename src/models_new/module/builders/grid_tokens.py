@@ -7,10 +7,10 @@ feature. Intensity already entered Utonia through its XYZI LoRA stem, so no
 separate intensity stream exists.
 
 Every token also carries its own-frame seed geometry: a fixed-count
-``(N, K, 3)`` seed set, or the ``(N, K_max, K_max, 3)`` range-quantile
-candidate bank a learned count router selects from. Every delta is measured
-from the geometric cell center. ``raw_count`` is each token's own-frame point
-count.
+``(N, K, 3)`` seed set, or the ``(N, K_max, K_max, 3)`` candidate bank a
+learned count router selects from. ``seed_mode=token`` anchors every slot at
+the token position above. Every delta is measured from the geometric cell
+center. ``raw_count`` is each token's own-frame point count.
 """
 from __future__ import annotations
 

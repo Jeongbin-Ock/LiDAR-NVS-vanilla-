@@ -1,9 +1,11 @@
 """Learned Gaussian-count router of the router-capable Dynamic 2DGS backends.
 
 Each occupied Utonia token arrives with its refined feature and a precomputed
-bank of range-quantile seed deltas, one candidate row per K. A post-temporal
-MLP predicts K logits, hard Gumbel-Softmax straight-through routing selects one
-K per token, and only the selected K-specific joint head runs.
+seed-delta bank, one candidate row per K. A post-temporal MLP predicts K
+logits, hard Gumbel-Softmax straight-through routing selects one K per token,
+and only the selected K-specific joint head runs. Range-quantile rows give
+every slot its own seed, so the trunk reads the selected row; token anchors
+give every slot the same seed, so the decoder reads the feature alone.
 """
 from __future__ import annotations
 
@@ -22,11 +24,16 @@ class GridSlotHead(nn.Module):
     token. The selected hard-ST scalar gates the activated opacity of that
     expert's K outputs: forward rendering is unchanged, while backward connects
     the rendering loss to all count logits through the softmax Jacobian.
+
+    ``seed_conditioned`` concatenates the selected row's ``3 * K_max`` seed
+    deltas to the trunk input. Shared-anchor seed modes turn it off, because
+    their rows repeat one seed and carry nothing slot-specific.
     """
 
-    def __init__(self, cfg, gs_params, dim):
+    def __init__(self, cfg, gs_params, dim, seed_conditioned=True):
         super().__init__()
         self.dim = int(dim)
+        self.seed_conditioned = bool(seed_conditioned)
         self.count_mode = str(getattr(cfg, "count_mode", "legacy")).lower()
         if self.count_mode != "learned_gumbel":
             raise ValueError(
@@ -81,8 +88,9 @@ class GridSlotHead(nn.Module):
 
         # Module names, shapes and construction order are the checkpoint
         # contract of every router variant.
+        self.seed_dim = 3 * self.k_max if self.seed_conditioned else 0
         self.trunk = nn.Sequential(
-            nn.Linear(self.dim + 3 * self.k_max, self.dim),
+            nn.Linear(self.dim + self.seed_dim, self.dim),
             nn.SiLU(),
         )
         self.k_heads = nn.ModuleList([
@@ -197,13 +205,16 @@ class GridSlotHead(nn.Module):
         anchor_rows = torch.arange(
             num_anchors, device=anchor_feature.device
         )
-        selected_delta = delta_p[anchor_rows, selected_index]
-        trunk_input = torch.cat([
-            anchor_feature,
-            selected_delta.to(dtype=anchor_feature.dtype).reshape(
-                num_anchors, 3 * self.k_max
-            ),
-        ], dim=-1)
+        if self.seed_conditioned:
+            selected_delta = delta_p[anchor_rows, selected_index]
+            trunk_input = torch.cat([
+                anchor_feature,
+                selected_delta.to(dtype=anchor_feature.dtype).reshape(
+                    num_anchors, self.seed_dim
+                ),
+            ], dim=-1)
+        else:
+            trunk_input = anchor_feature
         trunk_feature = self.trunk(trunk_input)
 
         (

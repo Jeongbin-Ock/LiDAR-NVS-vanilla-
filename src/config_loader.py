@@ -59,6 +59,7 @@ from .experiment_config.helpers import (
     _require_positive,
     _variant,
 )
+from .experiment_config.migration import migrate_checkpoint_config
 from .experiment_config.validation import (
     _configured_count_mode,
     _configured_p2g_trunk_dim,
@@ -158,7 +159,9 @@ def load_checkpoint_config(
 
     embedded = _load_embedded_checkpoint_config(checkpoint)
     if embedded is not None:
-        config = OmegaConf.merge(OmegaConf.create(STRUCTURAL_DEFAULTS), embedded)
+        config = migrate_checkpoint_config(
+            OmegaConf.merge(OmegaConf.create(STRUCTURAL_DEFAULTS), embedded)
+        )
         validate_experiment_config(config)
         return config, f"embedded checkpoint config: {checkpoint}"
 
@@ -193,7 +196,9 @@ def load_checkpoint_config(
             f"W&B config does not contain a valid experiment config: {config_file}"
         )
 
-    config = OmegaConf.merge(OmegaConf.create(STRUCTURAL_DEFAULTS), stored)
+    config = migrate_checkpoint_config(
+        OmegaConf.merge(OmegaConf.create(STRUCTURAL_DEFAULTS), stored)
+    )
     validate_experiment_config(config)
     return config, (
         "legacy W&B fallback (mutable latest-run): "

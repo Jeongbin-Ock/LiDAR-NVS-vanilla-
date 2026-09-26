@@ -19,12 +19,13 @@ p2g:
     rank: 16
     alpha: 16
     dropout: 0.0
-  # exp: null is the fixed range-quantile rule. For K=2 the raw-point ranks are
-  # floor(N/4) and floor(3N/4), exactly the adaptive router's K=2 candidate row.
+  # seed_mode: range_quantile is the fixed range-quantile rule. For K=2 the
+  # raw-point ranks are floor(N/4) and floor(3N/4), exactly the adaptive
+  # router's K=2 candidate row.
   grid_query:
     count_mode: legacy
     K_max: 2
-    exp: null
+    seed_mode: range_quantile
 
 data:
   mode: bbox

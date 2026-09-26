@@ -935,6 +935,100 @@ class RouterBackendTest(unittest.TestCase):
         self.assertGreater(float(feature.grad.abs().sum()), 0.0)
 
 
+class TokenAnchorSeedModeTest(unittest.TestCase):
+    """seed_mode=token: every slot starts on the token position and the
+    Gaussian head reads the token feature alone."""
+
+    def test_fixed_count_head_drops_the_seed_deltas(self):
+        torch.manual_seed(5)
+        conditioned = SeedConditionedCosineRoPEVelocityGaussianBackend(
+            v13_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussians_per_token=3,
+        )
+        anchored = SeedConditionedCosineRoPEVelocityGaussianBackend(
+            v13_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussians_per_token=3, seed_mode="token",
+        ).eval()
+        self.assertTrue(conditioned.seed_conditioned_head)
+        self.assertEqual(conditioned.gaussian_head.seed_dim, 9)
+        self.assertEqual(
+            conditioned.gaussian_head.trunk[0].in_features, 24 + 9
+        )
+        self.assertFalse(anchored.seed_conditioned_head)
+        self.assertEqual(anchored.gaussian_head.seed_dim, 0)
+        self.assertEqual(anchored.gaussian_head.trunk[0].in_features, 24)
+
+        tokens, first = 6, 3
+        position = torch.randn(tokens, 3)
+        seed = position.unsqueeze(1).expand(tokens, 3, 3).clone()
+        output = anchored(
+            torch.randn(tokens, 24),
+            position,
+            seed,
+            torch.tensor([first, tokens]),
+            torch.tensor([0, 0]),
+            [torch.eye(4).repeat(2, 1, 1)],
+            [torch.tensor([0.0, 1.0])],
+            [torch.tensor([0.0, 0.8])],
+            torch.tensor([0.8]),
+        )
+        item = output["batch_gaussians"][0]
+        # The offset projection starts at zero, so every slot sits on its
+        # token's anchor until training moves it.
+        torch.testing.assert_close(
+            item["position"].reshape(tokens, 3, 3), seed
+        )
+
+    def test_fixed_count_head_rejects_deltas_it_does_not_read(self):
+        anchored = SeedConditionedCosineRoPEVelocityGaussianBackend(
+            v13_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussians_per_token=2, seed_mode="token",
+        )
+        self.assertFalse(anchored.distinct_slot_seeds)
+        tokens = 4
+        position = torch.randn(tokens, 3)
+        seed = position.unsqueeze(1).expand(tokens, 2, 3).clone()
+        with self.assertRaisesRegex(ValueError, "needs no"):
+            anchored(
+                torch.randn(tokens, 24),
+                position,
+                seed,
+                torch.tensor([2, tokens]),
+                torch.tensor([0, 0]),
+                [torch.eye(4).repeat(2, 1, 1)],
+                [torch.tensor([0.0, 1.0])],
+                [torch.tensor([0.0, 0.8])],
+                torch.tensor([0.8]),
+                seed_delta_local=torch.zeros_like(seed),
+            )
+
+    def test_router_trunk_reads_the_feature_alone(self):
+        count_cfg = router_count_cfg()
+        count_cfg.learned_count.seed_mode = "token"
+        conditioned = MaxSpeedBarrierVelocityGaussianBackend(
+            v11_4_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussian_count_cfg=router_count_cfg(),
+        )
+        anchored = MaxSpeedBarrierVelocityGaussianBackend(
+            v11_4_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussian_count_cfg=count_cfg, seed_mode="token",
+        )
+        self.assertTrue(conditioned.gaussian_head.seed_conditioned)
+        self.assertEqual(conditioned.gaussian_head.trunk[0].in_features, 24 + 9)
+        self.assertFalse(anchored.gaussian_head.seed_conditioned)
+        self.assertEqual(anchored.gaussian_head.trunk[0].in_features, 24)
+        # The router always receives its candidate bank; this is not the
+        # fixed-count seed-conditioned path.
+        self.assertFalse(anchored.seed_conditioned_head)
+
+    def test_backend_rejects_an_unknown_seed_mode(self):
+        with self.assertRaisesRegex(ValueError, "seed_mode"):
+            SeedConditionedCosineRoPEVelocityGaussianBackend(
+                v13_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+                gaussians_per_token=2, seed_mode="centroid",
+            )
+
+
 class V11MaxSpeedBarrierAttentionTest(unittest.TestCase):
     @staticmethod
     def _forward_args(feature, position, first_frame_tokens, duration=0.8):

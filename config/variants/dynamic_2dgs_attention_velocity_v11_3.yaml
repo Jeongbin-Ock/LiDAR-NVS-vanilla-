@@ -71,16 +71,18 @@ p2g:
     alpha: 16
     dropout: 0.0
   # Two Gaussians per occupied token, seeded at that token's own range
-  # quantiles. exp: null is the range-quantile placement rule; exp: 1 would put
-  # both on the medoid and exp: 2 on the Utonia cell coordinate. K_max also
-  # sets how many seed deltas condition the Gaussian head, so raising it
-  # widens that head's input by three channels per added slot. This variant
+  # quantiles. seed_mode: range_quantile is that placement rule; medoid would
+  # put both on the medoid and token on the Utonia token position, and both
+  # of those shared anchors leave the Gaussian head reading the feature alone.
+  # With range quantiles K_max also sets how many seed deltas condition the
+  # head, so raising it widens that head's input by three channels per added
+  # slot. This variant
   # has no count router, so count_mode=learned_gumbel is rejected rather than
   # ignored -- run V11 itself for the routed count.
   grid_query:
     count_mode: legacy
     K_max: 2
-    exp: null
+    seed_mode: range_quantile
 
 data:
   # The legacy src/dataloader/nuscene.py loader: ``dataset_name: nuscenes`` and

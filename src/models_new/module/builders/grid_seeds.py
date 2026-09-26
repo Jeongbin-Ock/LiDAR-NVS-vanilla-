@@ -5,6 +5,12 @@ from dataclasses import dataclass
 
 import torch
 
+from src.experiment_config.definitions import (
+    SEED_MODE_MEDOID,
+    SEED_MODE_RANGE_QUANTILE,
+    SEED_MODE_TOKEN,
+)
+
 from .grid_geometry import _cell_centers
 
 
@@ -15,9 +21,9 @@ class GridSeedData:
     A fixed count stores one seed set with shape ``(N, K_max, 3)`` and its
     per-token slot count ``anchor_k`` (``K_max`` for every token). Learned
     Gumbel routing stores every K-specific candidate set with shape
-    ``(N, K_max, K_max, 3)``, each row filled with ``k`` range-quantile seeds,
-    and ``anchor_k`` is ``None`` because K is predicted only after temporal
-    feature fusion.
+    ``(N, K_max, K_max, 3)``, each row filled with ``k`` seeds (range
+    quantiles, or the token anchor repeated), and ``anchor_k`` is ``None``
+    because K is predicted only after temporal feature fusion.
     """
 
     seed_local: torch.Tensor
@@ -178,18 +184,18 @@ def _medoid_seed_data(points, cell_idx, counts, grid_coord, occupied,
 
 
 def _token_position_seed_data(token_position, grid_coord, occupied,
-                              metric_origin, mapper, k_max, slots=2):
-    """Identical token-coordinate seeds per occupied token.
+                              metric_origin, mapper, k_max, slots=1):
+    """Every slot of a token anchored at the token's Utonia position.
 
-    Their slot identity is the output order of the joint head: each slot owns a
-    distinct parameter (including offset) block, so they start at the same
-    coordinate but learn independent displacement predictions.
+    The position is Utonia's pooled cell coordinate: the same point the token
+    carries through temporal attention. Slot identity is the output order of
+    the Gaussian head: each slot owns a distinct parameter (including offset)
+    block, so they start at the same anchor but learn independent
+    displacements.
     """
     slots = int(slots)
-    if slots < 2:
-        raise ValueError("p2g.grid_query.exp=2 needs at least two slots")
-    if k_max < slots:
-        raise ValueError(f"p2g.grid_query.exp=2 requires K_max >= {slots}")
+    if not 1 <= slots <= k_max:
+        raise ValueError("token-anchor slots must be in [1, K_max]")
     num_cells = token_position.shape[0]
     seeds = token_position.new_zeros((num_cells, k_max, 3))
     delta = token_position.new_zeros((num_cells, k_max, 3))
@@ -205,12 +211,38 @@ def _token_position_seed_data(token_position, grid_coord, occupied,
     return GridSeedData(seeds, delta, anchor_k)
 
 
+def _token_position_seed_bank(token_position, grid_coord, occupied,
+                              metric_origin, mapper, k_max):
+    """The learned-count candidate bank with every row on the token anchor.
+
+    Row ``k - 1`` fills its first ``k`` slots with the token position and
+    leaves the padding at zero, the same layout as the range-quantile bank.
+    """
+    num_cells = token_position.shape[0]
+    seeds = token_position.new_zeros((num_cells, k_max, k_max, 3))
+    delta = token_position.new_zeros((num_cells, k_max, k_max, 3))
+    if num_cells == 0:
+        return GridSeedData(seeds, delta, None)
+    cell_center = _cell_centers(
+        grid_coord, occupied, metric_origin, mapper, token_position.dtype
+    )
+    for k in range(1, k_max + 1):
+        seeds[:, k - 1, :k] = token_position[:, None, :]
+        delta[:, k - 1, :k] = (token_position - cell_center)[:, None, :]
+    return GridSeedData(seeds, delta, None)
+
+
 def _build_seed_data(config, points, cell_idx, counts, grid_coord, occupied,
                      metric_origin, mapper, token_position):
     """Dispatch one occupied frame to the seed rule its config selects."""
     k_max = config.k_max
     if config.learned:
-        if config.seed_mode != "range_quantile":
+        if config.seed_mode == SEED_MODE_TOKEN:
+            return _token_position_seed_bank(
+                token_position, grid_coord, occupied, metric_origin, mapper,
+                k_max=k_max,
+            )
+        if config.seed_mode != SEED_MODE_RANGE_QUANTILE:
             raise ValueError(
                 f"Unsupported learned grid seed_mode={config.seed_mode!r}"
             )
@@ -219,19 +251,21 @@ def _build_seed_data(config, points, cell_idx, counts, grid_coord, occupied,
             mapper, k_max=k_max,
         )
     # A fixed count fills every slot of every token.
-    if config.exp is None:
+    if config.seed_mode == SEED_MODE_RANGE_QUANTILE:
         return _r_quantile_seed_data(
             points, cell_idx, counts, grid_coord, occupied, metric_origin,
             mapper, k_max=k_max,
         )
-    if config.exp == 1:
+    if config.seed_mode == SEED_MODE_MEDOID:
         return _medoid_seed_data(
             points, cell_idx, counts, grid_coord, occupied, metric_origin,
             mapper, k_max=k_max, slots=k_max,
         )
-    return _token_position_seed_data(
-        token_position, grid_coord, occupied, metric_origin, mapper,
-        k_max=k_max, slots=k_max,
-    )
+    if config.seed_mode == SEED_MODE_TOKEN:
+        return _token_position_seed_data(
+            token_position, grid_coord, occupied, metric_origin, mapper,
+            k_max=k_max, slots=k_max,
+        )
+    raise ValueError(f"Unsupported fixed grid seed_mode={config.seed_mode!r}")
 
 __all__ = ["GridSeedData"]
