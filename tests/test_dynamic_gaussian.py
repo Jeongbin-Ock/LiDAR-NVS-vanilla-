@@ -32,6 +32,8 @@ from src.models_new.module.dynamic_gaussian import (
     FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
     FixedMotionHeadRMSNorm,
     GaussianAttributeHead,
+    GlobalSoftplusMaxSpeedBarrierCrossAttention,
+    GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend,
     LayerwiseSoftplusMaxSpeedBarrierCrossAttention,
     LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend,
     LearnableMaxSpeedBarrierLayerWeightedCrossAttention,
@@ -1931,6 +1933,169 @@ class V12_2LayerwiseSoftplusMaxSpeedBarrierAttentionTest(unittest.TestCase):
         self.assertIsInstance(backend.velocity_head, EmbeddedInitVelocityHead)
         self.assertEqual(backend.gaussian_head.count_mode, "learned_gumbel")
         self.assertAlmostEqual(backend.offset_bound, 0.4)
+
+
+class V14_1GlobalSoftplusMaxSpeedBarrierAttentionTest(unittest.TestCase):
+    """V14.1 learns one global barrier speed through softplus."""
+
+    @staticmethod
+    def _forward_args(feature, position, first_frame_tokens, duration=0.8):
+        return V11MaxSpeedBarrierAttentionTest._forward_args(
+            feature, position, first_frame_tokens, duration
+        )
+
+    @staticmethod
+    def _set_speed(module, speed):
+        with torch.no_grad():
+            module.v_raw.fill_(
+                V12_2LayerwiseSoftplusMaxSpeedBarrierAttentionTest
+                ._softplus_inverse(speed)
+            )
+
+    def test_one_scalar_speed_starts_at_30_beside_v11_4_parameters(self):
+        module = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            v12_temporal_cfg(layers=3), dim=24
+        )
+        self.assertIsInstance(module.v_raw, torch.nn.Parameter)
+        self.assertEqual(tuple(module.v_raw.shape), ())
+        torch.testing.assert_close(module.v_max, torch.tensor(30.0))
+        torch.testing.assert_close(module.v_max, F.softplus(module.v_raw))
+        reference = MaxSpeedBarrierLayerWeightedCrossAttention(
+            v12_temporal_cfg(layers=3), dim=24
+        )
+        names = [name for name, _ in module.named_parameters()]
+        # V11.4's parameters in V11.4's order plus the one global speed.
+        self.assertEqual(names.count("v_raw"), 1)
+        self.assertEqual(
+            [name for name in names if name != "v_raw"],
+            [name for name, _ in reference.named_parameters()],
+        )
+        self.assertNotIsInstance(
+            module, LearnableMaxSpeedBarrierLayerWeightedCrossAttention
+        )
+        self.assertFalse(hasattr(module, "v_0"))
+
+    def test_any_speed_reproduces_v12_at_the_same_speed(self):
+        cfg = v12_temporal_cfg(layers=2, match_chunk_size=2)
+        torch.manual_seed(141)
+        reference = LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+            cfg, dim=24
+        ).eval()
+        torch.manual_seed(141)
+        module = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            cfg, dim=24
+        ).eval()
+        feature = torch.randn(7, 24)
+        position = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [8.0, 1.0, 0.0],
+            [24.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [20.0, 1.0, 0.0],
+            [36.0, -1.0, 0.0],
+            [70.0, 2.0, 0.0],
+        ])
+        args = self._forward_args(feature, position, 3, duration=0.8)
+        for speed in (30.0, 12.0, 2.5):
+            with self.subTest(speed=speed), torch.no_grad():
+                reference.v_0.fill_(math.log(speed))
+                self._set_speed(module, speed)
+                refined, fields = module(*args)
+                expected_refined, expected_fields = reference(*args)
+                torch.testing.assert_close(
+                    refined, expected_refined, atol=1.0e-5, rtol=1.0e-5
+                )
+                for name in (
+                    "delta_p_match", "matched_position", "motion_layer_weights",
+                ):
+                    torch.testing.assert_close(
+                        fields[name], expected_fields[name],
+                        atol=1.0e-5, rtol=1.0e-5,
+                    )
+
+    def test_fresh_module_matches_v11_4_fixed_barrier(self):
+        cfg = v12_temporal_cfg(layers=2, match_chunk_size=2)
+        torch.manual_seed(142)
+        reference = MaxSpeedBarrierLayerWeightedCrossAttention(
+            cfg, dim=24
+        ).eval()
+        torch.manual_seed(142)
+        module = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            cfg, dim=24
+        ).eval()
+        feature = torch.randn(6, 24)
+        position = torch.randn(6, 3) * 20.0
+        args = self._forward_args(feature, position, 3, duration=0.7)
+        with torch.no_grad():
+            refined, fields = module(*args)
+            expected_refined, expected_fields = reference(*args)
+        torch.testing.assert_close(
+            refined, expected_refined, atol=1.0e-5, rtol=1.0e-5
+        )
+        torch.testing.assert_close(
+            fields["matched_position"], expected_fields["matched_position"],
+            atol=1.0e-5, rtol=1.0e-5,
+        )
+
+    def test_every_layer_shares_the_radius_and_the_gradient_reaches_v_raw(self):
+        torch.manual_seed(143)
+        module = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            v12_temporal_cfg(layers=3, match_chunk_size=1), dim=24
+        ).train()
+        self._set_speed(module, 25.0)
+        feature = torch.randn(3, 24)
+        position = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [20.0, 0.0, 0.0],
+            [60.0, 0.0, 0.0],
+        ])
+        with mock.patch.object(
+            module, "_barrier_attention", wraps=module._barrier_attention
+        ) as spy:
+            _refined, fields = module(
+                *self._forward_args(feature, position, 1, duration=1.0)
+            )
+        self.assertEqual(spy.call_count, 3)
+        for call in spy.call_args_list:
+            for radius in call.args[-1]:
+                self.assertTrue(torch.is_tensor(radius))
+                self.assertAlmostEqual(float(radius), 25.0, places=4)
+        fields["matched_position"][0, 0].backward()
+        gradient = module.v_raw.grad
+        self.assertIsNotNone(gradient)
+        self.assertEqual(tuple(gradient.shape), ())
+        self.assertTrue(bool(torch.isfinite(gradient)))
+        self.assertNotEqual(float(gradient), 0.0)
+
+    def test_stats_report_the_current_global_speed(self):
+        module = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            v12_temporal_cfg(layers=2), dim=24
+        )
+        self._set_speed(module, 7.5)
+        stats = module.attention_temperature_stats()
+        self.assertAlmostEqual(stats["barrier_speed_mps"], 7.5, places=4)
+        self.assertEqual(stats["barrier_speed_initial_mps"], 30.0)
+        self.assertAlmostEqual(
+            stats["barrier_v_raw"],
+            V12_2LayerwiseSoftplusMaxSpeedBarrierAttentionTest
+            ._softplus_inverse(7.5),
+            places=4,
+        )
+        self.assertNotIn("barrier_speed_mps_layer0", stats)
+        self.assertIn("qk_max_logit_bound", stats)
+
+    def test_backend_wraps_the_global_softplus_barrier(self):
+        backend = GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend(
+            v12_backend_cfg(), _gs_params(), dim=24, offset_bound=0.4,
+            gaussian_count_cfg=router_count_cfg(), seed_mode="token",
+        )
+        self.assertIsInstance(
+            backend.temporal, GlobalSoftplusMaxSpeedBarrierCrossAttention
+        )
+        self.assertIsInstance(backend, MaxSpeedBarrierVelocityGaussianBackend)
+        self.assertFalse(backend.gaussian_head.seed_conditioned)
+        self.assertEqual(backend.gaussian_head.trunk[0].in_features, 24)
+        self.assertIsInstance(backend.velocity_head, EmbeddedInitVelocityHead)
 
 
 class V13CosineRoPEAttentionTest(unittest.TestCase):

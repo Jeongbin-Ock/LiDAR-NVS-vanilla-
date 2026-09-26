@@ -202,6 +202,7 @@ class ModelWrapper(LightningModule):
         self._add_dynamic_motion_regularization(loss_dict, out, prefix=prefix)
         self._log_losses(loss_dict, prefix=prefix, batch_size=self._batch_size(_input))
         self._log_routing_stats(routing_stats, prefix=prefix)
+        self._log_utonia_adaptation(prefix=prefix)
 
         if prefix != "train":
             self._record_eval_summary(loss_dict, batch_idx=batch_idx, prefix=prefix)
@@ -234,6 +235,26 @@ class ModelWrapper(LightningModule):
                 f"{prefix}/dynamic/{name}",
                 float(value),
                 on_step=False,
+                on_epoch=True,
+                sync_dist=False,
+                batch_size=1,
+            )
+
+    def _log_utonia_adaptation(self, *, prefix: str) -> None:
+        """Hybrid Utonia adaptation magnitudes from this step's forward.
+
+        ``stem_{xyz,intensity,adapter}_rms`` are the three pre-LN stem
+        summands (frozen XYZ projection, trained intensity column, nonlinear
+        adapter); ``ffn_adapter_rms_ratio_enc{s}`` is the scaled adapter output
+        RMS over the frozen FFN output RMS, averaged over stage ``s``'s blocks.
+        All-linear LoRA variants log nothing here.
+        """
+        stats = self.p2g_model.utonia_adaptation_statistics()
+        for name, value in stats.items():
+            self.log(
+                f"{prefix}/utonia/{name}",
+                value,
+                on_step=(prefix == "train"),
                 on_epoch=True,
                 sync_dist=False,
                 batch_size=1,
@@ -603,11 +624,21 @@ class ModelWrapper(LightningModule):
         opt_cfg = self.cfg.train
         lr = opt_cfg.lr
         weight_decay = opt_cfg.weight_decay
-        trainable_params = [p for p in self.p2g_model.parameters() if p.requires_grad]
+        # All-linear LoRA variants get their historical flat parameter list;
+        # the hybrid Utonia adaptation (V14) gets one group per role, each with
+        # its own LR / weight decay, plus the downstream group at train.lr.
+        param_groups = self.p2g_model.optimizer_param_groups(opt_cfg)
+        betas = tuple(
+            float(beta)
+            for beta in (getattr(opt_cfg, "adam_betas", None) or (0.9, 0.999))
+        )
+        eps = float(getattr(opt_cfg, "adam_eps", None) or 1.0e-8)
         optimizer = torch.optim.AdamW(
-            trainable_params,
+            param_groups,
             lr=lr,
             weight_decay=weight_decay,
+            betas=betas,
+            eps=eps,
         )
 
         # Linear warmup (over warmup_iters optimizer steps) -> cosine decay to 0
@@ -619,6 +650,16 @@ class ModelWrapper(LightningModule):
         if self._is_rank_zero():
             print(f"[sched] AdamW lr={lr} warmup_iters={warmup} "
                   f"total_optimizer_steps={total_steps} (cosine decay)", flush=True)
+            for group in optimizer.param_groups:
+                if "name" not in group:
+                    continue
+                print(
+                    f"[sched]   group {group['name']}: "
+                    f"{sum(p.numel() for p in group['params']):,} params in "
+                    f"{len(group['params'])} tensors, lr={group['lr']:g}, "
+                    f"weight_decay={group['weight_decay']:g}",
+                    flush=True,
+                )
 
         def lr_lambda(step):
             if warmup > 0 and step < warmup:

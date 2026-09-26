@@ -1,0 +1,146 @@
+# Bbox-free Dynamic 2DGS V14.1.
+#
+# V14 with one model change: the barrier's max speed is learned as a single
+# global scalar through a softplus,
+#
+#     v_raw = Parameter(softplus^-1(30))
+#     v_max = softplus(v_raw)
+#     R_i   = v_max * |dt_i|
+#
+# shared by all twelve layers, both endpoint directions and every sample (V12's
+# one global speed, V12.2's softplus instead of V12's exp). barrier_speed_mps
+# below only initializes v_raw, so a fresh V14.1 reproduces V14. Softplus has
+# slope ~1 near 30 m/s: an Adam step at the downstream lr 5e-4 moves v_max by at
+# most ~5e-4 m/s, whichever speed it is at. There is no clamp and no prior
+# toward 30 m/s; attention_temperature_stats logs barrier_v_raw and the current
+# speed as barrier_speed_mps.
+#
+# Everything else is V14's: the hybrid Utonia adaptation and its AdamW role
+# groups, the adaptive K={1,2,3} router with token-position anchors and a
+# feature-only trunk, the offset head, the split velocity prior, the
+# random-duration loader and the ego-frame coordinates. v_raw belongs to the
+# downstream group (lr 5e-4, weight decay 1e-4).
+model:
+  variant: dynamic_2dgs_attention_velocity_v14_1
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  utonia_adaptation:
+    mode: hybrid
+    lora_targets: [attention, cpe, pooling]
+    train_layer_norm: true
+    stem:
+      train_intensity_column: true
+      adapter_hidden: 16
+      adapter_activation: gelu
+      adapter_scale: 1.0
+    ffn_adapter:
+      widths: [8, 16, 32, 64]
+      activation: relu
+      scale: 0.1
+      dropout: 0.0
+  grid_query:
+    count_mode: learned_gumbel
+    grad_balance: sqrt_k
+    learned_count:
+      K_max: 3
+      tau: 1.0
+      seed_mode: token
+      grad_balance_scope: token
+      logging:
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+
+train:
+  utonia_param_groups:
+    intensity:
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+    adapter:
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+      bias_weight_decay: 0.0
+    lora:
+      lr: 5.0e-5
+      weight_decay: 1.0e-4
+    layer_norm:
+      lr: 5.0e-5
+      weight_decay: 0.0
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+
+data:
+  dataset_name: nuscenes_dynamic_lidar4d
+  mode: nvs
+  bbox_json_path: null
+  train_excluded_scenes: null
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.2
+    eval_seed: 42
+    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
+    # train scenes. Hold out each complete scene to prevent overlap.
+    train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # V14's linear hinge at the learned global speed:
+    #   bias_ij = -relu(d_ij / (softplus(v_raw) * |dt|) - 1).
+    # This 30 m/s value initializes v_raw; after construction the active speed
+    # comes from the parameter, not from the config value.
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+
+    # Heads 1-11 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    layer_scale_init: 0.1
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+loss:
+  w_chamfer: 0.02

@@ -32,6 +32,9 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V13_2,
     DYNAMIC_VARIANT_V13_3,
     DYNAMIC_VARIANT_V13_4,
+    DYNAMIC_VARIANT_V14,
+    DYNAMIC_VARIANT_V14_1,
+    HYBRID_UTONIA_DYNAMIC_VARIANTS,
     compose_fresh_config,
     load_checkpoint_config,
     resolve_eval_config,
@@ -517,6 +520,188 @@ class ConfigLoaderTest(unittest.TestCase):
                 f"model.variant={DYNAMIC_VARIANT_V12_2}",
                 "dynamic_2dgs.temporal.barrier_lambda_init=1.0",
             ]))
+
+    def test_v14_is_the_v11_4_dynamic_run_with_hybrid_utonia(self):
+        """Only Utonia's adaptation and the token anchors differ from V11.4.
+
+        The V11.4 comparison run opted into the random-duration loader from
+        the CLI; V14 ships that data block in its overlay.
+        """
+        v11_4_dynamic, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V11_4}", *DYNAMIC_LOADER_CLI,
+        ]))
+        v14, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V14}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V14}.yaml", source)
+
+        left = OmegaConf.to_container(v11_4_dynamic, resolve=False)
+        right = OmegaConf.to_container(v14, resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        adaptation = right["p2g"].pop("utonia_adaptation")
+        groups = right["train"].pop("utonia_param_groups")
+        self.assertEqual(right["train"].pop("adam_betas"), [0.9, 0.999])
+        self.assertEqual(right["train"].pop("adam_eps"), 1.0e-8)
+        self.assertEqual(
+            right["p2g"]["grid_query"]["learned_count"].pop("seed_mode"),
+            "token",
+        )
+        self.assertEqual(
+            left["p2g"]["grid_query"]["learned_count"].pop("seed_mode"),
+            "range_quantile",
+        )
+        self.assertEqual(left, right)
+
+        self.assertEqual(adaptation["mode"], "hybrid")
+        self.assertEqual(
+            adaptation["lora_targets"], ["attention", "cpe", "pooling"]
+        )
+        self.assertTrue(adaptation["train_layer_norm"])
+        self.assertEqual(adaptation["stem"], {
+            "train_intensity_column": True,
+            "adapter_hidden": 16,
+            "adapter_activation": "gelu",
+            "adapter_scale": 1.0,
+        })
+        self.assertEqual(adaptation["ffn_adapter"], {
+            "widths": [8, 16, 32, 64],
+            "activation": "relu",
+            "scale": 0.1,
+            "dropout": 0.0,
+        })
+        self.assertEqual(groups, {
+            "intensity": {"lr": 1.0e-3, "weight_decay": 1.0e-4},
+            "adapter": {
+                "lr": 1.0e-3, "weight_decay": 1.0e-4, "bias_weight_decay": 0.0,
+            },
+            "lora": {"lr": 5.0e-5, "weight_decay": 1.0e-4},
+            "layer_norm": {"lr": 5.0e-5, "weight_decay": 0.0},
+        })
+        # The downstream group, warmup and clip are the shared base values.
+        self.assertEqual(v14.train.lr, 5.0e-4)
+        self.assertEqual(v14.train.weight_decay, 1.0e-4)
+        self.assertEqual(v14.train.warmup_iters, 500)
+        self.assertEqual(v14.train.grad_clip, 1.0)
+        self.assertEqual(v14.p2g.utonia_lora.rank, 16)
+        self.assertEqual(v14.p2g.utonia_lora.alpha, 16)
+        self.assertEqual(v14.p2g.utonia_lora.dropout, 0.0)
+        self.assertEqual(v14.data.coordinate_frame, "ego_vehicle")
+        self.assertEqual(v14.data.dataset_name, "nuscenes_dynamic_lidar4d")
+        temporal = v14.dynamic_2dgs.temporal
+        self.assertEqual(temporal.barrier_speed_mps, 30.0)
+        self.assertEqual(temporal.barrier_weight, 1.0)
+        self.assertEqual(temporal.barrier_exponent, 1)
+        for group in (
+            BARRIER_MATCH_DYNAMIC_VARIANTS,
+            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+            HYBRID_UTONIA_DYNAMIC_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V14, group)
+            self.assertIn(DYNAMIC_VARIANT_V14_1, group)
+
+    def test_v14_1_is_v14_with_its_speed_learned(self):
+        """The global softplus speed is a backend change; config is V14's."""
+        v14, _source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V14}",
+        ]))
+        v14_1, source = compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={DYNAMIC_VARIANT_V14_1}",
+        ]))
+        self.assertIn(f"{DYNAMIC_VARIANT_V14_1}.yaml", source)
+        left = OmegaConf.to_container(v14, resolve=False)
+        right = OmegaConf.to_container(v14_1, resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        self.assertEqual(left, right)
+        with self.assertRaisesRegex(ValueError, "barrier_lambda_init"):
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V14_1}",
+                "dynamic_2dgs.temporal.barrier_lambda_init=1.0",
+            ]))
+
+    def test_hybrid_utonia_blocks_are_reserved_for_v14(self):
+        for override, message in (
+            ("p2g.utonia_adaptation.mode=hybrid", "only available to V14"),
+            ("train.utonia_param_groups.lora.lr=1e-4", "only applies"),
+        ):
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(ValueError, message):
+                    compose_fresh_config(OmegaConf.from_dotlist([
+                        f"model.variant={DYNAMIC_VARIANT_V11_4}", override,
+                    ]))
+        with self.assertRaisesRegex(ValueError, "requires p2g.utonia_adaptation"):
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V14}",
+                "p2g.utonia_adaptation=null",
+            ]))
+        with self.assertRaisesRegex(ValueError, "requires train.utonia_param"):
+            compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V14}",
+                "train.utonia_param_groups=null",
+            ]))
+
+    def test_hybrid_utonia_rejects_invalid_settings(self):
+        cases = (
+            ("p2g.utonia_adaptation.mode=lora", "utonia_adaptation.mode"),
+            (
+                "p2g.utonia_adaptation.lora_targets=[attention,ffn]",
+                "mutually exclusive",
+            ),
+            ("p2g.utonia_adaptation.lora_targets=[attention,stem]", "stem"),
+            ("p2g.utonia_adaptation.lora_targets=[cpe,cpe]", "repeat"),
+            ("p2g.utonia_adaptation.lora_targets=[qkv]", "must be one of"),
+            ("p2g.utonia_adaptation.train_layer_norm=1", "true or false"),
+            ("p2g.utonia_adaptation.stem.adapter_hidden=0", "adapter_hidden"),
+            (
+                "p2g.utonia_adaptation.stem.adapter_activation=tanh",
+                "adapter_activation",
+            ),
+            ("p2g.utonia_adaptation.stem.adapter_scale=0", "adapter_scale"),
+            ("p2g.utonia_adaptation.ffn_adapter.widths=[8,16,32]", "widths"),
+            ("p2g.utonia_adaptation.ffn_adapter.widths=[8,16,0,64]", "widths"),
+            ("p2g.utonia_adaptation.ffn_adapter.scale=-0.1", "scale"),
+            ("p2g.utonia_adaptation.ffn_adapter.dropout=1.0", "dropout"),
+            ("p2g.utonia_adaptation.ffn_adapter.rank=4", "Unsupported keys"),
+            ("train.utonia_param_groups.lora.lr=0", "lora.lr"),
+            ("train.utonia_param_groups.adapter.lr=inf", "adapter.lr"),
+            (
+                "train.utonia_param_groups.layer_norm.weight_decay=-1",
+                "layer_norm.weight_decay",
+            ),
+            (
+                "train.utonia_param_groups.adapter.bias_weight_decay=null",
+                "bias_weight_decay",
+            ),
+            ("train.utonia_param_groups.stem.lr=1e-3", "Unsupported keys"),
+            ("train.adam_betas=[0.9]", "adam_betas"),
+            ("train.adam_eps=0", "adam_eps"),
+        )
+        for override, message in cases:
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(ValueError, message):
+                    compose_fresh_config(OmegaConf.from_dotlist([
+                        f"model.variant={DYNAMIC_VARIANT_V14}", override,
+                    ]))
+
+    def test_v14_checkpoint_restores_and_protects_its_utonia_adaptation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "epoch=0.ckpt"
+            stored, _ = compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V14_1}",
+            ]))
+            torch.save({
+                "experiment_config": OmegaConf.to_container(stored, resolve=True)
+            }, checkpoint)
+
+            config, _source = load_checkpoint_config(checkpoint)
+            self.assertEqual(config.p2g.utonia_adaptation.mode, "hybrid")
+            self.assertEqual(
+                config.train.utonia_param_groups.lora.lr, 5.0e-5
+            )
+            with self.assertRaisesRegex(ValueError, "changed roots: p2g"):
+                resolve_main_config(OmegaConf.from_dotlist([
+                    f"train.ckpt_path={checkpoint}",
+                    "p2g.utonia_adaptation.ffn_adapter.scale=0.2",
+                ]))
 
     def test_v13_uses_all_head_rope_cosine_and_adaptive_range_quantiles(self):
         config, source = compose_fresh_config(OmegaConf.from_dotlist([

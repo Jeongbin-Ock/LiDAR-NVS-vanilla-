@@ -31,6 +31,8 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v13_1
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13_2
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13_3
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13_4
+python main.py model.variant=dynamic_2dgs_attention_velocity_v14
+python main.py model.variant=dynamic_2dgs_attention_velocity_v14_1
 ```
 
 A fresh run defaults to `dynamic_2dgs_attention_velocity_v11_4`. Every listed
@@ -38,15 +40,18 @@ variant remains available for exact checkpoint reconstruction and controlled
 A/B runs. The base config's `device: [2, 3]` is the default GPU pair; every
 overlay inherits it and it stays an ordinary CLI-overridable runtime setting.
 
-Every variant feeds the Utonia stage-3 XYZI token (432D, 0.4 m cells) with LoRA
+Every variant feeds the Utonia stage-3 XYZI token (432D, 0.4 m cells) with
 adapters on the frozen base (`p2g.utonia_lora.enable=true` is required) straight
 into temporal attention; there is no separate intensity stream, fusion MLP or
-token refiner. V11.1, V11.3, V11.5, V11.6 and V13.1 emit a fixed number of
-Gaussians per occupied endpoint token -- one observed-medoid seed by default,
-two range quantiles in V11.3/V11.5/V13.1 and three in V11.6; V11, V11.2, V11.4,
-V12, V12.1, V12.2, V13, V13.2, V13.3 and V13.4 let a router select one to three
-range-quantile-seeded Gaussians instead. `p2g.grid_query` chooses between the
-two, sets the fixed count and selects where seeds start (`seed_mode`) -- see
+token refiner. V11-V13 put LoRA on every Utonia Linear and SubMConv3d; V14 and
+V14.1 use the hybrid adaptation described under **V14** below. V11.1, V11.3,
+V11.5, V11.6 and V13.1 emit a fixed number of Gaussians per occupied endpoint
+token -- one observed-medoid seed by default, two range quantiles in
+V11.3/V11.5/V13.1 and three in V11.6; V11, V11.2, V11.4, V12, V12.1, V12.2,
+V13, V13.2, V13.3, V13.4, V14 and V14.1 let a router select one to three
+Gaussians instead, range-quantile-seeded except in V14/V14.1, which anchor
+every slot at the token position. `p2g.grid_query` chooses between the two,
+sets the fixed count and selects where seeds start (`seed_mode`) -- see
 "Gaussians per token" below.
 
 Every variant embeds `time_coordinate = relative_seconds / time_reference_sec`,
@@ -624,6 +629,86 @@ conditioning, layer mixture, motion head, regularizers, losses,
 `head_offset_bound=0.4`, and the `nuscene.py` scene-holdout contract are
 identical. It has no distance bias, barrier, or separate temperature.
 
+**V14** is V11.4's dynamic model -- linear 30 m/s barrier on match head 0,
+RoPE heads 1-11, parameter-only layer mixture, adaptive-K router, embedded-init
+offset head, split velocity prior and loss weights -- trained fresh from the
+pretrained Utonia checkpoint with a different Utonia adaptation
+(`p2g.utonia_adaptation.mode: hybrid`, specified in
+`docs/research/utonia_finetuning_2026_09_25/adapter_ln_lr_spec_2026_09_26.md`).
+Only the stages the encoder executes (stem, enc0-enc3) are adapted, and enc4
+receives nothing:
+
+| Part | V11-V13 | V14 |
+| --- | --- | --- |
+| Stem XYZ columns and bias | frozen, LoRA on the Linear | frozen, no LoRA |
+| Stem intensity | frozen zero base column, reached through LoRA | own column `w_I` (54, zero init), trained directly |
+| Stem residual | linear LoRA 4->16->54 | `4 -> 16 -> 54` GELU adapter on `[x, y, z, I]`, zero output at init, added before the stem LN |
+| FFN `fc1`/`fc2` | frozen base + LoRA | plain frozen Linears, no LoRA |
+| FFN branch | none | `C -> b -> C` ReLU adapter on the same `norm2` output, `y = u + FFN(z) + 0.1 * adapter(z)`, `b = 8/16/32/64` for enc0-enc3 |
+| LayerNorm affine (67 LNs) | frozen | pretrained gamma/beta, trained |
+| Attention qkv/proj, CPE conv/Linear, pooling proj | LoRA r16/a16 | LoRA r16/a16 (fresh A/B) |
+
+The adapters start at zero output (`down` Kaiming-uniform with zero bias, `up`
+weight and bias zero), so a fresh V14 encoder reproduces the pretrained Utonia
+function exactly: on a real two-frame val batch its stage-3 output matched the
+unadapted checkpoint bit for bit under the same serialization seed. Utonia then
+trains 4,423,130 parameters: `w_I` 54, stem adapter 998, FFN adapters 725,238,
+LayerNorm 39,528 and LoRA 3,657,312. LoRA wraps an explicit allow-list
+(`lora_targets: [attention, cpe, pooling]`) resolved before any adapter is
+attached; `ffn` and `stem` targets are rejected, since an FFN LoRA and the
+parallel FFN adapter are mutually exclusive by design.
+
+AdamW gets one parameter group per role, each read from
+`train.utonia_param_groups`, and a last `downstream` group for everything after
+Utonia at `train.lr` / `train.weight_decay`:
+
+| Group | LR | weight decay |
+| --- | ---: | ---: |
+| `utonia_intensity` (`w_I`) | 1e-3 | 1e-4 |
+| `utonia_adapter_weight` (stem + FFN adapters) | 1e-3 | 1e-4 |
+| `utonia_adapter_bias` | 1e-3 | 0 |
+| `utonia_lora` | 5e-5 | 1e-4 |
+| `utonia_layer_norm` | 5e-5 | 0 |
+| `downstream` (temporal, router, Gaussian and motion heads) | 5e-4 | 1e-4 |
+
+Roles come from module types, so the 1-D `w_I` is a weight rather than a bias
+and a new adapter deep inside a pretrained block still trains at the adapter
+rate. The one warmup (500 optimizer steps) + cosine schedule scales every group
+alike, grad clip 1.0 covers all of them, and the overlay records
+`adam_betas: [0.9, 0.999]` and `adam_eps: 1e-8`. The Utonia backbone stays in
+eval mode (no DropPath); only LoRA and the adapters follow `train()`. The
+V11-V13 variants keep their single flat parameter group, and they reject both
+`p2g.utonia_adaptation` and `train.utonia_param_groups`.
+
+Each step logs `utonia/stem_{xyz,intensity,adapter}_rms`, the three pre-LN
+stem summands, and `utonia/ffn_adapter_rms_ratio_enc{0..3}`, the scaled adapter
+output RMS over the frozen FFN output RMS averaged over each stage's blocks, so
+initial drift of the new paths can be read against the frozen ones.
+
+Two further differences from the V11.4 dynamic-window run it is compared with:
+`learned_count.seed_mode: token` anchors every slot at the Utonia token position
+and gives the router trunk the refined feature alone, and the run uses the
+fresh-run default `data.coordinate_frame: ego_vehicle` (the V11.4 run predates
+that key and ran in the LiDAR sensor frame). V14 trains on the random-duration
+`nuscenes_dynamic_lidar4d` loader with V11.6's data block.
+
+**V14.1** is V14 with its barrier speed learned as one global scalar through a
+softplus, V12's single speed in V12.2's parameterization:
+
+```
+v_raw = Parameter(softplus^-1(30.0))
+v_max = softplus(v_raw)
+R_i   = v_max * |dt_i|
+```
+
+All twelve layers, both endpoint directions and every sample share that
+radius, and a fresh V14.1 reproduces V14. `v_raw` sits in the `downstream`
+group, so at `lr: 5e-4` the speed moves by at most about 0.5 m/s per 1,000
+optimizer steps; there is no clamp and no prior toward 30 m/s.
+`attention_temperature_stats` logs `barrier_v_raw`, the current speed as
+`barrier_speed_mps`, and `barrier_speed_initial_mps`. Every other config value
+is V14's.
+
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other
 weights shows a=0 to a=4 is decisive (mass beyond the radius 11.2% -> 0.85%,
@@ -749,7 +834,7 @@ V11.3 emits that same 58,686 from its shipped `K_max: 2`.
 **Learned count (`count_mode: learned_gumbel`).** The refined token routes
 through the grid `GridSlotHead` and a hard Gumbel-Softmax over K={1,2,3} picks
 one K-specific joint head per token. Only V11, V11.2, V11.4, V12, V12.1, V12.2,
-V13, V13.2, V13.3 and V13.4 may use it; asking any other variant for it is
+V13, V13.2, V13.3, V13.4, V14 and V14.1 may use it; asking any other variant for it is
 rejected at config time rather than silently ignored. V11.3, V11.5, V11.6 and
 V13.1 are rejected too because their identities are the fixed count. The seed
 geometry it consumes is the K-specific candidate bank, not the padded
@@ -766,8 +851,8 @@ evaluation cannot change how many Gaussians a checkpoint's tokens produce.
 ## Random-duration windows (`data.dataset_name=nuscenes_dynamic_lidar4d`)
 
 `src/dataloader/nuscene_dynamic_lidar4d.py` is the barrier family's
-alternative to the legacy bbox-compatible `nuscene.py`. V11.6 and V12.2 are
-the only overlays that ship with it; the other barrier-family variants
+alternative to the legacy bbox-compatible `nuscene.py`. V11.6, V12.2, V14 and
+V14.1 are the only overlays that ship with it; the other barrier-family variants
 (V11-V11.5, V12, V12.1) train on `nuscene.py` with the scene holdouts and can
 opt into this loader from the CLI, as V11-V11.4 briefly did. The loader retains the old flat index's keyframe start sweep and 0.5-second sliding
 stride, but samples the actual second endpoint uniformly from the available
@@ -889,8 +974,9 @@ the physical interval varies under that loader.
 `enable: false` restores full-split validation. `train`/`test` dataloaders are
 untouched.
 
-Every overlay except V11.6 and V12.2 uses the shared bbox-compatible loader;
-V11.6 and V12.2 ship the minimal dynamic loader above (`data.mode=nvs`), which
+Every overlay except V11.6, V12.2, V14 and V14.1 uses the shared
+bbox-compatible loader; those four ship the minimal dynamic loader above
+(`data.mode=nvs`), which
 the other barrier-family overlays can opt into. Both loader contracts expose
 relative `timestamps_sec` plus `window_duration_sec`; every variant uses those
 physical values for time conditioning and transport. Normalized endpoint

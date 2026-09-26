@@ -235,17 +235,24 @@ def main():
     trainable_utonia_count = sum(
         parameter.numel() for _, parameter in trainable_utonia_parameters
     )
-    if trainable_utonia_count != p2g.utonia_lora_trainable_parameters:
+    if trainable_utonia_count != p2g.utonia_trainable_parameters:
         raise RuntimeError(
-            "active Utonia LoRA parameter count does not match construction report"
+            "active Utonia adapter parameter count does not match construction report"
         )
+    # All-linear LoRA trains only LoRA A/B; the hybrid adaptation (V14) also
+    # trains the intensity column, the nonlinear adapters and LayerNorm affine.
+    adapter_parameter_ids = {
+        id(parameter)
+        for items in p2g.utonia_parameter_roles().values()
+        for _name, parameter in items
+    }
     unexpected_utonia_trainable = [
-        name for name, _ in trainable_utonia_parameters
-        if ".lora_down." not in name and ".lora_up." not in name
+        name for name, parameter in trainable_utonia_parameters
+        if id(parameter) not in adapter_parameter_ids
     ]
     if unexpected_utonia_trainable:
         raise RuntimeError(
-            "non-LoRA Utonia parameters are trainable: "
+            "Utonia parameters outside the adaptation scope are trainable: "
             + ", ".join(unexpected_utonia_trainable[:5])
         )
     lora_up_name, lora_up_parameter = next(
@@ -264,8 +271,15 @@ def main():
         parameter for parameter in p2g.parameters()
         if parameter.requires_grad
     ]
+    # The run's own groups: --lr replaces train.lr, which is the whole flat
+    # list for all-linear LoRA and only the downstream group for the hybrid
+    # adaptation, whose Utonia roles keep their configured rates.
+    param_groups = p2g.optimizer_param_groups(cfg.train)
+    for group in param_groups:
+        if isinstance(group, dict) and group.get("name") == "downstream":
+            group["lr"] = args.lr
     optimizer = torch.optim.AdamW(
-        parameters,
+        param_groups,
         lr=args.lr,
         weight_decay=float(cfg.train.weight_decay),
     )
@@ -313,7 +327,7 @@ def main():
         ]
         if unused_lora:
             raise RuntimeError(
-                "active Utonia LoRA parameters were unused: "
+                "active Utonia adapter parameters were unused: "
                 + ", ".join(unused_lora[:5])
             )
         temporal_grad = grad_norm(temporal_weight)

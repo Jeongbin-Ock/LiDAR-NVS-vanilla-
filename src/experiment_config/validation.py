@@ -13,11 +13,16 @@ from .definitions import (
     FEATURE_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
     FIXED_COUNT_SEED_MODES,
     FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
+    HYBRID_UTONIA_DYNAMIC_VARIANTS,
     LEARNED_COUNT_MODES,
     LEARNED_COUNT_SEED_MODES,
     LEGACY_COUNT_MODE,
     RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS,
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+    UTONIA_ADAPTATION_MODE_HYBRID,
+    UTONIA_ADAPTER_ACTIVATIONS,
+    UTONIA_LORA_TARGETS,
+    UTONIA_PARAM_GROUP_ROLES,
     VARIANT_CONFIG_PATHS,
     _REQUIRED_ROOTS,
     _UTONIA_ENCODER_STAGE_DIMS,
@@ -91,6 +96,155 @@ def _validate_utonia_lora_config(config, label: str) -> None:
     ))
     if not 0.0 <= dropout < 1.0:
         raise ValueError("p2g.utonia_lora.dropout must be in [0, 1)")
+
+
+def _require_flag(config, path: str) -> None:
+    """The named path must hold a YAML boolean."""
+    if not isinstance(OmegaConf.select(config, path), bool):
+        raise ValueError(f"{path} must be true or false")
+
+
+def _require_finite(config, path: str, *, minimum: float,
+                    inclusive: bool) -> None:
+    value = OmegaConf.select(config, path)
+    if value is None or not math.isfinite(float(value)) or (
+        float(value) < minimum if inclusive else float(value) <= minimum
+    ):
+        bound = "non-negative" if inclusive else "positive"
+        raise ValueError(f"{path} must be {bound} and finite")
+
+
+def _validate_utonia_adaptation_config(config, variant, label: str) -> None:
+    """The hybrid Utonia adaptation block and its AdamW role groups.
+
+    V14-family variants require ``p2g.utonia_adaptation`` (mode ``hybrid``)
+    and ``train.utonia_param_groups``. Every other variant adapts Utonia with
+    LoRA on every Linear/SubMConv3d and rejects both blocks, so neither can be
+    carried along silently unused.
+    """
+    path = "p2g.utonia_adaptation"
+    groups_path = "train.utonia_param_groups"
+    block = OmegaConf.select(config, path, default=None)
+    groups = OmegaConf.select(config, groups_path, default=None)
+    if variant not in HYBRID_UTONIA_DYNAMIC_VARIANTS:
+        allowed = ", ".join(
+            _variant_label(name) for name in HYBRID_UTONIA_DYNAMIC_VARIANTS
+        )
+        if block is not None:
+            raise ValueError(
+                f"{label} adapts Utonia with LoRA on every Linear/SubMConv3d; "
+                f"{path} is only available to {allowed}"
+            )
+        if groups is not None:
+            raise ValueError(
+                f"{groups_path} only applies to the hybrid Utonia adaptation "
+                f"of {allowed}"
+            )
+        return
+    if block is None:
+        raise ValueError(
+            f"{label} requires {path} with "
+            f"mode={UTONIA_ADAPTATION_MODE_HYBRID!r}"
+        )
+    _reject_unknown_keys(
+        config, path,
+        {"mode", "lora_targets", "train_layer_norm", "stem", "ffn_adapter"},
+    )
+    _require_choice(config, f"{path}.mode", (UTONIA_ADAPTATION_MODE_HYBRID,))
+
+    targets = OmegaConf.select(config, f"{path}.lora_targets")
+    if not isinstance(targets, (list, tuple, ListConfig)):
+        raise ValueError(f"{path}.lora_targets must be a list")
+    names = [str(target).lower() for target in targets]
+    for name in names:
+        if name in ("ffn", "mlp"):
+            raise ValueError(
+                f"{path}.lora_targets cannot include {name!r}: FFN LoRA and the "
+                "parallel FFN adapter are mutually exclusive, and the FFN "
+                "Linears stay plain frozen layers"
+            )
+        if name == "stem":
+            raise ValueError(
+                f"{path}.lora_targets cannot include 'stem': the hybrid stem "
+                "adapts through its intensity column and nonlinear adapter"
+            )
+        if name not in UTONIA_LORA_TARGETS:
+            raise ValueError(
+                f"{path}.lora_targets entries must be one of {UTONIA_LORA_TARGETS}"
+            )
+    if len(set(names)) != len(names):
+        raise ValueError(f"{path}.lora_targets must not repeat an entry")
+    _require_flag(config, f"{path}.train_layer_norm")
+
+    stem_path = f"{path}.stem"
+    _reject_unknown_keys(
+        config, stem_path,
+        {
+            "train_intensity_column", "adapter_hidden", "adapter_activation",
+            "adapter_scale",
+        },
+    )
+    _require_flag(config, f"{stem_path}.train_intensity_column")
+    _require_positive(config, f"{stem_path}.adapter_hidden", kind=int)
+    _require_choice(
+        config, f"{stem_path}.adapter_activation", UTONIA_ADAPTER_ACTIVATIONS
+    )
+    _require_finite(
+        config, f"{stem_path}.adapter_scale", minimum=0.0, inclusive=False
+    )
+
+    ffn_path = f"{path}.ffn_adapter"
+    _reject_unknown_keys(
+        config, ffn_path, {"widths", "activation", "scale", "dropout"}
+    )
+    widths = OmegaConf.select(config, f"{ffn_path}.widths")
+    stages = int(OmegaConf.select(config, "p2g.utonia_feature_stage")) + 1
+    if not isinstance(widths, (list, tuple, ListConfig)) or len(widths) != stages:
+        raise ValueError(
+            f"{ffn_path}.widths needs one bottleneck width per executed "
+            f"Utonia stage ({stages} for utonia_feature_stage={stages - 1})"
+        )
+    if any(int(width) <= 0 for width in widths):
+        raise ValueError(f"{ffn_path}.widths must be positive")
+    _require_choice(
+        config, f"{ffn_path}.activation", UTONIA_ADAPTER_ACTIVATIONS
+    )
+    _require_finite(config, f"{ffn_path}.scale", minimum=0.0, inclusive=False)
+    dropout = OmegaConf.select(config, f"{ffn_path}.dropout")
+    if dropout is None or not 0.0 <= float(dropout) < 1.0:
+        raise ValueError(f"{ffn_path}.dropout must be in [0, 1)")
+
+    if groups is None:
+        raise ValueError(
+            f"{label} requires {groups_path} with a learning rate and weight "
+            "decay for each Utonia role"
+        )
+    _reject_unknown_keys(config, groups_path, set(UTONIA_PARAM_GROUP_ROLES))
+    for role in UTONIA_PARAM_GROUP_ROLES:
+        role_path = f"{groups_path}.{role}"
+        if OmegaConf.select(config, role_path, default=None) is None:
+            raise ValueError(f"{role_path} is required")
+        decay_keys = ["weight_decay"]
+        if role == "adapter":
+            decay_keys.append("bias_weight_decay")
+        _reject_unknown_keys(config, role_path, {"lr", *decay_keys})
+        _require_finite(config, f"{role_path}.lr", minimum=0.0, inclusive=False)
+        for key in decay_keys:
+            _require_finite(
+                config, f"{role_path}.{key}", minimum=0.0, inclusive=True
+            )
+
+
+def _validate_adam_settings(config) -> None:
+    """Optional explicit AdamW betas/eps; absent keys keep torch's defaults."""
+    betas = OmegaConf.select(config, "train.adam_betas", default=None)
+    if betas is not None:
+        if not isinstance(betas, (list, tuple, ListConfig)) or len(betas) != 2:
+            raise ValueError("train.adam_betas must be a two-entry list")
+        if any(not 0.0 <= float(beta) < 1.0 for beta in betas):
+            raise ValueError("train.adam_betas entries must be in [0, 1)")
+    if OmegaConf.select(config, "train.adam_eps", default=None) is not None:
+        _require_finite(config, "train.adam_eps", minimum=0.0, inclusive=False)
 
 
 def _configured_p2g_trunk_dim(config) -> int:
@@ -505,6 +659,8 @@ def validate_experiment_config(config) -> None:
     _validate_legacy_train_exclusions(config)
     _validate_retired_loss_options(config)
     _validate_utonia_lora_config(config, label)
+    _validate_utonia_adaptation_config(config, variant, label)
+    _validate_adam_settings(config)
 
     # Checkpoints embed the anchor mode from when a second one existed.
     anchor_mode = OmegaConf.select(config, "p2g.anchor_mode", default=None)

@@ -95,7 +95,9 @@ p2g:
   # Checkpoint의 functional XYZ 입력([xyz, zero_rgb, zero_normal])을 XYZI로
   # 바꾸고 Utonia의 모든 Linear/SubMConv3d에 LoRA를 설치한다. 실제 forward가
   # 지나는 stage까지만 trainable로 두어 DDP unused parameter를 피한다. 출력은
-  # 바로 temporal attention으로 간다 (LoRA는 필수).
+  # 바로 temporal attention으로 간다 (LoRA는 필수). V14 계열은
+  # p2g.utonia_adaptation(mode: hybrid)으로 LoRA 대상을 attention/CPE/pooling으로
+  # 줄이고 stem/FFN adapter와 LN affine을 학습한다 (config/README.md의 V14).
   utonia_lora:
     enable: true
     input_mode: xyzi

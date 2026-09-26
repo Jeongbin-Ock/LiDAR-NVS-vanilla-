@@ -19,6 +19,7 @@ from .temporal import (
     CosineRoPELayerWeightedCrossAttention,
     FinalFeatureBarrierCrossAttention,
     FixedMotionGainLearnableMaxSpeedBarrierCrossAttention,
+    GlobalSoftplusMaxSpeedBarrierCrossAttention,
     GroupedGainBarrierCrossAttention,
     LayerwiseSoftplusMaxSpeedBarrierCrossAttention,
     LearnableMaxSpeedBarrierLayerWeightedCrossAttention,
@@ -694,7 +695,7 @@ class RouterCapableGaussianBackend(DynamicGaussianBackend):
         }
 
 class MaxSpeedBarrierVelocityGaussianBackend(RouterCapableGaussianBackend):
-    """V11/V11.4: count-selectable backend with split position encoding.
+    """V11/V11.4/V14: count-selectable backend with split position encoding.
 
     The shipped config uses the ``learned_gumbel`` K={1,2,3} router, while a
     legacy count config selects the fixed-count head. Both keep one token velocity
@@ -738,6 +739,17 @@ class LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend(
 
     def _build_temporal(self, cfg):
         return LayerwiseSoftplusMaxSpeedBarrierCrossAttention(
+            cfg.temporal, self.dim
+        )
+
+
+class GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend(
+    MaxSpeedBarrierVelocityGaussianBackend
+):
+    """V14.1: V14 with one softplus-parameterized global barrier speed."""
+
+    def _build_temporal(self, cfg):
+        return GlobalSoftplusMaxSpeedBarrierCrossAttention(
             cfg.temporal, self.dim
         )
 
@@ -899,6 +911,7 @@ __all__ = [
     "LearnableMaxSpeedBarrierVelocityGaussianBackend",
     "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend",
     "LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend",
+    "GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend",
     "CosineRoPEVelocityGaussianBackend",
     "RawQKRoPEVelocityGaussianBackend",
     "RMSNormRoPEVelocityGaussianBackend",

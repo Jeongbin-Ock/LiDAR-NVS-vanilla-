@@ -701,8 +701,48 @@ class _LearnedRadiusBarrierCrossAttention(
         return attended[..., :self.head_dim], attended[..., self.head_dim:]
 
 
-class LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+def _softplus_inverse(value: float) -> float:
+    """``softplus^-1(y) = y + log(1 - exp(-y))``, accurate for small ``y``."""
+    return value + math.log(-math.expm1(-value))
+
+
+class _GlobalLearnedSpeedBarrierCrossAttention(
     _LearnedRadiusBarrierCrossAttention
+):
+    """One learned max speed shared by every layer, direction and sample.
+
+    A subclass registers the speed parameter and exposes the positive speed as
+    ``v_max``; this class turns it into each frame's radius
+    ``v_max * |dt|`` and keeps that radius in the autograd graph.
+    """
+
+    def _prepare_forward(
+        self,
+        feature,
+        position_ref,
+        token_offset,
+        frame_batch_idx,
+        token_duration_sec,
+    ):
+        layout = super()._prepare_forward(
+            feature,
+            position_ref,
+            token_offset,
+            frame_batch_idx,
+            token_duration_sec,
+        )
+        frame_duration = self._frame_first(
+            token_duration_sec, layout["q_counts"]
+        ).float()
+        frame_radius = (self.v_max * frame_duration).clamp_min(1.0e-4)
+        # Keep 0-D tensors all the way into the checkpointed chunks. Converting
+        # these to Python floats would silently detach the learned speed.
+        layout["frame_radius_values"] = tuple(frame_radius.unbind())
+        return layout
+
+
+class LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
+    _GlobalLearnedSpeedBarrierCrossAttention
 ):
     """V12: V11.4's linear barrier with one learned global ``v_max``.
 
@@ -741,29 +781,43 @@ class LearnableMaxSpeedBarrierLayerWeightedCrossAttention(
         stats["barrier_speed_mps"] = float(self.v_max)
         return stats
 
-    def _prepare_forward(
-        self,
-        feature,
-        position_ref,
-        token_offset,
-        frame_batch_idx,
-        token_duration_sec,
-    ):
-        layout = super()._prepare_forward(
-            feature,
-            position_ref,
-            token_offset,
-            frame_batch_idx,
-            token_duration_sec,
-        )
-        frame_duration = self._frame_first(
-            token_duration_sec, layout["q_counts"]
-        ).float()
-        frame_radius = (self.v_max * frame_duration).clamp_min(1.0e-4)
-        # Keep 0-D tensors all the way into the checkpointed chunks. Converting
-        # these to Python floats would silently detach the learned speed.
-        layout["frame_radius_values"] = tuple(frame_radius.unbind())
-        return layout
+
+class GlobalSoftplusMaxSpeedBarrierCrossAttention(
+    _GlobalLearnedSpeedBarrierCrossAttention
+):
+    """V14.1: V12's one global learned speed through V12.2's softplus.
+
+    ``v_max = softplus(v_raw)`` with a single scalar ``v_raw`` initialized to
+    ``softplus^-1(barrier_speed_mps)``, so every layer, both endpoint
+    directions and every sample read correspondence under one radius
+    ``v_max * |dt|``, and a fresh module reproduces V11.4's fixed 30 m/s
+    barrier exactly. As in V12.2 an optimizer step moves the speed by about
+    the same number of m/s at any speed (softplus slope ~1 near 30 m/s); as in
+    V12 there is one speed rather than one per layer. Nothing clamps the speed
+    or pulls it back toward its initial value.
+    """
+
+    def __init__(self, cfg, dim: int):
+        super().__init__(cfg, dim)
+        self.initial_barrier_speed_mps = self.barrier_speed_mps
+        self.v_raw = nn.Parameter(torch.tensor(
+            _softplus_inverse(self.initial_barrier_speed_mps),
+            dtype=torch.float32,
+        ))
+
+    @property
+    def v_max(self):
+        """Current positive max speed in metres per second."""
+        return F.softplus(self.v_raw)
+
+    @torch.no_grad()
+    def attention_temperature_stats(self):
+        """V11.4 temperature diagnostics plus the learned global speed."""
+        stats = super().attention_temperature_stats()
+        stats["barrier_speed_initial_mps"] = self.initial_barrier_speed_mps
+        stats["barrier_v_raw"] = float(self.v_raw)
+        stats["barrier_speed_mps"] = float(self.v_max)
+        return stats
 
 
 class FinalFeatureBarrierCrossAttention(
@@ -1171,11 +1225,10 @@ class LayerwiseSoftplusMaxSpeedBarrierCrossAttention(
         super().__init__(cfg, dim)
         self.initial_barrier_speed_mps = self.barrier_speed_mps
         speed = self.initial_barrier_speed_mps
-        # softplus^-1(y) = y + log(1 - exp(-y)); expm1 keeps it accurate for
-        # small y. At 30 m/s the correction is 1e-13, below float32 spacing.
-        initial_raw = speed + math.log(-math.expm1(-speed))
+        # expm1 keeps softplus^-1 accurate for small speeds. At 30 m/s the
+        # correction is 1e-13, below float32 spacing.
         self.v_raw = nn.Parameter(torch.full(
-            (self.n_layers,), initial_raw, dtype=torch.float32
+            (self.n_layers,), _softplus_inverse(speed), dtype=torch.float32
         ))
 
     @property
@@ -1830,6 +1883,7 @@ __all__ = [
     "FixedMotionHeadRMSNorm",
     "GroupedHeadRMSNorm",
     "GroupedGainBarrierCrossAttention",
+    "GlobalSoftplusMaxSpeedBarrierCrossAttention",
     "LayerwiseSoftplusMaxSpeedBarrierCrossAttention",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention",
 ]

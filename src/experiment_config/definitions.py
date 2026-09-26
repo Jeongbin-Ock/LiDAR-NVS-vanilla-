@@ -21,6 +21,8 @@ DYNAMIC_VARIANT_V13_1 = "dynamic_2dgs_attention_velocity_v13_1"
 DYNAMIC_VARIANT_V13_2 = "dynamic_2dgs_attention_velocity_v13_2"
 DYNAMIC_VARIANT_V13_3 = "dynamic_2dgs_attention_velocity_v13_3"
 DYNAMIC_VARIANT_V13_4 = "dynamic_2dgs_attention_velocity_v13_4"
+DYNAMIC_VARIANT_V14 = "dynamic_2dgs_attention_velocity_v14"
+DYNAMIC_VARIANT_V14_1 = "dynamic_2dgs_attention_velocity_v14_1"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
 # explicit constant for each variant so checkpoint semantics stay exact.
 DYNAMIC_VARIANT = DYNAMIC_VARIANT_V11_4
@@ -47,6 +49,8 @@ ROUTER_CAPABLE_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13_2,
     DYNAMIC_VARIANT_V13_3,
     DYNAMIC_VARIANT_V13_4,
+    DYNAMIC_VARIANT_V14,
+    DYNAMIC_VARIANT_V14_1,
 )
 # V13-family correspondence reads head 0 at every temporal layer, but unlike
 # the barrier family all heads carry 3D RoPE and share one FlashAttention call.
@@ -94,6 +98,8 @@ FLASH_ROPE_MATCH_DYNAMIC_VARIANTS = (
 # heads 1..H-1 share a separate learned gain.
 # V12.2 is V12 with one learned radius per layer, each softplus(v_raw_l) from an
 # initial 30 m/s, trained on the random-duration loader.
+# V14 runs V11.4's temporal stack unchanged under the hybrid Utonia adaptation;
+# V14.1 is V14 with one global learned radius, softplus(v_raw) from 30 m/s.
 # V11.2 gives head 0 RoPE too and moves the barrier to a single post-refinement
 # readout head with its own gain, which is what lets its layer stack run
 # entirely on FlashAttention.
@@ -108,6 +114,8 @@ BARRIER_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V12,
     DYNAMIC_VARIANT_V12_1,
     DYNAMIC_VARIANT_V12_2,
+    DYNAMIC_VARIANT_V14,
+    DYNAMIC_VARIANT_V14_1,
 )
 DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11,
@@ -125,6 +133,18 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V13_2,
     DYNAMIC_VARIANT_V13_3,
     DYNAMIC_VARIANT_V13_4,
+    DYNAMIC_VARIANT_V14,
+    DYNAMIC_VARIANT_V14_1,
+)
+# Variants whose Utonia encoder is adapted by p2g.utonia_adaptation.mode=hybrid:
+# frozen XYZ stem columns plus a trained intensity column and a nonlinear stem
+# adapter, AdaptFormer-style parallel adapters beside every executed FFN,
+# trainable LayerNorm affine, and LoRA only on attention, CPE and pooling, each
+# role with its own AdamW LR (train.utonia_param_groups). Every other variant
+# keeps LoRA on every Utonia Linear/SubMConv3d and rejects both blocks.
+HYBRID_UTONIA_DYNAMIC_VARIANTS = (
+    DYNAMIC_VARIANT_V14,
+    DYNAMIC_VARIANT_V14_1,
 )
 
 # The overlay allow-list: one config/variants/<variant>.yaml per variant.
@@ -218,3 +238,14 @@ LEGACY_EXP_SEED_MODES = {
     1: SEED_MODE_MEDOID,
     2: SEED_MODE_TOKEN,
 }
+
+# p2g.utonia_adaptation vocabulary. ``hybrid`` is the only mode; configs without
+# the block keep the all-linear LoRA. LoRA targets name module roles: attention
+# (qkv and output projection), cpe (SubMConv3d and the Linear after it) and
+# pooling (GridPooling projection). The stem and FFN are deliberately absent:
+# they adapt through the intensity column and the parallel adapters instead.
+UTONIA_ADAPTATION_MODE_HYBRID = "hybrid"
+UTONIA_LORA_TARGETS = ("attention", "cpe", "pooling")
+UTONIA_ADAPTER_ACTIVATIONS = ("relu", "gelu")
+# train.utonia_param_groups roles; adapter also takes bias_weight_decay.
+UTONIA_PARAM_GROUP_ROLES = ("intensity", "adapter", "lora", "layer_norm")

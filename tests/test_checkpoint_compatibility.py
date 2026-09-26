@@ -69,6 +69,12 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v13_4": (
         "RMSNormFeatureRoPEVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v14": (
+        "MaxSpeedBarrierVelocityGaussianBackend"
+    ),
+    "dynamic_2dgs_attention_velocity_v14_1": (
+        "GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend"
+    ),
 }
 
 
@@ -150,6 +156,18 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v13_4": (
         "a7f420bb2b15d7023d1f", "b72527798ae7652e170c"
     ),
+    # V14 is V11.4's backend with token anchors, so its router trunk reads the
+    # feature alone: V11.4's parameter names in V11.4's order, but the trunk's
+    # input width loses the 9 seed-delta columns. (Its Utonia changes live in
+    # Point2Gaus, outside this backend-only schema.)
+    "dynamic_2dgs_attention_velocity_v14": (
+        "d8e521e1d84176093fff", "b72527798ae7652e170c"
+    ),
+    # V14.1 registers one scalar v_raw where V12.2 registers its per-layer
+    # vector, under the same name and in the same position.
+    "dynamic_2dgs_attention_velocity_v14_1": (
+        "81ff74b836e5d501ae22", "e6eb26eaef8f1c0b77d3"
+    ),
 }
 
 
@@ -183,6 +201,8 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "FixedMotionGainLearnableMaxSpeedBarrierCrossAttention": "temporal",
     "FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend": "backends",
     "FixedMotionHeadRMSNorm": "temporal",
+    "GlobalSoftplusMaxSpeedBarrierCrossAttention": "temporal",
+    "GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend": "backends",
     "LayerwiseSoftplusMaxSpeedBarrierCrossAttention": "temporal",
     "LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend": "backends",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention": "temporal",
@@ -208,8 +228,15 @@ def _build_backend(variant):
     count_mode = str(getattr(count, "count_mode", "legacy")).lower()
     if count is not None and count_mode == "learned_gumbel":
         kwargs["gaussian_count_cfg"] = count
+        seed_mode = OmegaConf.select(
+            config, "p2g.grid_query.learned_count.seed_mode"
+        )
     else:
         kwargs["gaussians_per_token"] = int(getattr(count, "K_max", 1))
+        seed_mode = OmegaConf.select(config, "p2g.grid_query.seed_mode")
+    # Point2Gaus passes the seed mode, which decides whether the Gaussian head
+    # reads seed deltas (range_quantile) or the token feature alone.
+    kwargs["seed_mode"] = seed_mode or "range_quantile"
     backend_cls = getattr(_DYNAMIC, _BACKEND_CLASS[variant])
     return backend_cls(
         config.dynamic_2dgs,
@@ -310,6 +337,34 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
         torch.testing.assert_close(
             backend.temporal.v_max.detach(), torch.full((12,), 30.0)
         )
+        self.assertAlmostEqual(backend.offset_bound, 0.4)
+        self.assertEqual(backend.temporal.barrier_exponent, 1)
+        self.assertEqual(backend.temporal.barrier_weight, 1.0)
+
+    def test_v14_1_swaps_v12_2_speeds_for_one_global_softplus_speed(self):
+        v14 = _build_backend("dynamic_2dgs_attention_velocity_v14")
+        v12_2 = _build_backend("dynamic_2dgs_attention_velocity_v12_2")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v14_1")
+        self.assertIs(
+            type(backend),
+            _DYNAMIC.GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend,
+        )
+        self.assertIs(type(v14), _DYNAMIC.MaxSpeedBarrierVelocityGaussianBackend)
+        self.assertTrue(backend.adaptive_count)
+        self.assertEqual(
+            [name for name, _ in backend.named_parameters()],
+            [name for name, _ in v12_2.named_parameters()],
+        )
+        self.assertEqual(tuple(backend.temporal.v_raw.shape), ())
+        torch.testing.assert_close(
+            backend.temporal.v_max.detach(), torch.tensor(30.0)
+        )
+        # Token anchors: the router trunk reads the refined feature alone.
+        for model in (v14, backend):
+            self.assertEqual(model.seed_mode, "token")
+            self.assertFalse(model.gaussian_head.seed_conditioned)
+            self.assertEqual(model.gaussian_head.trunk[0].in_features, 144)
+        self.assertEqual(v12_2.gaussian_head.trunk[0].in_features, 153)
         self.assertAlmostEqual(backend.offset_bound, 0.4)
         self.assertEqual(backend.temporal.barrier_exponent, 1)
         self.assertEqual(backend.temporal.barrier_weight, 1.0)

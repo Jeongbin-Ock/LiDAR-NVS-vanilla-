@@ -1,0 +1,180 @@
+# Bbox-free Dynamic 2DGS V14.
+#
+# V11.4's dynamic model (linear max-speed barrier on match head 0, 3D RoPE on
+# heads 1-11, parameter-only layer mixture, adaptive K={1,2,3} router,
+# v_init-conditioned offset head, split velocity prior, loss weights) trained
+# fresh from the pretrained Utonia checkpoint, with the Utonia encoder adapted
+# by the hybrid scheme of
+# docs/research/utonia_finetuning_2026_09_25/adapter_ln_lr_spec_2026_09_26.md
+# instead of LoRA on every Linear/SubMConv3d:
+#
+# 1. Stem. The pretrained XYZ columns (54x3) and bias stay frozen. A separate
+#    intensity column w_I (54, zero init) is trained directly, and a
+#    zero-output 4 -> 16 -> 54 GELU adapter reading [x, y, z, I] is added to
+#    the Linear output before the stem LayerNorm:
+#        z = W_xyz p + b0 + w_I I + U_s GELU(D_s [p, I] + b_down) + b_up
+#    The stem has no LoRA.
+# 2. FFN. The 21 executed blocks (enc0-enc3) keep their pretrained
+#    C -> 4C -> C MLP as plain frozen Linears, with no LoRA. An
+#    AdaptFormer-style C -> b -> C ReLU branch (b = 8/16/32/64 for enc0-enc3)
+#    reads the same norm2 output, and the block adds its residual once:
+#        y = u + FFN(LN(u)) + 0.1 * (U ReLU(D LN(u) + b_down) + b_up)
+# 3. LayerNorm. The 67 LayerNorms the executed stages run (stem, every CPE,
+#    norm1, norm2, pooling) keep their pretrained gamma/beta and are trained.
+# 4. LoRA (rank 16, alpha 16, dropout 0) stays only on attention qkv/proj, the
+#    CPE SubMConv3d and Linear, and the enc1-enc3 pooling projections, all with
+#    fresh A/B. enc4 is not executed and receives nothing.
+# Utonia then trains 4,423,130 parameters: w_I 54, stem adapter 998, FFN
+# adapters 725,238, LayerNorm 39,528, LoRA 3,657,312.
+#
+# 5. Optimizer (train.utonia_param_groups). AdamW groups by role: w_I and the
+#    new adapters at 1e-3 (adapter biases without weight decay), LoRA at 5e-5,
+#    LayerNorm at 5e-5 without weight decay, and everything after Utonia
+#    (temporal stack, router, Gaussian and motion heads) at train.lr = 5e-4 with
+#    train.weight_decay = 1e-4. One 500-step linear warmup + cosine schedule
+#    scales every group alike, and grad_clip 1.0 still applies to all of them.
+#
+# Differences from the V11.4 dynamic-window run besides Utonia:
+# - learned_count.seed_mode: token. Every slot of a token starts at the Utonia
+#   token position, and the router trunk reads the refined feature alone,
+#   Linear(432, 432) instead of Linear(432 + 9, 432).
+# - data.coordinate_frame: ego_vehicle, the fresh-run default of
+#   nuscene_train.yaml. The V11.4 run predates that key and ran in the LiDAR
+#   sensor frame.
+model:
+  variant: dynamic_2dgs_attention_velocity_v14
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  # Rank/alpha/dropout of the LoRA that remains on utonia_adaptation's
+  # lora_targets. The stem and FFN get none.
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  utonia_adaptation:
+    mode: hybrid
+    lora_targets: [attention, cpe, pooling]
+    train_layer_norm: true
+    stem:
+      train_intensity_column: true
+      adapter_hidden: 16
+      adapter_activation: gelu
+      adapter_scale: 1.0
+    ffn_adapter:
+      # One bottleneck width per executed stage, enc0..enc3 (54/108/216/432D).
+      widths: [8, 16, 32, 64]
+      activation: relu
+      scale: 0.1
+      dropout: 0.0
+  # V11.4's adaptive K={1,2,3} router with token-position anchors.
+  grid_query:
+    count_mode: learned_gumbel
+    grad_balance: sqrt_k
+    learned_count:
+      K_max: 3
+      tau: 1.0
+      seed_mode: token
+      grad_balance_scope: token
+      logging:
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+
+train:
+  # train.lr / train.weight_decay (5e-4 / 1e-4 from nuscene_train.yaml) are
+  # the downstream group's; these are the Utonia roles'.
+  utonia_param_groups:
+    intensity:
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+    adapter:
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+      bias_weight_decay: 0.0
+    lora:
+      lr: 5.0e-5
+      weight_decay: 1.0e-4
+    layer_norm:
+      lr: 5.0e-5
+      weight_decay: 0.0
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+
+# The random-duration loader the V11.4 dynamic-window run used (V11.6/V12.2's
+# data block): second endpoint 0.2-1.2 s after a keyframe start, up to three
+# interior novel views.
+data:
+  dataset_name: nuscenes_dynamic_lidar4d
+  mode: nvs
+  bbox_json_path: null
+  # The legacy loader's holdout key stays empty; this loader reads its holdouts
+  # from dynamic_window below.
+  train_excluded_scenes: null
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.2
+    eval_seed: 42
+    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
+    # train scenes. Hold out each complete scene to prevent overlap.
+    train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    # V5 physical endpoint-time conditioning before layer one, as in V11.4.
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # V11.4's fixed linear hinge. R = 30 m at the nominal 1.0 s endpoint
+    # interval; the penalty is 0 inside R, then 0.5 logits at 1.5R, 1 at 2R and
+    # 2 at 3R.
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+
+    # Heads 1-11 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    layer_scale_init: 0.1
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    # V11.4's v_init-conditioned, zero-initialized residual head, unchanged.
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+# Keep V11.4's reconstruction objective unchanged.
+loss:
+  w_chamfer: 0.02

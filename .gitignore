@@ -68,6 +68,7 @@ tests/*
 !tests/test_checkpoint_compatibility.py
 !tests/check_dynamic_refactor_parity.py
 !tests/test_utonia_lora.py
+!tests/test_utonia_adapters.py
 !tests/run_dynamic_smoke.py
 test_bbox_viz.py
 inspect_overfit_pair.py

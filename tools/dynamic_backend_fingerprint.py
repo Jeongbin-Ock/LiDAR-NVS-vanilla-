@@ -42,6 +42,10 @@ BACKENDS = {
     cl.DYNAMIC_VARIANT_V13_2: dg.RawQKRoPEVelocityGaussianBackend,
     cl.DYNAMIC_VARIANT_V13_3: dg.RMSNormRoPEVelocityGaussianBackend,
     cl.DYNAMIC_VARIANT_V13_4: dg.RMSNormFeatureRoPEVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V14: dg.MaxSpeedBarrierVelocityGaussianBackend,
+    cl.DYNAMIC_VARIANT_V14_1: (
+        dg.GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend
+    ),
 }
 
 DIM = 72
@@ -114,10 +118,18 @@ def main():
         ).lower()
         if count is not None and count_mode == "learned_gumbel":
             kwargs["gaussian_count_cfg"] = count
-        elif count is not None:
-            kwargs["gaussians_per_token"] = int(
-                OmegaConf.select(overlay, "p2g.grid_query.K_max") or 1
+            seed_mode = OmegaConf.select(
+                overlay, "p2g.grid_query.learned_count.seed_mode"
             )
+        else:
+            seed_mode = OmegaConf.select(overlay, "p2g.grid_query.seed_mode")
+            if count is not None:
+                kwargs["gaussians_per_token"] = int(
+                    OmegaConf.select(overlay, "p2g.grid_query.K_max") or 1
+                )
+        # As in Point2Gaus: the seed mode decides whether the Gaussian head
+        # reads seed deltas (range_quantile) or the token feature alone.
+        kwargs["seed_mode"] = seed_mode or "range_quantile"
         torch.manual_seed(0)
         backend = backend_cls(cfg, gs_params, dim=DIM, offset_bound=0.8, **kwargs)
         backend.eval()

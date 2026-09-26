@@ -34,6 +34,8 @@ Every variant's velocity head is `EmbeddedInitVelocityHead`.
 | `attention_velocity_v13_2` | `RawQKRoPEVelocityGaussianBackend` | all-head RoPE/Flash with raw QK / sqrt(d) on every head | learned K=1..3, range-quantile seeds |
 | `attention_velocity_v13_3` | `RMSNormRoPEVelocityGaussianBackend` | all-head RMSNorm + 3D RoPE in one Flash call; no distance bias | learned K=1..3, range-quantile seeds |
 | `attention_velocity_v13_4` | `RMSNormFeatureRoPEVelocityGaussianBackend` | RMSNorm on all heads, 3D RoPE only on heads 1-11, one Flash call | learned K=1..3, range-quantile seeds |
+| `attention_velocity_v14` | `MaxSpeedBarrierVelocityGaussianBackend` | V11.4's linear-hinge `MaxSpeedBarrierLayerWeightedCrossAttention`; hybrid Utonia adaptation (`src/models_new/utonia/adapters.py`) | learned K=1..3, token-position anchors, feature-only trunk |
+| `attention_velocity_v14_1` | `GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend` | `GlobalSoftplusMaxSpeedBarrierCrossAttention`, one global `v_max=softplus(v_raw)`; V14's Utonia | learned K=1..3, token-position anchors, feature-only trunk |
 
 Checkpoint compatibility depends on the registered module tree, parameter
 assignment order, and tensor shapes, not on class names: Lightning checkpoints

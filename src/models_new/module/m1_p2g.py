@@ -6,13 +6,24 @@ import torch
 import torch.nn as nn
 
 from .. import utonia
+from ..utonia.adapters import (
+    adapt_utonia_stem_to_hybrid,
+    attach_utonia_ffn_adapters,
+    build_hybrid_param_groups,
+    check_param_group_coverage,
+    freeze_utonia_and_enable_hybrid,
+    hybrid_adaptation_statistics,
+    inject_selected_utonia_lora,
+    resolve_utonia_adaptation_settings,
+    set_active_adaptation_mode,
+    utonia_parameter_roles,
+)
 from ..utonia.lora import (
     adapt_utonia_embedding_to_xyzi,
     build_xyzi_utonia_input,
     freeze_utonia_and_enable_active_lora,
     inject_utonia_lora,
     resolve_utonia_lora_settings,
-    set_active_lora_mode,
 )
 from .builders import OccupiedGridTokenBuilder
 from .builders.common import GridSeedConfig, UtoniaGridMapper
@@ -30,7 +41,10 @@ def _uses_learned_count(cfg) -> bool:
 class Point2Gaus(nn.Module):
     """Point cloud to Dynamic 2D Gaussians.
 
-    Utonia runs on XYZI input with LoRA adapters on its frozen base. Every
+    Utonia runs on XYZI input with adapters on its frozen base: LoRA on every
+    Linear/SubMConv3d, or (``p2g.utonia_adaptation.mode=hybrid``, V14) an
+    intensity column and nonlinear adapters on the stem and FFNs, trainable
+    LayerNorm affine, and LoRA on attention, CPE and pooling only. Every
     occupied Utonia cell becomes one token, and the variant's backend turns the
     two endpoint frames' tokens into Gaussians with a per-token velocity. New
     configs feed each scan in its own ego frame; backend poses map those local
@@ -81,29 +95,40 @@ class Point2Gaus(nn.Module):
         self.utonia_feature_dim = self._infer_utonia_feature_dim()
 
         # Load the untouched 9D checkpoint before migrating its functional
-        # [xyz, 0, ..., 0] stem to [xyz, intensity]. Both the new intensity
-        # base column and every LoRA up projection start at zero.
-        old_input_channels = adapt_utonia_embedding_to_xyzi(self.feature_extractor)
-        self.utonia_lora_report = inject_utonia_lora(
-            self.feature_extractor, self.utonia_lora_settings
-        )
-        self.utonia_lora_trainable_parameters = (
-            freeze_utonia_and_enable_active_lora(
-                self.feature_extractor, self._active_utonia_lora_roots()
+        # [xyz, 0, ..., 0] stem to [xyz, intensity]. The new intensity column,
+        # every LoRA up projection and every adapter output start at zero.
+        self.utonia_adaptation = resolve_utonia_adaptation_settings(cfg)
+        if self.utonia_adaptation is None:
+            old_input_channels = adapt_utonia_embedding_to_xyzi(
+                self.feature_extractor
             )
-        )
-        print(
-            "Utonia LoRA: "
-            f"input={old_input_channels}->4 (xyzi), "
-            f"linear={self.utonia_lora_report.linear_modules} "
-            f"rank={self.utonia_lora_settings.linear_rank}, "
-            f"subm_conv3d={self.utonia_lora_report.conv_modules} "
-            f"rank={self.utonia_lora_settings.conv_rank}, "
-            "active_trainable="
-            f"{self.utonia_lora_trainable_parameters / 1e6:.2f}M"
-        )
+            self.utonia_lora_report = inject_utonia_lora(
+                self.feature_extractor, self.utonia_lora_settings
+            )
+            self.utonia_lora_trainable_parameters = (
+                freeze_utonia_and_enable_active_lora(
+                    self.feature_extractor, self._active_utonia_lora_roots()
+                )
+            )
+            self.utonia_trainable_parameters = (
+                self.utonia_lora_trainable_parameters
+            )
+            print(
+                "Utonia LoRA: "
+                f"input={old_input_channels}->4 (xyzi), "
+                f"linear={self.utonia_lora_report.linear_modules} "
+                f"rank={self.utonia_lora_settings.linear_rank}, "
+                f"subm_conv3d={self.utonia_lora_report.conv_modules} "
+                f"rank={self.utonia_lora_settings.conv_rank}, "
+                "active_trainable="
+                f"{self.utonia_lora_trainable_parameters / 1e6:.2f}M"
+            )
+        else:
+            self._build_hybrid_utonia_adaptation()
         self.feature_extractor.eval()
-        set_active_lora_mode(self._active_utonia_lora_roots(), self.training)
+        set_active_adaptation_mode(
+            self._active_utonia_lora_roots(), self.training
+        )
 
         self.grid_mapper = UtoniaGridMapper(
             self.utonia_coord_scale, self.utonia_input_grid_size, self.utonia_stride_factor
@@ -138,11 +163,14 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V13_2,
             DYNAMIC_VARIANT_V13_3,
             DYNAMIC_VARIANT_V13_4,
+            DYNAMIC_VARIANT_V14,
+            DYNAMIC_VARIANT_V14_1,
         )
         from .dynamic_gaussian import (
             CosineRoPEVelocityGaussianBackend,
             FinalFeatureBarrierVelocityGaussianBackend,
             FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
+            GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend,
             LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend,
             LearnableMaxSpeedBarrierVelocityGaussianBackend,
             MaxSpeedBarrierVelocityGaussianBackend,
@@ -177,6 +205,8 @@ class Point2Gaus(nn.Module):
         # restores V11.4's Q/K RMSNorm, removes the barrier, and gives every
         # head 3D RoPE so the complete stack stays on FlashAttention. V13.4
         # keeps that stack and RMSNorm but leaves match head 0 unrotated.
+        # V14 is V11.4's backend behind the hybrid Utonia adaptation, and
+        # V14.1 learns its one global barrier speed as softplus(v_raw).
         backend_cls = {
             DYNAMIC_VARIANT_V11: MaxSpeedBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V11_1: SingleGaussianBarrierVelocityGaussianBackend,
@@ -199,6 +229,10 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V13_2: RawQKRoPEVelocityGaussianBackend,
             DYNAMIC_VARIANT_V13_3: RMSNormRoPEVelocityGaussianBackend,
             DYNAMIC_VARIANT_V13_4: RMSNormFeatureRoPEVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V14: MaxSpeedBarrierVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V14_1: (
+                GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend
+            ),
         }.get(self.dynamic_variant)
         if backend_cls is None:
             raise ValueError(
@@ -223,27 +257,117 @@ class Point2Gaus(nn.Module):
             **backend_kwargs,
         )
 
+    def _build_hybrid_utonia_adaptation(self):
+        """V14's Utonia adaptation on the freshly loaded pretrained encoder.
+
+        LoRA goes onto the allow-listed attention/CPE/pooling modules of the
+        executed stages first; the split XYZI stem and the parallel FFN
+        adapters are attached afterwards, so no LoRA can land on a stem, FFN
+        or adapter Linear. Unexecuted stages receive nothing.
+        """
+        settings = self.utonia_adaptation
+        old_input_channels = adapt_utonia_stem_to_hybrid(
+            self.feature_extractor, settings
+        )
+        self.utonia_lora_report = inject_selected_utonia_lora(
+            self.feature_extractor,
+            self.utonia_feature_stage,
+            self.utonia_lora_settings,
+            settings.lora_targets,
+        )
+        self.utonia_ffn_adapter_count = attach_utonia_ffn_adapters(
+            self.feature_extractor, self.utonia_feature_stage, settings
+        )
+        self.utonia_trainable_parameters = freeze_utonia_and_enable_hybrid(
+            self.feature_extractor, self._active_utonia_lora_roots(), settings
+        )
+        self.utonia_lora_trainable_parameters = sum(
+            parameter.numel()
+            for _name, parameter in self.utonia_parameter_roles()["lora"]
+        )
+        print(
+            "Utonia hybrid adaptation: "
+            f"input={old_input_channels}->4 (xyzi), "
+            f"stem adapter 4->{settings.stem_hidden}->"
+            f"{self.feature_extractor.embedding.embed_channels} "
+            f"{settings.stem_activation}, "
+            f"intensity column trainable={settings.train_intensity_column}, "
+            f"ffn adapters={self.utonia_ffn_adapter_count} "
+            f"widths={list(settings.ffn_widths)} {settings.ffn_activation} "
+            f"scale={settings.ffn_scale:g}, "
+            f"layer_norm trainable={settings.train_layer_norm}, "
+            f"lora targets={list(settings.lora_targets)} "
+            f"linear={self.utonia_lora_report.linear_modules} "
+            f"subm_conv3d={self.utonia_lora_report.conv_modules} "
+            f"rank={self.utonia_lora_settings.linear_rank}, "
+            f"active_trainable={self.utonia_trainable_parameters:,}"
+        )
+
     def train(self, mode: bool = True):
         super().train(mode)
         # The frozen base keeps its eval-mode normalization; only the active
-        # LoRA adapters follow the requested mode.
+        # LoRA and nonlinear adapters follow the requested mode.
         if getattr(self, "freeze_utonia", False):
             self.feature_extractor.eval()
-            set_active_lora_mode(self._active_utonia_lora_roots(), mode)
+            set_active_adaptation_mode(self._active_utonia_lora_roots(), mode)
         return self
+
+    def _active_utonia_named_roots(self):
+        """``(name, module)`` for the embedding and every executed stage."""
+        roots = [("embedding", self.feature_extractor.embedding)]
+        roots.extend(
+            (f"enc.enc{index}", self.feature_extractor.enc[index])
+            for index in range(self.utonia_feature_stage + 1)
+        )
+        return roots
+
+    def utonia_parameter_roles(self):
+        """Trainable Utonia parameters by optimizer role (see adapters.py)."""
+        return utonia_parameter_roles(self._active_utonia_named_roots())
+
+    def optimizer_param_groups(self, train_cfg):
+        """What ``configure_optimizers`` hands to AdamW.
+
+        All-linear LoRA variants keep their historical single group: the flat
+        list of trainable parameters in module order, so their optimizer state
+        and resume behaviour are unchanged. The hybrid adaptation returns one
+        group per Utonia role plus a last ``downstream`` group, and checks that
+        every trainable parameter sits in exactly one of them.
+        """
+        trainable = [
+            (name, parameter)
+            for name, parameter in self.named_parameters()
+            if parameter.requires_grad
+        ]
+        if self.utonia_adaptation is None:
+            return [parameter for _name, parameter in trainable]
+        downstream = [
+            (name, parameter)
+            for name, parameter in self.named_parameters()
+            if not name.startswith("feature_extractor.")
+        ]
+        groups = build_hybrid_param_groups(
+            self._active_utonia_named_roots(), downstream, train_cfg
+        )
+        check_param_group_coverage(groups, trainable)
+        return groups
+
+    def utonia_adaptation_statistics(self):
+        """Hybrid-adaptation magnitudes from the last forward ({} otherwise)."""
+        if self.utonia_adaptation is None:
+            return {}
+        return hybrid_adaptation_statistics(
+            self.feature_extractor, self.utonia_feature_stage
+        )
 
     def _active_utonia_lora_roots(self):
         """Modules executed by the configured early-exit encoder stage.
 
-        Adapters are installed throughout Utonia, but stages after the selected
-        feature stage stay frozen so DDP never sees trainable unused parameters.
+        All-linear LoRA installs adapters throughout Utonia, but stages after
+        the selected feature stage stay frozen so DDP never sees trainable
+        unused parameters. The hybrid adaptation installs nothing there.
         """
-        roots = [self.feature_extractor.embedding]
-        roots.extend(
-            self.feature_extractor.enc[index]
-            for index in range(self.utonia_feature_stage + 1)
-        )
-        return roots
+        return [module for _name, module in self._active_utonia_named_roots()]
 
     def _validate_utonia_feature_stage(self):
         max_stage = len(self.feature_extractor.enc) - 1
