@@ -23,16 +23,26 @@ from .dynamic.temporal import (
     RMSNormFeatureRoPELayerWeightedCrossAttention,
     RMSNormRoPELayerWeightedCrossAttention,
 )
+from .dynamic.gaussian_slots import DenseCountGaussianHead
 from .dynamic.heads import EmbeddedInitVelocityHead, GaussianAttributeHead
+from .dynamic.local_attention import RadiusLocalAttentionBlock
+from .dynamic.nested_count import NestedCountGaussianHead, RoutedCountGaussianHead
+from .dynamic.option_experts import OptionExpertGaussianHead
+from .dynamic.ordinal_count import CosineGateLayer, OrdinalCountGaussianHead
 from .dynamic.backends import (
     CosineRoPEVelocityGaussianBackend,
+    DenseCountBarrierVelocityGaussianBackend,
     DynamicGaussianBackend,
     FinalFeatureBarrierVelocityGaussianBackend,
     FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
     GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend,
     LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend,
     LearnableMaxSpeedBarrierVelocityGaussianBackend,
+    LocalAttentionBarrierVelocityGaussianBackend,
     MaxSpeedBarrierVelocityGaussianBackend,
+    NestedCountBarrierVelocityGaussianBackend,
+    OptionExpertBarrierVelocityGaussianBackend,
+    OrdinalCountBarrierVelocityGaussianBackend,
     RawQKRoPEVelocityGaussianBackend,
     RMSNormFeatureRoPEVelocityGaussianBackend,
     RMSNormRoPEVelocityGaussianBackend,
@@ -45,8 +55,11 @@ from .dynamic.trajectory import DynamicGausTemp
 
 __all__ = [
     "BidirectionalCrossAttentionBase",
+    "CosineGateLayer",
     "CosineRoPELayerWeightedCrossAttention",
     "CosineRoPEVelocityGaussianBackend",
+    "DenseCountBarrierVelocityGaussianBackend",
+    "DenseCountGaussianHead",
     "DynamicGaussianBackend",
     "DynamicGausTemp",
     "EmbeddedInitVelocityHead",
@@ -64,14 +77,23 @@ __all__ = [
     "LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend",
+    "LocalAttentionBarrierVelocityGaussianBackend",
     "MaxSpeedBarrierLayerWeightedCrossAttention",
     "MaxSpeedBarrierVelocityGaussianBackend",
+    "NestedCountBarrierVelocityGaussianBackend",
+    "NestedCountGaussianHead",
+    "OptionExpertBarrierVelocityGaussianBackend",
+    "OptionExpertGaussianHead",
+    "OrdinalCountBarrierVelocityGaussianBackend",
+    "OrdinalCountGaussianHead",
+    "RadiusLocalAttentionBlock",
     "RawQKRoPELayerWeightedCrossAttention",
     "RawQKRoPEVelocityGaussianBackend",
     "RMSNormFeatureRoPELayerWeightedCrossAttention",
     "RMSNormFeatureRoPEVelocityGaussianBackend",
     "RMSNormRoPELayerWeightedCrossAttention",
     "RMSNormRoPEVelocityGaussianBackend",
+    "RoutedCountGaussianHead",
     "RouterCapableGaussianBackend",
     "SeedConditionedBarrierVelocityGaussianBackend",
     "SeedConditionedCosineRoPEVelocityGaussianBackend",

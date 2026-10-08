@@ -37,15 +37,19 @@ def forward_loss(model, batch):
     source, target = batch["input"], batch["gt"]
     p2g = model.p2g_model(source)
     p2g.pop("routing_stats", None)
+    # V15 in training mode also emits every token's G1..G3; its objective is
+    # the mean of that render's loss and the routed render's.
+    auxiliary = p2g.pop("auxiliary_batch_gaussians", None)
     gaussians = model.g2g_model(
         p2g,
         source["timestamps_sec"],
         source["window_duration_sec"],
     )
+    compute_points = float(model.cfg.loss.w_chamfer) > 0.0
     renders = model.g2p_model(
         gaussians,
         target,
-        compute_points=float(model.cfg.loss.w_chamfer) > 0.0,
+        compute_points=compute_points,
     )
     losses = model.loss(
         renders,
@@ -54,6 +58,15 @@ def forward_loss(model, batch):
         compute_valid_metrics=False,
         compute_raydrop_metrics=False,
     )
+    if auxiliary is not None:
+        model._average_auxiliary_render_loss(
+            losses,
+            auxiliary,
+            source,
+            target,
+            prefix="train",
+            compute_points=compute_points,
+        )
     return losses, gaussians
 
 
@@ -62,6 +75,7 @@ def forward_memory_probe(model, batch):
     source = batch["input"]
     p2g = model.p2g_model(source)
     p2g.pop("routing_stats", None)
+    p2g.pop("auxiliary_batch_gaussians", None)
     gaussians = model.g2g_model(
         p2g,
         source["timestamps_sec"],
@@ -272,11 +286,14 @@ def main():
         if parameter.requires_grad
     ]
     # The run's own groups: --lr replaces train.lr, which is the whole flat
-    # list for all-linear LoRA and only the downstream group for the hybrid
-    # adaptation, whose Utonia roles keep their configured rates.
+    # list for all-linear LoRA and only the downstream groups for the hybrid
+    # adaptation (V15 also splits off downstream_no_decay at train.lr),
+    # whose Utonia roles keep their configured rates.
     param_groups = p2g.optimizer_param_groups(cfg.train)
     for group in param_groups:
-        if isinstance(group, dict) and group.get("name") == "downstream":
+        if isinstance(group, dict) and group.get("name") in (
+            "downstream", "downstream_no_decay",
+        ):
             group["lr"] = args.lr
     optimizer = torch.optim.AdamW(
         param_groups,
@@ -492,13 +509,34 @@ def main():
         final_post_update = float(final_losses["total"])
         zero_velocity_total = float(zero_losses["total"])
         temporal = model.p2g_model.dynamic_backend.temporal
-        saved_scales = [scale.detach().clone() for scale in temporal.cross_layer_scale]
-        for scale in temporal.cross_layer_scale:
-            scale.zero_()
-        no_cross_losses, _no_cross_gaussians = forward_loss(model, batch)
-        no_cross_total = float(no_cross_losses["total"])
-        for scale, saved in zip(temporal.cross_layer_scale, saved_scales):
-            scale.copy_(saved)
+        if temporal.cross_layer_scale is not None:
+            saved_scales = [
+                scale.detach().clone() for scale in temporal.cross_layer_scale
+            ]
+            for scale in temporal.cross_layer_scale:
+                scale.zero_()
+            no_cross_losses, _no_cross_gaussians = forward_loss(model, batch)
+            no_cross_total = float(no_cross_losses["total"])
+            for scale, saved in zip(temporal.cross_layer_scale, saved_scales):
+                scale.copy_(saved)
+        else:
+            # No LayerScale gate to zero (V15): zeroing every out_proj removes
+            # the attention branch just the same.
+            saved_projections = [
+                (projection.weight.detach().clone(),
+                 projection.bias.detach().clone())
+                for projection in temporal.out_proj
+            ]
+            for projection in temporal.out_proj:
+                projection.weight.zero_()
+                projection.bias.zero_()
+            no_cross_losses, _no_cross_gaussians = forward_loss(model, batch)
+            no_cross_total = float(no_cross_losses["total"])
+            for projection, (weight, bias) in zip(
+                temporal.out_proj, saved_projections
+            ):
+                projection.weight.copy_(weight)
+                projection.bias.copy_(bias)
 
     summary = {
         "batch_size": args.batch_size,

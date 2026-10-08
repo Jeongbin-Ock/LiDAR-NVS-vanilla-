@@ -18,9 +18,10 @@ from src.models_new.utils.loss import (
 from src.models_new.utils.routing_logging import (
     distributed_sum_statistics,
     range_bin_labels,
+    routing_option_counts,
     routing_sufficient_statistics,
 )
-from src.config_loader import DYNAMIC_VARIANTS
+from src.config_loader import DYNAMIC_VARIANTS, ROUTED_COUNT_BLOCKS
 
 WANDB_BASE_LOSS_KEYS = {
     "loss_depth",
@@ -46,6 +47,19 @@ WANDB_BASE_LOSS_KEYS = {
 
 # Already reduced over every rank's tokens inside the loss, so their forward
 # values are identical on all ranks and need no logging collective.
+# V15 and V15.2 train on two renders: the routed set, whose terms keep the
+# ordinary keys, and a router-free set (V15: every token's G1..G3; V15.2: every
+# token's E5). ``aux_*`` are the second render's terms and ``routed_total`` the
+# first render's total before the two are averaged.
+AUXILIARY_RENDER_LOSS_KEYS = (
+    "loss_depth",
+    "loss_depth_median",
+    "loss_intensity",
+    "loss_raydrop",
+    "loss_chamfer",
+    "total",
+)
+
 GLOBAL_REDUCED_LOSS_KEYS = {
     "loss_velocity_l2",
     "loss_velocity_l2_init",
@@ -59,10 +73,12 @@ def _per_token_rows(item, field):
     Motion is predicted per token and copied onto each of that token's
     Gaussians. A fixed count gives every token the same number of identical
     copies, so a mean over Gaussians is already the token mean, in value and in
-    gradient. The adaptive-K router gives a token K={1,2,3} copies, and the same
-    mean would charge a K=3 token three times what a K=1 token pays for the
-    same velocity. Router items carry ``gaussian_slot_index``, and every token
-    owns exactly one slot-0 Gaussian, so keeping slot 0 counts each token once.
+    gradient. The adaptive-K router gives a token K={1,2,3} copies (the V15
+    family's routers 1, 3 or 5), and the same mean would charge a large-K token
+    more than a K=1 token pays for the same velocity. Router items carry
+    ``gaussian_slot_index``, and every token owns exactly one slot-0 Gaussian
+    (V15's and V16's G1, the first Gaussian of V15.2's chosen expert), so
+    keeping slot 0 counts each token once.
     """
     value = item[field]
     slot = item.get("gaussian_slot_index")
@@ -106,7 +122,17 @@ class ModelWrapper(LightningModule):
         # Gradient accumulation repeats one global_step across several batches;
         # this makes the sparse train metric fire once per optimizer step.
         self._last_train_metric_step = -1
-        learned_count_block = "p2g.grid_query.learned_count"
+        # The learned_gumbel router and the V15 family's routers (V15's nested
+        # prefixes, V15.2's per-option experts) keep the same logging block
+        # under their own count config.
+        learned_count_block = next(
+            (
+                f"p2g.grid_query.{block}"
+                for block in ROUTED_COUNT_BLOCKS.values()
+                if self._cfg_get(f"p2g.grid_query.{block}") is not None
+            ),
+            "p2g.grid_query.learned_count",
+        )
         self._routing_logging_enable = bool(self._cfg_get(
             f"{learned_count_block}.logging.enable", False
         ))
@@ -125,6 +151,21 @@ class ModelWrapper(LightningModule):
         range_bin_labels(self._routing_range_edges)
         self._last_train_routing_step = -1
         self._wandb_loss_keys = set(WANDB_BASE_LOSS_KEYS)
+        # The router-free second render may use a random subset of each
+        # window's target views (V15.2: two); null renders every view.
+        auxiliary_views = self._cfg_get(f"{learned_count_block}.auxiliary_views")
+        self._auxiliary_views = (
+            None if auxiliary_views is None else int(auxiliary_views)
+        )
+        # Every routed V15-family block names its router-free second render;
+        # ``none`` (V15.1) and the other count blocks render once.
+        if str(self._cfg_get(
+            f"{learned_count_block}.auxiliary_render", "none"
+        )).lower() != "none":
+            self._wandb_loss_keys.update(
+                f"aux_{key}" for key in AUXILIARY_RENDER_LOSS_KEYS
+            )
+            self._wandb_loss_keys.add("routed_total")
         regularization = getattr(self.dynamic_cfg, "regularization", None)
         velocity_l2 = getattr(regularization, "velocity_l2", None)
         self._velocity_l2_cfg = (
@@ -163,7 +204,6 @@ class ModelWrapper(LightningModule):
     def training_step(self, batch, batch_idx):
         return self._shared_step(batch, batch_idx, prefix="train")
 
-
     def test_step(self, batch, batch_idx):
         return self._shared_step(batch, batch_idx, prefix="test")
 
@@ -180,16 +220,19 @@ class ModelWrapper(LightningModule):
         p2g_out = self.p2g_model(_input)
         # Keep detached diagnostics outside the renderer/temporal model input.
         routing_stats = p2g_out.pop("routing_stats", None)
+        # Only V15, V15.2 and V16 emit this second Gaussian set, in training only.
+        auxiliary_gaussians = p2g_out.pop("auxiliary_batch_gaussians", None)
         out = self.g2g_model(
             p2g_out,
             _input["timestamps_sec"],
             _input["window_duration_sec"],
         )
         compute_train_points = float(self.cfg.loss.w_chamfer) > 0.0
+        compute_points = prefix != "train" or compute_train_points
         all_renders = self.g2p_model(
             out,
             gt,
-            compute_points=(prefix != "train" or compute_train_points),
+            compute_points=compute_points,
         )
 
         loss_dict = self.loss(
@@ -199,6 +242,15 @@ class ModelWrapper(LightningModule):
             compute_valid_metrics=compute_valid_metrics,
             compute_raydrop_metrics=compute_official_metrics,
         )
+        if auxiliary_gaussians is not None:
+            self._average_auxiliary_render_loss(
+                loss_dict,
+                auxiliary_gaussians,
+                _input,
+                gt,
+                prefix=prefix,
+                compute_points=compute_points,
+            )
         self._add_dynamic_motion_regularization(loss_dict, out, prefix=prefix)
         self._log_losses(loss_dict, prefix=prefix, batch_size=self._batch_size(_input))
         self._log_routing_stats(routing_stats, prefix=prefix)
@@ -208,6 +260,71 @@ class ModelWrapper(LightningModule):
             self._record_eval_summary(loss_dict, batch_idx=batch_idx, prefix=prefix)
 
         return loss_dict["total"]
+
+    def _average_auxiliary_render_loss(
+        self, losses, auxiliary_gaussians, _input, gt, *, prefix,
+        compute_points,
+    ):
+        """Optimize the mean of the routed and the router-free render losses.
+
+        A V15-family router decides which of a token's Gaussians are rendered
+        (V15/V16: a prefix of G1..G5; V15.2: one of the experts E1/E3/E5), and
+        that routed set stays the render every metric, validation and the test
+        script see; V16's training renders it as every G1..G5 under blend
+        masks. During training the backend also emits a router-free set (V15:
+        every token's keep prefix G1..G3; V15.2: every token's E5; V16: every
+        token's G1..G5), so the decoder is supervised on every token at every
+        step. Both sets share one forward pass, velocity and target views; the
+        optimized render loss is ``0.5 * (routed + router-free)``, and the
+        velocity prior is added once afterwards, exactly as for a single
+        render. The router-free set is rendered at every target view, or at
+        ``auxiliary_views`` of them per window (see
+        ``_auxiliary_render_targets``).
+        """
+        auxiliary = self.g2g_model(
+            {"batch_gaussians": auxiliary_gaussians},
+            _input["timestamps_sec"],
+            _input["window_duration_sec"],
+        )
+        renders = self.g2p_model(
+            auxiliary, self._auxiliary_render_targets(gt),
+            compute_points=compute_points,
+        )
+        auxiliary_losses = self.loss(
+            renders,
+            gaussians=auxiliary,
+            metric_mode=prefix,
+            compute_valid_metrics=False,
+            compute_raydrop_metrics=False,
+        )
+        for key in AUXILIARY_RENDER_LOSS_KEYS:
+            if key in auxiliary_losses:
+                losses[f"aux_{key}"] = auxiliary_losses[key].detach()
+        losses["routed_total"] = losses["total"].detach()
+        losses["total"] = 0.5 * (losses["total"] + auxiliary_losses["total"])
+
+    def _auxiliary_render_targets(self, gt):
+        """The target views the router-free set is rendered at.
+
+        With ``auxiliary_views = k`` every window keeps k distinct target
+        views drawn uniformly from all of its targets -- input endpoints and
+        novel sweeps alike -- in time order; a window with at most k targets
+        keeps them all, and ``None`` keeps every view. Because each view is
+        equally likely, the auxiliary loss keeps its all-view expectation up to
+        the pooled-pixel normalization of its means, while the render costs
+        k views instead of all of them.
+        """
+        if self._auxiliary_views is None:
+            return gt
+        cameras = gt["cameras"] if isinstance(gt, dict) else gt
+        sampled = []
+        for window in cameras:
+            window = list(window)
+            if len(window) > self._auxiliary_views:
+                keep = torch.randperm(len(window))[:self._auxiliary_views]
+                window = [window[index] for index in sorted(keep.tolist())]
+            sampled.append(window)
+        return {**gt, "cameras": sampled} if isinstance(gt, dict) else sampled
 
     def _add_dynamic_motion_regularization(self, losses, gaussians, *, prefix):
         """Apply the configured motion prior and log runaway diagnostics."""
@@ -243,9 +360,11 @@ class ModelWrapper(LightningModule):
     def _log_utonia_adaptation(self, *, prefix: str) -> None:
         """Hybrid Utonia adaptation magnitudes from this step's forward.
 
-        ``stem_{xyz,intensity,adapter}_rms`` are the three pre-LN stem
-        summands (frozen XYZ projection, trained intensity column, nonlinear
-        adapter); ``ffn_adapter_rms_ratio_enc{s}`` is the scaled adapter output
+        ``stem_{xyz,intensity}_rms`` are the frozen XYZ projection and the
+        trained intensity column before the stem LayerNorm. ``stem_adapter_rms``
+        is the nonlinear stem adapter's output: pre-LN in V14/V14.1, and in V15
+        added after the GELU, next to ``stem_activation_rms`` (the GELU output
+        it is added to). ``ffn_adapter_rms_ratio_enc{s}`` is the scaled adapter output
         RMS over the frozen FFN output RMS, averaged over stage ``s``'s blocks.
         All-linear LoRA variants log nothing here.
         """
@@ -526,16 +645,33 @@ class ModelWrapper(LightningModule):
             "argmax/mean_k",
             statistics["argmax_k_sum"] / unit_count,
         )
-        k_max = int(statistics["selected_counts"].numel())
-        for index in range(k_max):
-            k = index + 1
+        log_value(
+            "expected/mean_k",
+            statistics["expected_k_sum"] / unit_count,
+        )
+        log_value(
+            "logit_margin_mean",
+            statistics["logit_margin_sum"] / unit_count,
+        )
+        # Options are labelled by the Gaussian count they render: k1..k3 for
+        # the learned_gumbel router, k1/k3/k5 for the V15 family's
+        # reduce/keep/add.
+        option_counts = routing_option_counts(
+            routing, int(statistics["selected_counts"].numel())
+        ).tolist()
+        for index, count in enumerate(option_counts):
+            label = f"k{int(count)}"
             log_value(
-                f"sampled/frac_k{k}",
+                f"sampled/frac_{label}",
                 statistics["selected_counts"][index] / unit_count,
             )
             log_value(
-                f"argmax/frac_k{k}",
+                f"argmax/frac_{label}",
                 statistics["argmax_counts"][index] / unit_count,
+            )
+            log_value(
+                f"probability/mean_{label}",
+                statistics["probability_sums"][index] / unit_count,
             )
 
         range_labels = range_bin_labels(self._routing_range_edges)

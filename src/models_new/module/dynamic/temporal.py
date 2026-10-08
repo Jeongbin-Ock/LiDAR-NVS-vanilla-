@@ -53,7 +53,9 @@ class BidirectionalCrossAttentionBase(nn.Module):
         Input norm, the four attention projections, the LayerScale gate, and a
         zero-initialized FFN, all built in the one order the saved checkpoints
         expect. Variants differ only in how the scores are formed, never in
-        which parameters exist here.
+        which parameters exist here. ``layer_scale: false`` (V15) is the one
+        structural switch: it builds no gate at all, so the out_proj branch is
+        added to the residual stream as is.
         """
         hidden = int(self.dim * self.mlp_ratio)
         self.input_norm = nn.ModuleList([
@@ -71,13 +73,26 @@ class BidirectionalCrossAttentionBase(nn.Module):
         self.out_proj = nn.ModuleList([
             nn.Linear(self.dim, self.dim) for _ in range(self.n_layers)
         ])
-        layer_scale_init = float(_cfg_get(cfg, "layer_scale_init", 0.1))
-        if not 0.0 < layer_scale_init <= 1.0:
-            raise ValueError("dynamic temporal layer_scale_init must be in (0,1]")
-        self.cross_layer_scale = nn.ParameterList([
-            nn.Parameter(torch.full((self.dim,), layer_scale_init))
-            for _ in range(self.n_layers)
-        ])
+        layer_scale = _cfg_get(cfg, "layer_scale", True)
+        if not isinstance(layer_scale, bool):
+            raise ValueError("dynamic temporal layer_scale must be true or false")
+        if layer_scale:
+            layer_scale_init = float(_cfg_get(cfg, "layer_scale_init", 0.1))
+            if not 0.0 < layer_scale_init <= 1.0:
+                raise ValueError(
+                    "dynamic temporal layer_scale_init must be in (0,1]"
+                )
+            self.cross_layer_scale = nn.ParameterList([
+                nn.Parameter(torch.full((self.dim,), layer_scale_init))
+                for _ in range(self.n_layers)
+            ])
+        else:
+            if _cfg_get(cfg, "layer_scale_init", None) is not None:
+                raise ValueError(
+                    "dynamic temporal layer_scale=false has no LayerScale to "
+                    "initialize; drop layer_scale_init"
+                )
+            self.cross_layer_scale = None
         self.ffn_norm = nn.ModuleList([
             nn.LayerNorm(self.dim) for _ in range(self.n_layers)
         ])
@@ -94,6 +109,16 @@ class BidirectionalCrossAttentionBase(nn.Module):
         for ffn in self.ffn:
             nn.init.zeros_(ffn[-1].weight)
             nn.init.zeros_(ffn[-1].bias)
+
+    def _cross_branch(self, layer, branch):
+        """The cross-attention branch as layer ``layer`` adds it to the residual.
+
+        Gated by the layer's LayerScale ``gamma_l``, or as is when the stack
+        was built without LayerScale.
+        """
+        if self.cross_layer_scale is None:
+            return branch
+        return self.cross_layer_scale[layer] * branch
 
     @staticmethod
     def _frame_layout(token_offset, frame_batch_idx):
@@ -628,8 +653,8 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
             attended = torch.cat(
                 [match_attended.unsqueeze(1), rope_attended], dim=1
             ).reshape(n_tokens, self.dim).to(snapshot.dtype)
-            x = snapshot + self.cross_layer_scale[layer] * self.out_proj[layer](
-                attended
+            x = snapshot + self._cross_branch(
+                layer, self.out_proj[layer](attended)
             )
             x = x + self.ffn[layer](self.ffn_norm[layer](x))
 
@@ -961,8 +986,8 @@ class FinalFeatureBarrierCrossAttention(
                 attended = self._sdpa_attention(*attended_inputs)
 
             attended = attended.reshape(n_tokens, self.dim).to(snapshot.dtype)
-            x = snapshot + self.cross_layer_scale[layer] * self.out_proj[layer](
-                attended
+            x = snapshot + self._cross_branch(
+                layer, self.out_proj[layer](attended)
             )
             x = x + self.ffn[layer](self.ffn_norm[layer](x))
 
@@ -1648,8 +1673,8 @@ class CosineRoPELayerWeightedCrossAttention(
             attended_feature = attended[..., :self.head_dim].reshape(
                 n_tokens, self.dim
             ).to(snapshot.dtype)
-            x = snapshot + self.cross_layer_scale[layer] * self.out_proj[layer](
-                attended_feature
+            x = snapshot + self._cross_branch(
+                layer, self.out_proj[layer](attended_feature)
             )
             x = x + self.ffn[layer](self.ffn_norm[layer](x))
 

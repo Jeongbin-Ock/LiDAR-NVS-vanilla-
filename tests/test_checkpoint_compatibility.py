@@ -19,6 +19,7 @@ from omegaconf import OmegaConf
 
 from src.config_loader import (
     DYNAMIC_VARIANTS,
+    ROUTED_COUNT_BLOCKS,
     compose_fresh_config,
 )
 
@@ -74,6 +75,21 @@ _BACKEND_CLASS = {
     ),
     "dynamic_2dgs_attention_velocity_v14_1": (
         "GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend"
+    ),
+    "dynamic_2dgs_attention_velocity_v15": (
+        "NestedCountBarrierVelocityGaussianBackend"
+    ),
+    "dynamic_2dgs_attention_velocity_v15_1": (
+        "NestedCountBarrierVelocityGaussianBackend"
+    ),
+    "dynamic_2dgs_attention_velocity_v15_2": (
+        "OptionExpertBarrierVelocityGaussianBackend"
+    ),
+    "dynamic_2dgs_attention_velocity_v15_3": (
+        "DenseCountBarrierVelocityGaussianBackend"
+    ),
+    "dynamic_2dgs_attention_velocity_v16": (
+        "OrdinalCountBarrierVelocityGaussianBackend"
     ),
 }
 
@@ -168,6 +184,32 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v14_1": (
         "81ff74b836e5d501ae22", "e6eb26eaef8f1c0b77d3"
     ),
+    # V15 keeps V14.1's temporal parameters, v_raw included, without the
+    # per-layer LayerScale gates; swaps GridSlotHead for the nested G1..G5 head
+    # (decoder and a 256/128 router, each behind its own LayerNorm); keeps the
+    # velocity head; and appends one radius local-attention block.
+    "dynamic_2dgs_attention_velocity_v15": (
+        "b104c12785ea21ef2180", "be541a7d2f4d71a3c4fc"
+    ),
+    # V15.1 drops only V15's second training render, which owns no parameter,
+    # so its checkpoint and optimizer schemas are exactly V15's.
+    "dynamic_2dgs_attention_velocity_v15_1": (
+        "b104c12785ea21ef2180", "be541a7d2f4d71a3c4fc"
+    ),
+    # V15.2 keeps V15's backend and router and replaces the head's decoder with
+    # a shared trunk and three per-option experts (E1, E3, E5).
+    "dynamic_2dgs_attention_velocity_v15_2": (
+        "76303187e805cc7f997f", "dac67a1efead903e18ca"
+    ),
+    # V15.3 keeps V15's backend and decoder and has no router.
+    "dynamic_2dgs_attention_velocity_v15_3": (
+        "f2b456dc5cd89feb5c00", "ceac3d77acf6877837cd"
+    ),
+    # V16 is V15 with the router's last layer swapped for two bias-free cosine
+    # gates: router.4 holds one (2, 128) weight instead of (3, 128) + bias.
+    "dynamic_2dgs_attention_velocity_v16": (
+        "db3159b8dc10ce6df033", "8404a6a2e2418a971004"
+    ),
 }
 
 
@@ -207,6 +249,18 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend": "backends",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention": "temporal",
     "LearnableMaxSpeedBarrierVelocityGaussianBackend": "backends",
+    "LocalAttentionBarrierVelocityGaussianBackend": "backends",
+    "NestedCountBarrierVelocityGaussianBackend": "backends",
+    "NestedCountGaussianHead": "nested_count",
+    "RoutedCountGaussianHead": "nested_count",
+    "OptionExpertBarrierVelocityGaussianBackend": "backends",
+    "OptionExpertGaussianHead": "option_experts",
+    "OrdinalCountBarrierVelocityGaussianBackend": "backends",
+    "OrdinalCountGaussianHead": "ordinal_count",
+    "CosineGateLayer": "ordinal_count",
+    "DenseCountBarrierVelocityGaussianBackend": "backends",
+    "DenseCountGaussianHead": "gaussian_slots",
+    "RadiusLocalAttentionBlock": "local_attention",
     "RawQKRoPELayerWeightedCrossAttention": "temporal",
     "RawQKRoPEVelocityGaussianBackend": "backends",
     "RMSNormRoPELayerWeightedCrossAttention": "temporal",
@@ -230,6 +284,15 @@ def _build_backend(variant):
         kwargs["gaussian_count_cfg"] = count
         seed_mode = OmegaConf.select(
             config, "p2g.grid_query.learned_count.seed_mode"
+        )
+    elif count is not None and count_mode in ROUTED_COUNT_BLOCKS:
+        # V15/V15.1, V15.2 and V16: one shared token anchor per token; the
+        # router, not the seed contract, decides how many Gaussians are rendered.
+        kwargs["gaussian_count_cfg"] = count
+        kwargs["gaussians_per_token"] = 1
+        seed_mode = OmegaConf.select(
+            config,
+            f"p2g.grid_query.{ROUTED_COUNT_BLOCKS[count_mode]}.seed_mode",
         )
     else:
         kwargs["gaussians_per_token"] = int(getattr(count, "K_max", 1))
@@ -368,6 +431,175 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
         self.assertAlmostEqual(backend.offset_bound, 0.4)
         self.assertEqual(backend.temporal.barrier_exponent, 1)
         self.assertEqual(backend.temporal.barrier_weight, 1.0)
+
+    def test_v15_drops_layer_scale_and_appends_local_attention(self):
+        v14_1 = _build_backend("dynamic_2dgs_attention_velocity_v14_1")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v15")
+        self.assertIs(
+            type(backend),
+            _DYNAMIC.NestedCountBarrierVelocityGaussianBackend,
+        )
+        names = [name for name, _ in backend.named_parameters()]
+        v14_1_names = [name for name, _ in v14_1.named_parameters()]
+        self.assertEqual(
+            [name for name in names if name.startswith("temporal.")],
+            [
+                name for name in v14_1_names
+                if name.startswith("temporal.")
+                and "cross_layer_scale" not in name
+            ],
+        )
+        self.assertEqual(
+            [name for name in names if name.startswith("velocity_head.")],
+            [name for name in v14_1_names if name.startswith("velocity_head.")],
+        )
+        top_level = []
+        for name in names:
+            root = name.split(".")[0]
+            if root not in top_level:
+                top_level.append(root)
+        self.assertEqual(
+            top_level,
+            ["temporal", "gaussian_head", "velocity_head", "local_attention"],
+        )
+        self.assertIsNone(backend.temporal.cross_layer_scale)
+        torch.testing.assert_close(
+            backend.temporal.v_max.detach(), torch.tensor(30.0)
+        )
+        self.assertEqual(backend.seed_mode, "token")
+        head = backend.gaussian_head
+        self.assertEqual(head.option_counts, (1, 3, 5))
+        self.assertEqual(head.auxiliary_render, "dense_keep")
+        self.assertIsNot(head.router_norm, head.decoder_norm)
+        self.assertEqual(
+            [layer.out_features for layer in head.decoder
+             if isinstance(layer, torch.nn.Linear)],
+            [576, 5 * 42],
+        )
+        self.assertEqual(
+            [layer.out_features for layer in head.router
+             if isinstance(layer, torch.nn.Linear)],
+            [256, 128, 3],
+        )
+        self.assertEqual(backend.local_attention.radius_m, 0.8)
+
+    def test_v15_1_is_v15_without_the_auxiliary_render(self):
+        v15 = _build_backend("dynamic_2dgs_attention_velocity_v15")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v15_1")
+        self.assertIs(type(backend), type(v15))
+        self.assertEqual(
+            [(name, tuple(value.shape)) for name, value in backend.state_dict().items()],
+            [(name, tuple(value.shape)) for name, value in v15.state_dict().items()],
+        )
+        self.assertEqual(v15.gaussian_head.auxiliary_render, "dense_keep")
+        self.assertEqual(backend.gaussian_head.auxiliary_render, "none")
+
+    def test_v15_2_swaps_the_nested_decoder_for_option_experts(self):
+        v15 = _build_backend("dynamic_2dgs_attention_velocity_v15")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v15_2")
+        self.assertIs(
+            type(backend), _DYNAMIC.OptionExpertBarrierVelocityGaussianBackend
+        )
+        names = [name for name, _ in backend.named_parameters()]
+        v15_names = [name for name, _ in v15.named_parameters()]
+        # Everything outside the head's decoder is V15's, in V15's order.
+        self.assertEqual(
+            [name for name in names if not name.startswith(
+                ("gaussian_head.trunk.", "gaussian_head.experts.")
+            )],
+            [name for name in v15_names if not name.startswith(
+                "gaussian_head.decoder."
+            )],
+        )
+        head = backend.gaussian_head
+        self.assertIsInstance(head, _DYNAMIC.OptionExpertGaussianHead)
+        self.assertEqual(head.option_counts, (1, 3, 5))
+        self.assertEqual(head.auxiliary_render, "dense_add")
+        self.assertEqual(head.auxiliary_count, 5)
+        self.assertEqual(head.trunk[0].out_features, 576)
+        self.assertEqual(
+            [expert.out_features for expert in head.experts], [42, 126, 210]
+        )
+        self.assertEqual(
+            {expert.in_features for expert in head.experts}, {576}
+        )
+        self.assertEqual(
+            [layer.out_features for layer in head.router
+             if isinstance(layer, torch.nn.Linear)],
+            [256, 128, 3],
+        )
+        self.assertIsNot(head.router_norm, head.decoder_norm)
+        self.assertEqual(backend.local_attention.radius_m, 0.8)
+        self.assertIsNone(backend.temporal.cross_layer_scale)
+
+    def test_v15_3_is_v15s_decoder_without_the_router(self):
+        v15 = _build_backend("dynamic_2dgs_attention_velocity_v15")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v15_3")
+        self.assertIs(
+            type(backend), _DYNAMIC.DenseCountBarrierVelocityGaussianBackend
+        )
+        self.assertFalse(backend.adaptive_count)
+        self.assertEqual(backend.gaussians_per_token, 5)
+        self.assertEqual(backend.seed_mode, "token")
+        self.assertFalse(backend.seed_conditioned_head)
+        # V15's module tree minus the router: same names, shapes and order.
+        v15_schema = [
+            (name, tuple(value.shape))
+            for name, value in v15.state_dict().items()
+            if not name.startswith(("gaussian_head.router", "gaussian_head.router_norm"))
+        ]
+        self.assertEqual(
+            [(name, tuple(value.shape)) for name, value in backend.state_dict().items()],
+            v15_schema,
+        )
+        head = backend.gaussian_head
+        self.assertIsInstance(head, _DYNAMIC.DenseCountGaussianHead)
+        self.assertEqual(
+            [layer.out_features for layer in head.decoder
+             if isinstance(layer, torch.nn.Linear)],
+            [576, 5 * 42],
+        )
+
+    def test_v16_is_v15_with_two_bounded_ordinal_gates(self):
+        v15 = _build_backend("dynamic_2dgs_attention_velocity_v15")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v16")
+        self.assertIs(
+            type(backend), _DYNAMIC.OrdinalCountBarrierVelocityGaussianBackend
+        )
+        last = "gaussian_head.router.4."
+        schema = [
+            (name, tuple(value.shape))
+            for name, value in backend.state_dict().items()
+        ]
+        v15_schema = [
+            (name, tuple(value.shape))
+            for name, value in v15.state_dict().items()
+        ]
+        # Everything but the router's last layer is V15's, in V15's order.
+        self.assertEqual(
+            [item for item in schema if not item[0].startswith(last)],
+            [item for item in v15_schema if not item[0].startswith(last)],
+        )
+        self.assertEqual(
+            [item for item in schema if item[0].startswith(last)],
+            [(last + "weight", (2, 128))],
+        )
+        head = backend.gaussian_head
+        self.assertIsInstance(head, _DYNAMIC.OrdinalCountGaussianHead)
+        self.assertIsInstance(head.router[-1], _DYNAMIC.CosineGateLayer)
+        self.assertEqual(head.router[-1].scale, 3.0)
+        self.assertEqual(head.router_scale, 3.0)
+        self.assertEqual(head.option_counts, (1, 3, 5))
+        self.assertEqual(head.auxiliary_render, "dense_add")
+        self.assertEqual(head.auxiliary_count, 5)
+        self.assertIsNot(head.router_norm, head.decoder_norm)
+        self.assertEqual(
+            [layer.out_features for layer in head.decoder
+             if isinstance(layer, torch.nn.Linear)],
+            [576, 5 * 42],
+        )
+        self.assertEqual(backend.local_attention.radius_m, 0.8)
+        self.assertIsNone(backend.temporal.cross_layer_scale)
 
     def test_single_seed_slot_preserves_the_legacy_geometry_transform(self):
         """The new explicit slot axis must preserve legacy (N, 3) inputs."""

@@ -34,11 +34,40 @@ from src.config_loader import (
     DYNAMIC_VARIANT_V13_4,
     DYNAMIC_VARIANT_V14,
     DYNAMIC_VARIANT_V14_1,
+    DYNAMIC_VARIANT_V15,
+    DYNAMIC_VARIANT_V15_1,
+    DYNAMIC_VARIANT_V15_2,
+    DYNAMIC_VARIANT_V15_3,
+    DYNAMIC_VARIANT_V16,
+    DYNAMIC_VARIANTS,
+    DENSE_COUNT_DYNAMIC_VARIANTS,
+    EXPERT_AUXILIARY_RENDER_BY_VARIANT,
+    EXPERT_AUXILIARY_RENDERS,
+    EXPERT_COUNT_DYNAMIC_VARIANTS,
+    EXPERT_COUNT_MODE,
     HYBRID_UTONIA_DYNAMIC_VARIANTS,
+    LOCAL_ATTENTION_DYNAMIC_VARIANTS,
+    LOCAL_ATTENTION_IMPLEMENTATIONS,
+    NESTED_AUXILIARY_RENDER_BY_VARIANT,
+    NESTED_AUXILIARY_RENDERS,
+    NESTED_COUNT_DYNAMIC_VARIANTS,
+    NESTED_COUNT_MODE,
+    NESTED_COUNT_OPTION_COUNTS,
+    NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS,
+    ORDINAL_AUXILIARY_RENDER_BY_VARIANT,
+    ORDINAL_AUXILIARY_RENDERS,
+    ORDINAL_COUNT_DYNAMIC_VARIANTS,
+    ORDINAL_COUNT_MODE,
+    ORDINAL_COUNT_OPTION_COUNTS,
+    POST_ACTIVATION_STEM_DYNAMIC_VARIANTS,
+    ROUTED_COUNT_BLOCKS,
+    V15_FAMILY_DYNAMIC_VARIANTS,
+    VARIANT_CONFIG_PATHS,
     compose_fresh_config,
     load_checkpoint_config,
     resolve_eval_config,
     resolve_main_config,
+    validate_experiment_config,
 )
 
 # Opts a barrier-family overlay into the random-duration loader, the contract
@@ -1657,6 +1686,894 @@ class ConfigLoaderTest(unittest.TestCase):
                 OmegaConf.to_container(main_config[key], resolve=True),
                 OmegaConf.to_container(eval_config[key], resolve=True),
             )
+
+
+class V15ConfigTest(unittest.TestCase):
+    """V15's overlay, and the V15-only keys every other variant must refuse."""
+
+    @staticmethod
+    def _compose(*overrides, variant=DYNAMIC_VARIANT_V15):
+        return compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={variant}", *overrides,
+        ]))
+
+    def _container(self, variant=DYNAMIC_VARIANT_V15):
+        config, _source = self._compose(variant=variant)
+        return OmegaConf.to_container(config, resolve=False)
+
+    @staticmethod
+    def _validate(container):
+        validate_experiment_config(OmegaConf.create(container))
+
+    def _rejected(self, message, *overrides, variant=DYNAMIC_VARIANT_V15):
+        with self.assertRaisesRegex(ValueError, message):
+            self._compose(*overrides, variant=variant)
+
+    def test_v15_composes_and_validates(self):
+        config, source = self._compose()
+        self.assertIn(f"{DYNAMIC_VARIANT_V15}.yaml", source)
+        self.assertEqual(config.model.variant, DYNAMIC_VARIANT_V15)
+        self.assertEqual(
+            OmegaConf.to_container(config, resolve=True)["exp_name"],
+            f"{DYNAMIC_VARIANT_V15}-bs-{config.train.batch_size}",
+        )
+        nested = config.p2g.grid_query
+        self.assertEqual(nested.count_mode, NESTED_COUNT_MODE)
+        self.assertEqual(set(nested), {"count_mode", "nested_count"})
+        count = nested.nested_count
+        self.assertEqual(list(count.option_counts), [1, 3, 5])
+        self.assertEqual(count.seed_mode, "token")
+        self.assertEqual(count.tau, 1.0)
+        self.assertEqual(count.decoder_hidden, 576)
+        self.assertEqual(list(count.router_hidden), [256, 128])
+        self.assertEqual(count.auxiliary_render, "dense_keep")
+        self.assertNotIn("gumbel_noise", count)
+        self.assertTrue(count.logging.enable)
+        self.assertEqual(count.logging.interval, 20)
+        self.assertEqual(
+            list(count.logging.range_edges_m), [0, 10, 20, 30, 40, 60, 80, 110]
+        )
+        local = config.dynamic_2dgs.local_attention
+        self.assertEqual(local.radius_m, 0.8)
+        self.assertEqual(local.num_heads, 12)
+        self.assertEqual(local.mlp_ratio, 4)
+        self.assertAlmostEqual(local.rope_base, 10 ** 1.2)
+        self.assertAlmostEqual(local.rope_position_scale, 2.0 * math.pi / 0.4)
+        self.assertEqual(local.implementation, "flash_varlen")
+        self.assertEqual(local.query_chunk_size, 4096)
+        temporal = config.dynamic_2dgs.temporal
+        self.assertIs(temporal.layer_scale, False)
+        self.assertNotIn("layer_scale_init", temporal)
+        self.assertEqual(
+            config.p2g.utonia_adaptation.stem.adapter_position,
+            "post_activation",
+        )
+        self.assertEqual(
+            list(config.train.downstream_no_decay),
+            ["dynamic_backend.temporal.v_raw"],
+        )
+        self.assertEqual(config.data.dataset_name, "nuscenes_dynamic_lidar4d")
+        self.assertEqual(config.data.coordinate_frame, "ego_vehicle")
+
+    def test_v15_is_v14_1_with_five_changes(self):
+        """Nothing outside the five documented changes differs from V14.1."""
+        v14_1 = self._container(DYNAMIC_VARIANT_V14_1)
+        v15 = self._container()
+        left = OmegaConf.to_container(OmegaConf.create(v14_1), resolve=False)
+        right = OmegaConf.to_container(OmegaConf.create(v15), resolve=False)
+        left["model"]["variant"] = right["model"]["variant"]
+        # 1. post-activation stem adapter.
+        stem = left["p2g"]["utonia_adaptation"]["stem"]
+        self.assertNotIn("adapter_position", stem)
+        stem["adapter_position"] = "post_activation"
+        # 5. nested count block replaces the learned_gumbel one wholesale.
+        self.assertEqual(left["p2g"]["grid_query"]["count_mode"], "learned_gumbel")
+        left["p2g"]["grid_query"] = right["p2g"]["grid_query"]
+        # 2. v_raw without weight decay.
+        self.assertNotIn("downstream_no_decay", left["train"])
+        left["train"]["downstream_no_decay"] = ["dynamic_backend.temporal.v_raw"]
+        # 3. no temporal LayerScale.
+        self.assertEqual(left["dynamic_2dgs"]["temporal"]["layer_scale_init"], 0.1)
+        del left["dynamic_2dgs"]["temporal"]["layer_scale_init"]
+        left["dynamic_2dgs"]["temporal"]["layer_scale"] = False
+        # 4. the radius local-attention block.
+        self.assertNotIn("local_attention", left["dynamic_2dgs"])
+        left["dynamic_2dgs"]["local_attention"] = right["dynamic_2dgs"][
+            "local_attention"
+        ]
+        self.assertEqual(left, right)
+
+    def test_v15_registration_and_variant_groups(self):
+        self.assertIn(DYNAMIC_VARIANT_V15, DYNAMIC_VARIANTS)
+        self.assertIn(DYNAMIC_VARIANT_V15, VARIANT_CONFIG_PATHS)
+        self.assertTrue(VARIANT_CONFIG_PATHS[DYNAMIC_VARIANT_V15].is_file())
+        for group in (BARRIER_MATCH_DYNAMIC_VARIANTS, HYBRID_UTONIA_DYNAMIC_VARIANTS):
+            self.assertIn(DYNAMIC_VARIANT_V15, group)
+            self.assertIn(DYNAMIC_VARIANT_V14_1, group)
+        # The nested router is not the K={1,2,3} learned_gumbel one.
+        self.assertNotIn(DYNAMIC_VARIANT_V15, ROUTER_CAPABLE_DYNAMIC_VARIANTS)
+        self.assertNotIn(DYNAMIC_VARIANT_V15, FLASH_ROPE_MATCH_DYNAMIC_VARIANTS)
+        self.assertEqual(
+            NESTED_COUNT_DYNAMIC_VARIANTS,
+            (DYNAMIC_VARIANT_V15, DYNAMIC_VARIANT_V15_1),
+        )
+        # The whole V15 family shares the stem, LayerScale removal and the
+        # local-attention block; only the Gaussian head differs.
+        self.assertEqual(V15_FAMILY_DYNAMIC_VARIANTS, (
+            DYNAMIC_VARIANT_V15, DYNAMIC_VARIANT_V15_1,
+            DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3,
+            DYNAMIC_VARIANT_V16,
+        ))
+        for group in (
+            LOCAL_ATTENTION_DYNAMIC_VARIANTS,
+            NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS,
+            POST_ACTIVATION_STEM_DYNAMIC_VARIANTS,
+        ):
+            self.assertEqual(group, V15_FAMILY_DYNAMIC_VARIANTS)
+        # V15.1 shares every V15 group; its auxiliary render is its identity.
+        self.assertIn(DYNAMIC_VARIANT_V15_1, DYNAMIC_VARIANTS)
+        self.assertTrue(VARIANT_CONFIG_PATHS[DYNAMIC_VARIANT_V15_1].is_file())
+        for group in (BARRIER_MATCH_DYNAMIC_VARIANTS, HYBRID_UTONIA_DYNAMIC_VARIANTS):
+            self.assertIn(DYNAMIC_VARIANT_V15_1, group)
+        self.assertNotIn(DYNAMIC_VARIANT_V15_1, ROUTER_CAPABLE_DYNAMIC_VARIANTS)
+        self.assertEqual(NESTED_AUXILIARY_RENDER_BY_VARIANT, {
+            DYNAMIC_VARIANT_V15: "dense_keep",
+            DYNAMIC_VARIANT_V15_1: "none",
+        })
+        self.assertEqual(NESTED_COUNT_MODE, "nested_gumbel")
+        self.assertEqual(NESTED_COUNT_OPTION_COUNTS, (1, 3, 5))
+        self.assertEqual(NESTED_AUXILIARY_RENDERS, ("dense_keep", "none"))
+        self.assertEqual(
+            LOCAL_ATTENTION_IMPLEMENTATIONS, ("flash_varlen", "sdpa", "auto")
+        )
+        # The fresh-run default is still V11.4.
+        self.assertEqual(DYNAMIC_VARIANT, DYNAMIC_VARIANT_V11_4)
+
+    def test_v15_only_keys_are_rejected_on_v14_1(self):
+        self._rejected(
+            "no nested count head.*only available to V15",
+            "p2g.grid_query.count_mode=nested_gumbel",
+            variant=DYNAMIC_VARIANT_V14_1,
+        )
+        self._rejected(
+            "layer_scale=false is only available to V15",
+            "dynamic_2dgs.temporal.layer_scale=false",
+            variant=DYNAMIC_VARIANT_V14_1,
+        )
+        self._rejected(
+            "adapter_position='post_activation' is only available to V15",
+            "p2g.utonia_adaptation.stem.adapter_position=post_activation",
+            variant=DYNAMIC_VARIANT_V14_1,
+        )
+        # A complete, otherwise valid block is still refused.
+        block = self._container()["dynamic_2dgs"]["local_attention"]
+        with self.assertRaisesRegex(ValueError, "only available to V15"):
+            compose_fresh_config(OmegaConf.create({
+                "model": {"variant": DYNAMIC_VARIANT_V14_1},
+                "dynamic_2dgs": {"local_attention": block},
+            }))
+
+    def test_v15_1_is_v15_without_the_auxiliary_render(self):
+        v15, _ = self._compose()
+        v15_1, _ = self._compose(variant=DYNAMIC_VARIANT_V15_1)
+
+        def leaves(node, prefix=""):
+            if isinstance(node, dict):
+                out = {}
+                for key, value in node.items():
+                    out.update(leaves(value, f"{prefix}{key}."))
+                return out
+            return {prefix[:-1]: node}
+
+        a = leaves(OmegaConf.to_container(v15, resolve=True))
+        b = leaves(OmegaConf.to_container(v15_1, resolve=True))
+        self.assertEqual(set(a), set(b))
+        changed = {key for key in a if a[key] != b[key]}
+        self.assertEqual(changed, {
+            "model.variant",
+            "exp_name",
+            "logger.dir",
+            "p2g.grid_query.nested_count.auxiliary_render",
+        })
+        self.assertEqual(
+            v15_1.p2g.grid_query.nested_count.auxiliary_render, "none"
+        )
+
+    def test_nested_count_mode_is_refused_by_every_other_variant(self):
+        for variant in DYNAMIC_VARIANTS:
+            if variant in NESTED_COUNT_DYNAMIC_VARIANTS:
+                continue
+            with self.subTest(variant=variant):
+                self._rejected(
+                    "no nested count head",
+                    "p2g.grid_query.count_mode=nested_gumbel",
+                    variant=variant,
+                )
+
+    def test_v15_only_keys_are_refused_outside_their_variant_groups(self):
+        for variant in DYNAMIC_VARIANTS:
+            if variant in LOCAL_ATTENTION_DYNAMIC_VARIANTS:
+                self.assertIn(variant, NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS)
+                continue
+            with self.subTest(variant=variant, key="local_attention"):
+                self._rejected(
+                    "no radius local-attention block",
+                    "dynamic_2dgs.local_attention.radius_m=0.8",
+                    variant=variant,
+                )
+            with self.subTest(variant=variant, key="layer_scale"):
+                self._rejected(
+                    "keeps the temporal LayerScale",
+                    "dynamic_2dgs.temporal.layer_scale=false",
+                    variant=variant,
+                )
+        # An explicit layer_scale=true is the historical gate, for anyone.
+        config, _ = self._compose(
+            "dynamic_2dgs.temporal.layer_scale=true",
+            variant=DYNAMIC_VARIANT_V14_1,
+        )
+        self.assertIs(config.dynamic_2dgs.temporal.layer_scale, True)
+        self.assertEqual(config.dynamic_2dgs.temporal.layer_scale_init, 0.1)
+        self._rejected(
+            "true or false",
+            "dynamic_2dgs.temporal.layer_scale=1",
+            variant=DYNAMIC_VARIANT_V14_1,
+        )
+
+    def test_downstream_no_decay_is_only_for_hybrid_variants(self):
+        names = "train.downstream_no_decay=[dynamic_backend.temporal.v_raw]"
+        for variant in DYNAMIC_VARIANTS:
+            if variant in HYBRID_UTONIA_DYNAMIC_VARIANTS:
+                continue
+            with self.subTest(variant=variant):
+                self._rejected(
+                    "only available to V14, V14.1, V15", names, variant=variant
+                )
+        # Even an empty list has nothing to act on without role groups.
+        self._rejected(
+            "flat parameter group", "train.downstream_no_decay=[]",
+            variant=DYNAMIC_VARIANT_V11_4,
+        )
+        for variant in (DYNAMIC_VARIANT_V14, DYNAMIC_VARIANT_V14_1):
+            with self.subTest(variant=variant):
+                config, _ = self._compose(names, variant=variant)
+                self.assertEqual(
+                    list(config.train.downstream_no_decay),
+                    ["dynamic_backend.temporal.v_raw"],
+                )
+        # Absent, null and empty all mean "no extra group".
+        for value in ("null", "[]"):
+            config, _ = self._compose(f"train.downstream_no_decay={value}")
+            self.assertFalse(config.train.downstream_no_decay or [])
+
+    def test_downstream_no_decay_rejects_malformed_lists(self):
+        cases = (
+            ("train.downstream_no_decay=v_raw", "must be a list"),
+            (
+                "train.downstream_no_decay=[dynamic_backend.temporal.v_raw,"
+                "dynamic_backend.temporal.v_raw]",
+                "must not repeat",
+            ),
+            ("train.downstream_no_decay=[a,'']", "non-empty strings"),
+            ("train.downstream_no_decay=['  ']", "non-empty strings"),
+            ("train.downstream_no_decay=[1]", "non-empty strings"),
+            (
+                "train.downstream_no_decay=[feature_extractor.embedding.stem."
+                "linear.intensity_weight]",
+                "Utonia parameter",
+            ),
+        )
+        for override, message in cases:
+            with self.subTest(override=override):
+                self._rejected(message, override)
+
+    def test_nested_count_contract_is_enforced(self):
+        base = "p2g.grid_query.nested_count."
+        cases = (
+            ("p2g.grid_query.count_mode=learned_gumbel", "requires p2g.grid_query"),
+            ("p2g.grid_query.count_mode=legacy", "requires p2g.grid_query"),
+            (base + "option_counts=[1,2,3]", "option_counts must be"),
+            (base + "option_counts=[1,3]", "option_counts must be"),
+            (base + "option_counts=[1,3,5,7]", "option_counts must be"),
+            (base + "option_counts=[5,3,1]", "option_counts must be"),
+            (base + "option_counts=3", "option_counts must be"),
+            (base + "seed_mode=range_quantile", "seed_mode must be one of"),
+            (base + "seed_mode=medoid", "seed_mode must be one of"),
+            (base + "auxiliary_render=sparse", "auxiliary_render must be one of"),
+            (base + "auxiliary_render=null", "auxiliary_render must be one of"),
+            (base + "tau=0", "tau must be positive"),
+            (base + "tau=-1.0", "tau must be positive"),
+            (base + "tau=inf", "tau must be positive and finite"),
+            (base + "tau=null", "tau must be positive"),
+            (base + "decoder_hidden=0", "decoder_hidden must be a positive integer"),
+            (base + "decoder_hidden=576.5", "decoder_hidden must be a positive integer"),
+            (base + "decoder_hidden=null", "decoder_hidden must be a positive integer"),
+            (base + "router_hidden=-432", "router_hidden must be a non-empty list"),
+            (base + "router_hidden=432", "router_hidden must be a non-empty list"),
+            (base + "router_hidden=[]", "router_hidden must be a non-empty list"),
+            (base + "router_hidden=[256,0]", "router_hidden must be a non-empty list"),
+            (base + "router_hidden=[256,128.5]", "router_hidden must be a non-empty list"),
+            (base + "gumbel_noise.schedule=cosine", "Unsupported keys under"),
+            (base + "budget=1", "Unsupported keys under p2g.grid_query.nested_count"),
+            ("p2g.grid_query.K_max=3", "Unsupported keys under p2g.grid_query"),
+            ("p2g.grid_query.grad_balance=sqrt_k", "Unsupported keys under p2g.grid_query"),
+            (base + "logging.interval=0", "interval must be positive"),
+            (base + "logging.bins=3", "Unsupported keys under"),
+        )
+        for override, message in cases:
+            with self.subTest(override=override):
+                self._rejected(message, override)
+        # Each nested variant accepts only its own auxiliary render: V15 the
+        # dense G1..G3 render, V15.1 none. Logging is optional.
+        for variant, render in NESTED_AUXILIARY_RENDER_BY_VARIANT.items():
+            with self.subTest(variant=variant, render=render):
+                config, _ = self._compose(
+                    base + f"auxiliary_render={render}", variant=variant
+                )
+                self.assertEqual(
+                    config.p2g.grid_query.nested_count.auxiliary_render, render
+                )
+                other = "none" if render == "dense_keep" else "dense_keep"
+                self._rejected(
+                    f"auxiliary_render='{render}', got '{other}'",
+                    base + f"auxiliary_render={other}",
+                    variant=variant,
+                )
+        container = self._container()
+        del container["p2g"]["grid_query"]["nested_count"]["logging"]
+        self._validate(container)
+
+    def test_nested_count_keys_are_all_required_except_logging(self):
+        for key in (
+            "option_counts", "seed_mode", "tau", "decoder_hidden",
+            "router_hidden", "auxiliary_render",
+        ):
+            with self.subTest(key=key):
+                container = self._container()
+                del container["p2g"]["grid_query"]["nested_count"][key]
+                with self.assertRaisesRegex(
+                    ValueError, f"nested_count is missing keys: {key}"
+                ):
+                    self._validate(container)
+        container = self._container()
+        del container["p2g"]["grid_query"]["nested_count"]
+        with self.assertRaisesRegex(ValueError, "requires p2g.grid_query.nested_count"):
+            self._validate(container)
+        container = self._container()
+        del container["p2g"]["grid_query"]
+        with self.assertRaisesRegex(ValueError, "requires p2g.grid_query.count_mode"):
+            self._validate(container)
+
+    def test_local_attention_contract_is_enforced(self):
+        base = "dynamic_2dgs.local_attention."
+        cases = (
+            ("dynamic_2dgs.local_attention=null", "requires dynamic_2dgs.local_attention"),
+            (base + "query_chunk_size=70000", "at most 65535"),
+            (base + "query_chunk_size=65536", "at most 65535"),
+            (base + "query_chunk_size=0", "query_chunk_size must be a positive integer"),
+            (base + "query_chunk_size=4096.5", "query_chunk_size must be a positive integer"),
+            (base + "num_heads=7", "dim=432 must be divisible by heads=7"),
+            (base + "num_heads=16", "head_dim=27 must be divisible by six"),
+            (base + "num_heads=0", "num_heads must be a positive integer"),
+            (base + "num_heads=true", "num_heads must be a positive integer"),
+            (base + "implementation=triton", "implementation must be one of"),
+            (base + "radius_m=0", "radius_m must be positive and finite"),
+            (base + "radius_m=-0.8", "radius_m must be positive and finite"),
+            (base + "radius_m=inf", "radius_m must be positive and finite"),
+            (base + "mlp_ratio=0", "mlp_ratio must be positive and finite"),
+            (base + "rope_base=-1", "rope_base must be positive and finite"),
+            (base + "rope_position_scale=nan", "rope_position_scale must be positive and finite"),
+            (base + "qk_norm=true", "Unsupported keys under dynamic_2dgs.local_attention"),
+        )
+        for override, message in cases:
+            with self.subTest(override=override):
+                self._rejected(message, override)
+        for implementation in LOCAL_ATTENTION_IMPLEMENTATIONS:
+            with self.subTest(implementation=implementation):
+                config, _ = self._compose(base + f"implementation={implementation}")
+                self.assertEqual(
+                    config.dynamic_2dgs.local_attention.implementation,
+                    implementation,
+                )
+        # 65535 is FlashAttention2's limit and is allowed.
+        config, _ = self._compose(base + "query_chunk_size=65535")
+        self.assertEqual(config.dynamic_2dgs.local_attention.query_chunk_size, 65535)
+        for key in (
+            "radius_m", "num_heads", "mlp_ratio", "rope_base",
+            "rope_position_scale", "implementation", "query_chunk_size",
+        ):
+            with self.subTest(missing=key):
+                container = self._container()
+                del container["dynamic_2dgs"]["local_attention"][key]
+                with self.assertRaisesRegex(
+                    ValueError, f"local_attention is missing keys: {key}"
+                ):
+                    self._validate(container)
+        container = self._container()
+        del container["dynamic_2dgs"]["local_attention"]
+        with self.assertRaisesRegex(ValueError, "requires dynamic_2dgs.local_attention"):
+            self._validate(container)
+
+    def test_v15_requires_no_layer_scale(self):
+        self._rejected(
+            "requires dynamic_2dgs.temporal.layer_scale=false",
+            "dynamic_2dgs.temporal.layer_scale=true",
+        )
+        self._rejected(
+            "layer_scale_init cannot be set",
+            "dynamic_2dgs.temporal.layer_scale_init=0.1",
+        )
+        self._rejected("true or false", "dynamic_2dgs.temporal.layer_scale=0")
+        container = self._container()
+        del container["dynamic_2dgs"]["temporal"]["layer_scale"]
+        with self.assertRaisesRegex(ValueError, "requires dynamic_2dgs.temporal.layer_scale=false"):
+            self._validate(container)
+
+    def test_v15_requires_the_post_activation_stem(self):
+        stem = "p2g.utonia_adaptation.stem.adapter_position"
+        self._rejected("requires .*adapter_position='post_activation'", f"{stem}=pre_norm")
+        self._rejected("adapter_position must be one of", f"{stem}=after_ln")
+        self._rejected("adapter_position must be one of", f"{stem}=null")
+        container = self._container()
+        del container["p2g"]["utonia_adaptation"]["stem"]["adapter_position"]
+        with self.assertRaisesRegex(ValueError, "requires .*adapter_position='post_activation'"):
+            self._validate(container)
+        # V14 and V14.1 keep the historical spelling, present or absent.
+        for variant in (DYNAMIC_VARIANT_V14, DYNAMIC_VARIANT_V14_1):
+            with self.subTest(variant=variant):
+                config, _ = self._compose(f"{stem}=pre_norm", variant=variant)
+                self.assertEqual(
+                    config.p2g.utonia_adaptation.stem.adapter_position, "pre_norm"
+                )
+                config, _ = self._compose(variant=variant)
+                self.assertNotIn("adapter_position", config.p2g.utonia_adaptation.stem)
+        self._rejected("adapter_position must be one of", f"{stem}=after_ln", variant=DYNAMIC_VARIANT_V14)
+
+    def test_v14_family_configs_keep_validating_without_the_v15_keys(self):
+        for variant in (DYNAMIC_VARIANT_V14, DYNAMIC_VARIANT_V14_1):
+            with self.subTest(variant=variant):
+                config, _ = self._compose(variant=variant)
+                self.assertEqual(config.p2g.grid_query.count_mode, "learned_gumbel")
+                self.assertNotIn("local_attention", config.dynamic_2dgs)
+                self.assertNotIn("layer_scale", config.dynamic_2dgs.temporal)
+                self.assertNotIn("downstream_no_decay", config.train)
+
+    def test_v15_checkpoint_restores_and_protects_its_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "epoch=0.ckpt"
+            stored, _ = self._compose()
+            torch.save({
+                "experiment_config": OmegaConf.to_container(stored, resolve=True)
+            }, checkpoint)
+
+            config, _source = load_checkpoint_config(checkpoint)
+            self.assertEqual(config.model.variant, DYNAMIC_VARIANT_V15)
+            self.assertEqual(config.p2g.grid_query.count_mode, NESTED_COUNT_MODE)
+            self.assertEqual(config.dynamic_2dgs.local_attention.radius_m, 0.8)
+            self.assertIs(config.dynamic_2dgs.temporal.layer_scale, False)
+            for override, root in (
+                ("p2g.grid_query.nested_count.tau=2.0", "p2g"),
+                ("p2g.grid_query.nested_count.auxiliary_render=none", "p2g"),
+                ("p2g.utonia_adaptation.stem.adapter_position=pre_norm", "p2g"),
+                ("dynamic_2dgs.local_attention.radius_m=1.0", "dynamic_2dgs"),
+                ("dynamic_2dgs.temporal.layer_scale=true", "dynamic_2dgs"),
+            ):
+                with self.subTest(override=override):
+                    with self.assertRaisesRegex(
+                        ValueError, f"changed roots: {root}"
+                    ):
+                        resolve_main_config(OmegaConf.from_dotlist([
+                            f"train.ckpt_path={checkpoint}", override,
+                        ]))
+            # Runtime knobs stay adjustable.
+            resumed, _ = resolve_main_config(OmegaConf.from_dotlist([
+                f"train.ckpt_path={checkpoint}", "train.batch_size=3",
+            ]))
+            self.assertEqual(resumed.train.batch_size, 3)
+            self.assertEqual(
+                list(resumed.train.downstream_no_decay),
+                ["dynamic_backend.temporal.v_raw"],
+            )
+
+
+
+class V15SiblingConfigTest(unittest.TestCase):
+    """V15.2 (per-option experts) and V15.3 (no router): V15 with a new head."""
+
+    @staticmethod
+    def _compose(*overrides, variant):
+        return compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={variant}", *overrides,
+        ]))
+
+    def _container(self, variant):
+        config, _source = self._compose(variant=variant)
+        return OmegaConf.to_container(config, resolve=False)
+
+    def _rejected(self, message, *overrides, variant):
+        with self.assertRaisesRegex(ValueError, message):
+            self._compose(*overrides, variant=variant)
+
+    @staticmethod
+    def _leaves(node, prefix=""):
+        if isinstance(node, dict):
+            out = {}
+            for key, value in node.items():
+                out.update(V15SiblingConfigTest._leaves(value, f"{prefix}{key}."))
+            return out
+        return {prefix[:-1]: node}
+
+    def _changed_from_v15(self, variant):
+        v15, _ = self._compose(variant=DYNAMIC_VARIANT_V15)
+        sibling, _ = self._compose(variant=variant)
+        a = self._leaves(OmegaConf.to_container(v15, resolve=True))
+        b = self._leaves(OmegaConf.to_container(sibling, resolve=True))
+        return a, b, {
+            key for key in set(a) | set(b) if a.get(key, "<absent>") != b.get(key, "<absent>")
+        }
+
+    def test_registration(self):
+        for variant in (DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3):
+            with self.subTest(variant=variant):
+                self.assertIn(variant, DYNAMIC_VARIANTS)
+                self.assertTrue(VARIANT_CONFIG_PATHS[variant].is_file())
+                for group in (
+                    BARRIER_MATCH_DYNAMIC_VARIANTS,
+                    HYBRID_UTONIA_DYNAMIC_VARIANTS,
+                    V15_FAMILY_DYNAMIC_VARIANTS,
+                ):
+                    self.assertIn(variant, group)
+                self.assertNotIn(variant, ROUTER_CAPABLE_DYNAMIC_VARIANTS)
+                self.assertNotIn(variant, NESTED_COUNT_DYNAMIC_VARIANTS)
+        self.assertEqual(EXPERT_COUNT_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V15_2,))
+        self.assertEqual(DENSE_COUNT_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V15_3,))
+        self.assertEqual(EXPERT_COUNT_MODE, "expert_gumbel")
+        self.assertEqual(EXPERT_AUXILIARY_RENDERS, ("dense_add", "none"))
+        self.assertEqual(
+            EXPERT_AUXILIARY_RENDER_BY_VARIANT,
+            {DYNAMIC_VARIANT_V15_2: "dense_add"},
+        )
+        self.assertEqual(ROUTED_COUNT_BLOCKS, {
+            NESTED_COUNT_MODE: "nested_count",
+            EXPERT_COUNT_MODE: "expert_count",
+            ORDINAL_COUNT_MODE: "ordinal_count",
+        })
+
+    def test_v15_2_is_v15_with_per_option_experts(self):
+        a, b, changed = self._changed_from_v15(DYNAMIC_VARIANT_V15_2)
+        nested = {key for key in a if key.startswith("p2g.grid_query.nested_count.")}
+        expert = {key for key in b if key.startswith("p2g.grid_query.expert_count.")}
+        self.assertEqual(changed, {
+            "model.variant", "exp_name", "logger.dir",
+            "p2g.grid_query.count_mode", *nested, *expert,
+        })
+        self.assertEqual(b["p2g.grid_query.count_mode"], "expert_gumbel")
+        # The block's settings are V15's except the auxiliary render.
+        for key in nested:
+            name = key.rsplit("nested_count.", 1)[1]
+            expected = "dense_add" if name == "auxiliary_render" else a[key]
+            self.assertEqual(b[f"p2g.grid_query.expert_count.{name}"], expected)
+        # Plus the E5 render's view subsampling, which V15 does not set.
+        self.assertEqual(
+            {key.rsplit("nested_count.", 1)[1] for key in nested}
+            | {"auxiliary_views"},
+            {key.rsplit("expert_count.", 1)[1] for key in expert},
+        )
+        self.assertEqual(b["p2g.grid_query.expert_count.auxiliary_views"], 2)
+
+    def test_v15_3_is_v15_without_the_router(self):
+        a, b, changed = self._changed_from_v15(DYNAMIC_VARIANT_V15_3)
+        nested = {key for key in a if key.startswith("p2g.grid_query.nested_count.")}
+        self.assertEqual(changed, {
+            "model.variant", "exp_name", "logger.dir",
+            "p2g.grid_query.count_mode", "p2g.grid_query.K_max",
+            "p2g.grid_query.seed_mode", "dynamic_2dgs.gaussian_head.decoder_hidden",
+            *nested,
+        })
+        self.assertEqual(b["p2g.grid_query.count_mode"], "legacy")
+        self.assertEqual(b["p2g.grid_query.K_max"], 5)
+        self.assertEqual(b["p2g.grid_query.seed_mode"], "token")
+        # V15's decoder width, moved to the Gaussian head.
+        self.assertEqual(
+            b["dynamic_2dgs.gaussian_head.decoder_hidden"],
+            a["p2g.grid_query.nested_count.decoder_hidden"],
+        )
+
+    def test_expert_count_mode_is_refused_by_every_other_variant(self):
+        for variant in DYNAMIC_VARIANTS:
+            if variant in EXPERT_COUNT_DYNAMIC_VARIANTS:
+                continue
+            with self.subTest(variant=variant):
+                self._rejected(
+                    "no per-option expert head.*only available to V15.2",
+                    "p2g.grid_query.count_mode=expert_gumbel",
+                    variant=variant,
+                )
+        self._rejected(
+            "V15.2 has no nested count head",
+            "p2g.grid_query.count_mode=nested_gumbel",
+            variant=DYNAMIC_VARIANT_V15_2,
+        )
+
+    def test_expert_count_contract_is_enforced(self):
+        base = "p2g.grid_query.expert_count."
+        cases = (
+            ("p2g.grid_query.count_mode=learned_gumbel", "requires p2g.grid_query.count_mode='expert_gumbel'"),
+            ("p2g.grid_query.count_mode=legacy", "requires p2g.grid_query.count_mode='expert_gumbel'"),
+            (base + "option_counts=[1,2,3]", "option_counts must be .*reduce E1, keep E3, add E5"),
+            (base + "seed_mode=range_quantile", "seed_mode must be one of"),
+            (base + "auxiliary_render=dense_keep", "auxiliary_render must be one of"),
+            (base + "auxiliary_render=none", "renders no auxiliary set"),
+            (base + "tau=0", "tau must be positive"),
+            (base + "decoder_hidden=0", "decoder_hidden must be a positive integer"),
+            (base + "router_hidden=[]", "router_hidden must be a non-empty list"),
+            (base + "budget=1", "Unsupported keys under p2g.grid_query.expert_count"),
+            ("p2g.grid_query.K_max=5", "Unsupported keys under p2g.grid_query"),
+            (base + "logging.interval=0", "interval must be positive"),
+        )
+        for override, message in cases:
+            with self.subTest(override=override):
+                self._rejected(message, override, variant=DYNAMIC_VARIANT_V15_2)
+        # Without the view subsampling, the render itself is still pinned.
+        self._rejected(
+            "auxiliary_render='dense_add', got 'none'",
+            base + "auxiliary_render=none", base + "auxiliary_views=null",
+            variant=DYNAMIC_VARIANT_V15_2,
+        )
+        for key in (
+            "option_counts", "seed_mode", "tau", "decoder_hidden",
+            "router_hidden", "auxiliary_render",
+        ):
+            with self.subTest(missing=key):
+                container = self._container(DYNAMIC_VARIANT_V15_2)
+                del container["p2g"]["grid_query"]["expert_count"][key]
+                with self.assertRaisesRegex(
+                    ValueError, f"expert_count is missing keys: {key}"
+                ):
+                    validate_experiment_config(OmegaConf.create(container))
+
+    def test_v15_3_count_contract_is_enforced(self):
+        cases = (
+            ("p2g.grid_query.K_max=3", "K_max must be 5, got 3"),
+            ("p2g.grid_query.K_max=1", "K_max must be 5, got 1"),
+            ("p2g.grid_query.seed_mode=medoid", "seed_mode must be 'token', got 'medoid'"),
+            ("p2g.grid_query.seed_mode=range_quantile", "seed_mode must be 'token'"),
+            ("p2g.grid_query.count_mode=learned_gumbel", "has no count router"),
+            ("p2g.grid_query.count_mode=nested_gumbel", "V15.3 has no nested count head"),
+            ("p2g.grid_query.count_mode=expert_gumbel", "V15.3 has no per-option expert head"),
+            ("dynamic_2dgs.gaussian_head.decoder_hidden=0", "decoder_hidden must be a positive integer"),
+            ("dynamic_2dgs.gaussian_head.decoder_hidden=576.5", "decoder_hidden must be a positive integer"),
+            ("dynamic_2dgs.gaussian_head.decoder_hidden=null", "decoder_hidden must be a positive integer"),
+        )
+        for override, message in cases:
+            with self.subTest(override=override):
+                self._rejected(message, override, variant=DYNAMIC_VARIANT_V15_3)
+        container = self._container(DYNAMIC_VARIANT_V15_3)
+        del container["dynamic_2dgs"]["gaussian_head"]["decoder_hidden"]
+        with self.assertRaisesRegex(
+            ValueError, "requires dynamic_2dgs.gaussian_head.decoder_hidden"
+        ):
+            validate_experiment_config(OmegaConf.create(container))
+        container = self._container(DYNAMIC_VARIANT_V15_3)
+        del container["p2g"]["grid_query"]
+        with self.assertRaisesRegex(ValueError, "has no count router"):
+            validate_experiment_config(OmegaConf.create(container))
+
+    def test_decoder_hidden_is_only_for_v15_3(self):
+        for variant in DYNAMIC_VARIANTS:
+            if variant in DENSE_COUNT_DYNAMIC_VARIANTS:
+                continue
+            with self.subTest(variant=variant):
+                self._rejected(
+                    "decoder_hidden is only available to V15.3",
+                    "dynamic_2dgs.gaussian_head.decoder_hidden=576",
+                    variant=variant,
+                )
+
+    def test_v15_2_renders_its_auxiliary_set_at_two_random_views(self):
+        config, _ = self._compose(variant=DYNAMIC_VARIANT_V15_2)
+        self.assertEqual(config.p2g.grid_query.expert_count.auxiliary_views, 2)
+        for variant in (DYNAMIC_VARIANT_V15, DYNAMIC_VARIANT_V15_1):
+            config, _ = self._compose(variant=variant)
+            self.assertNotIn("auxiliary_views", config.p2g.grid_query.nested_count)
+        path = "p2g.grid_query.expert_count.auxiliary_views"
+        for value in ("0", "-1", "1.5", "true", "two"):
+            with self.subTest(value=value):
+                self._rejected(
+                    "auxiliary_views must be a positive integer",
+                    f"{path}={value}", variant=DYNAMIC_VARIANT_V15_2,
+                )
+        config, _ = self._compose(f"{path}=null", variant=DYNAMIC_VARIANT_V15_2)
+        self.assertIsNone(config.p2g.grid_query.expert_count.auxiliary_views)
+        # V15 may subsample its G1..G3 render too; V15.1 has none to subsample.
+        config, _ = self._compose(
+            "p2g.grid_query.nested_count.auxiliary_views=3",
+            variant=DYNAMIC_VARIANT_V15,
+        )
+        self.assertEqual(config.p2g.grid_query.nested_count.auxiliary_views, 3)
+        self._rejected(
+            "renders no auxiliary set",
+            "p2g.grid_query.nested_count.auxiliary_views=2",
+            variant=DYNAMIC_VARIANT_V15_1,
+        )
+
+    def test_checkpoints_protect_the_new_heads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for variant, overrides in (
+                (DYNAMIC_VARIANT_V15_2, (
+                    "p2g.grid_query.expert_count.decoder_hidden=432",
+                    "p2g.grid_query.expert_count.auxiliary_render=none",
+                )),
+                (DYNAMIC_VARIANT_V15_3, (
+                    "p2g.grid_query.K_max=3",
+                    "dynamic_2dgs.gaussian_head.decoder_hidden=432",
+                )),
+            ):
+                checkpoint = Path(tmp) / f"{variant}.ckpt"
+                stored, _ = self._compose(variant=variant)
+                torch.save({
+                    "experiment_config": OmegaConf.to_container(stored, resolve=True)
+                }, checkpoint)
+                config, _source = load_checkpoint_config(checkpoint)
+                self.assertEqual(config.model.variant, variant)
+                for override in overrides:
+                    with self.subTest(variant=variant, override=override):
+                        with self.assertRaisesRegex(ValueError, "changed roots"):
+                            resolve_main_config(OmegaConf.from_dotlist([
+                                f"train.ckpt_path={checkpoint}", override,
+                            ]))
+
+
+
+class V16ConfigTest(unittest.TestCase):
+    """V16: V15 with two bounded ordinal gates and masked rasterization."""
+
+    BLOCK = "p2g.grid_query.ordinal_count."
+
+    @staticmethod
+    def _compose(*overrides, variant=DYNAMIC_VARIANT_V16):
+        return compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={variant}", *overrides,
+        ]))
+
+    def _rejected(self, message, *overrides, variant=DYNAMIC_VARIANT_V16):
+        with self.assertRaisesRegex(ValueError, message):
+            self._compose(*overrides, variant=variant)
+
+    def test_registration(self):
+        self.assertIn(DYNAMIC_VARIANT_V16, DYNAMIC_VARIANTS)
+        self.assertTrue(VARIANT_CONFIG_PATHS[DYNAMIC_VARIANT_V16].is_file())
+        for group in (
+            BARRIER_MATCH_DYNAMIC_VARIANTS,
+            HYBRID_UTONIA_DYNAMIC_VARIANTS,
+            V15_FAMILY_DYNAMIC_VARIANTS,
+            LOCAL_ATTENTION_DYNAMIC_VARIANTS,
+            NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS,
+            POST_ACTIVATION_STEM_DYNAMIC_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V16, group)
+        for group in (
+            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+            NESTED_COUNT_DYNAMIC_VARIANTS,
+            EXPERT_COUNT_DYNAMIC_VARIANTS,
+            DENSE_COUNT_DYNAMIC_VARIANTS,
+        ):
+            self.assertNotIn(DYNAMIC_VARIANT_V16, group)
+        self.assertEqual(ORDINAL_COUNT_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V16,))
+        self.assertEqual(ORDINAL_COUNT_MODE, "nested_ordinal")
+        self.assertEqual(ORDINAL_COUNT_OPTION_COUNTS, (1, 3, 5))
+        self.assertEqual(ORDINAL_AUXILIARY_RENDERS, ("dense_add", "none"))
+        self.assertEqual(
+            ORDINAL_AUXILIARY_RENDER_BY_VARIANT,
+            {DYNAMIC_VARIANT_V16: "dense_add"},
+        )
+
+    def test_v16_is_v15_with_the_ordinal_count(self):
+        v15, _ = self._compose(variant=DYNAMIC_VARIANT_V15)
+        v16, _ = self._compose()
+        a = V15SiblingConfigTest._leaves(OmegaConf.to_container(v15, resolve=True))
+        b = V15SiblingConfigTest._leaves(OmegaConf.to_container(v16, resolve=True))
+        changed = {
+            key for key in set(a) | set(b)
+            if a.get(key, "<absent>") != b.get(key, "<absent>")
+        }
+        nested = {key for key in a if key.startswith("p2g.grid_query.nested_count.")}
+        ordinal = {key for key in b if key.startswith(self.BLOCK)}
+        self.assertEqual(changed, {
+            "model.variant", "exp_name", "logger.dir",
+            "p2g.grid_query.count_mode", *nested, *ordinal,
+        })
+        self.assertEqual(b["p2g.grid_query.count_mode"], "nested_ordinal")
+        # V15's block, with the G1..G5 render instead of G1..G3 ...
+        for key in nested:
+            name = key.rsplit("nested_count.", 1)[1]
+            expected = "dense_add" if name == "auxiliary_render" else a[key]
+            self.assertEqual(b[self.BLOCK + name], expected)
+        # ... plus the gates' fixed scale and the render's view subsampling.
+        self.assertEqual(
+            {key.rsplit("nested_count.", 1)[1] for key in nested}
+            | {"router_scale", "auxiliary_views"},
+            {key.rsplit("ordinal_count.", 1)[1] for key in ordinal},
+        )
+        self.assertEqual(b[self.BLOCK + "router_scale"], 3.0)
+        self.assertEqual(b[self.BLOCK + "auxiliary_views"], 2)
+
+    def test_ordinal_count_contract_is_enforced(self):
+        base = self.BLOCK
+        cases = (
+            ("p2g.grid_query.count_mode=nested_gumbel", "V16 has no nested count head"),
+            ("p2g.grid_query.count_mode=expert_gumbel", "V16 has no per-option expert head"),
+            ("p2g.grid_query.count_mode=legacy", "requires p2g.grid_query.count_mode='nested_ordinal'"),
+            (base + "option_counts=[1,2,3]", r"option_counts must be .*reduce \{G1\}"),
+            (base + "seed_mode=medoid", "seed_mode must be one of"),
+            (base + "auxiliary_render=dense_keep", "auxiliary_render must be one of"),
+            (base + "auxiliary_render=none", "renders no auxiliary set"),
+            (base + "tau=0", "tau must be positive"),
+            (base + "router_scale=0", "router_scale must be positive and finite"),
+            (base + "router_scale=-3", "router_scale must be positive and finite"),
+            (base + "router_scale=inf", "router_scale must be positive and finite"),
+            (base + "router_scale=null", "router_scale must be positive and finite"),
+            (base + "decoder_hidden=0", "decoder_hidden must be a positive integer"),
+            (base + "router_hidden=[]", "router_hidden must be a non-empty list"),
+            (base + "budget=1", "Unsupported keys under p2g.grid_query.ordinal_count"),
+            (base + "auxiliary_views=0", "auxiliary_views must be a positive integer"),
+            (base + "logging.interval=0", "interval must be positive"),
+        )
+        for override, message in cases:
+            with self.subTest(override=override):
+                self._rejected(message, override)
+        # Without the view subsampling, the render itself is still pinned.
+        self._rejected(
+            "auxiliary_render='dense_add', got 'none'",
+            base + "auxiliary_render=none", base + "auxiliary_views=null",
+        )
+        for key in (
+            "option_counts", "seed_mode", "tau", "decoder_hidden",
+            "router_hidden", "router_scale", "auxiliary_render",
+        ):
+            with self.subTest(missing=key):
+                config, _ = self._compose()
+                container = OmegaConf.to_container(config, resolve=False)
+                del container["p2g"]["grid_query"]["ordinal_count"][key]
+                with self.assertRaisesRegex(
+                    ValueError, f"ordinal_count is missing keys: {key}"
+                ):
+                    validate_experiment_config(OmegaConf.create(container))
+        # The ordinal count is V16's alone, and its scale only its own key.
+        for variant in DYNAMIC_VARIANTS:
+            if variant == DYNAMIC_VARIANT_V16:
+                continue
+            with self.subTest(variant=variant):
+                self._rejected(
+                    "only available to V16",
+                    "p2g.grid_query.count_mode=nested_ordinal",
+                    variant=variant,
+                )
+        self._rejected(
+            "Unsupported keys under p2g.grid_query.nested_count: router_scale",
+            "p2g.grid_query.nested_count.router_scale=3.0",
+            variant=DYNAMIC_VARIANT_V15,
+        )
+
+    def test_checkpoints_protect_the_ordinal_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "v16.ckpt"
+            stored, _ = self._compose()
+            torch.save({
+                "experiment_config": OmegaConf.to_container(stored, resolve=True)
+            }, checkpoint)
+            config, _source = load_checkpoint_config(checkpoint)
+            self.assertEqual(config.model.variant, DYNAMIC_VARIANT_V16)
+            for override in (
+                self.BLOCK + "router_scale=2.0",
+                self.BLOCK + "tau=0.5",
+                self.BLOCK + "auxiliary_views=null",
+            ):
+                with self.subTest(override=override):
+                    with self.assertRaisesRegex(ValueError, "changed roots"):
+                        resolve_main_config(OmegaConf.from_dotlist([
+                            f"train.ckpt_path={checkpoint}", override,
+                        ]))
 
 
 if __name__ == "__main__":

@@ -68,7 +68,7 @@ def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifie
 
     #params
     means3D = pc["position"]
-    opacity = gu.get_opacity(pc["opacity"])
+    opacity = gu.get_opacity(pc["opacity"], opacity_gate=pc.get("opacity_gate"))
     scales = gu.get_scaling(pc["scales"])
     rotations = gu.get_rotation(pc["rotations"])
     cov3D_precomp = None

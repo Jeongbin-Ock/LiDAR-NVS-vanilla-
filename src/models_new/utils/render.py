@@ -111,8 +111,21 @@ class Gaussianutil:
     def get_covariance(self, scale, scaling_modifier, rotation):
         return self.covariance_activation(self.get_scaling(scale), scaling_modifier, self.get_rotation(rotation))
     
-    def get_opacity(self, opacity):
-        return self.opacity_activation(opacity)
+    def get_opacity(self, opacity, *, opacity_gate=None):
+        """Activate opacity, then apply an optional per-Gaussian ST gate.
+
+        V15 carries selected gates separately from raw logits. Multiplication
+        after sigmoid preserves dL/dgate = opacity * dL/dactivated_opacity,
+        including when sigmoid rounds to one, without an inverse or clamp.
+        """
+        activated = self.opacity_activation(opacity)
+        if opacity_gate is None:
+            return activated
+        if opacity_gate.shape != activated.shape:
+            raise ValueError("opacity_gate must align one-to-one with opacity")
+        return activated * opacity_gate.to(
+            device=activated.device, dtype=activated.dtype,
+        )
     
     def get_rotation(self, rotation):
         return self.rotation_activation(rotation)

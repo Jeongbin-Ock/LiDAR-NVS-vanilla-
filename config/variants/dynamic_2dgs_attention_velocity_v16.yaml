@@ -1,0 +1,188 @@
+# Bbox-free Dynamic 2DGS V16.
+#
+# V15 with a new Gaussian-count router; every other key is V15's
+# (config/variants/dynamic_2dgs_attention_velocity_v15.yaml): the post-activation
+# Utonia stem adapter, v_raw without weight decay, no temporal LayerScale, the
+# 0.8 m radius local-attention block and the G1..G5 decoder around the token
+# anchor (LN -> 432 -> 576 -> SiLU -> 210) with its nested choices reduce / keep
+# / add = {G1} / {G1..G3} / {G1..G5}.
+#
+#   1. Two ordinal gates instead of three option scores (count_mode:
+#      nested_ordinal). The router (own LayerNorm, 432 -> 256 -> 128) ends in
+#      two cosine gates with no bias at the fixed scale router_scale = 3:
+#      u = 3 cos(w, h), so |u| <= 3. The keep gate opens G2/G3, the add gate
+#      opens G4/G5 given G2/G3, and with q = sigmoid(u)
+#        p(reduce) = 1 - q_keep, p(keep) = q_keep (1 - q_add),
+#        p(add) = q_keep q_add,
+#      each gate between 0.047 and 0.953. Training samples each gate as a hard
+#      Bernoulli(q) through logistic noise (two-class Gumbel, tau 1) with a
+#      straight-through sigmoid backward; evaluation takes the most probable
+#      option.
+#   2. Masked rasterization instead of an opacity gate. Training renders all
+#      five Gaussians of every token with a blend mask -- G1 = 1, G2/G3 =
+#      M_keep, G4/G5 = M_keep * M_add -- that scales only the blending weight
+#      (mask * alpha); culling and the 1/255 alpha cut still use the unmasked
+#      alpha. A Gaussian at mask 0 changes no output but still receives
+#      dL/dmask, so every token's gates learn from inserting or removing G2/G3
+#      and G4/G5, whichever option it sampled.
+#   3. The second training render is every token's G1..G5, unmasked
+#      (auxiliary_render: dense_add), at 2 target views per window drawn
+#      uniformly at random each step (auxiliary_views: 2), so Gaussians a token
+#      did not render keep training. Training optimizes the mean of the routed
+#      and the G1..G5 render losses; evaluation renders the chosen prefix only.
+#
+# There is no Gaussian-count cost.
+model:
+  variant: dynamic_2dgs_attention_velocity_v16
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  utonia_adaptation:
+    mode: hybrid
+    lora_targets: [attention, cpe, pooling]
+    train_layer_norm: true
+    stem:
+      train_intensity_column: true
+      adapter_position: post_activation
+      adapter_hidden: 16
+      adapter_activation: gelu
+      adapter_scale: 1.0
+    ffn_adapter:
+      widths: [8, 16, 32, 64]
+      activation: relu
+      scale: 0.1
+      dropout: 0.0
+  grid_query:
+    count_mode: nested_ordinal
+    ordinal_count:
+      option_counts: [1, 3, 5]
+      seed_mode: token
+      # Temperature of the gates' straight-through sigmoid((u + noise) / tau).
+      tau: 1.0
+      decoder_hidden: 576
+      router_hidden: [256, 128]
+      # Fixed cosine scale of both gates: |u| <= 3, so q stays in [0.047, 0.953].
+      router_scale: 3.0
+      auxiliary_render: dense_add
+      # The G1..G5 render uses 2 of each window's target views, drawn uniformly
+      # from all of them (inputs and novel sweeps) every step.
+      auxiliary_views: 2
+      logging:
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+
+train:
+  utonia_param_groups:
+    intensity:
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+    adapter:
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+      bias_weight_decay: 0.0
+    lora:
+      lr: 5.0e-5
+      weight_decay: 1.0e-4
+    layer_norm:
+      lr: 5.0e-5
+      weight_decay: 0.0
+  # Names relative to Point2Gaus. These parameters train at train.lr with no
+  # weight decay, in a last `downstream_no_decay` group.
+  downstream_no_decay: [dynamic_backend.temporal.v_raw]
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+
+data:
+  dataset_name: nuscenes_dynamic_lidar4d
+  mode: nvs
+  bbox_json_path: null
+  train_excluded_scenes: null
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.2
+    eval_seed: 42
+    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
+    # train scenes. Hold out each complete scene to prevent overlap.
+    train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # V14.1's linear hinge at the learned global speed:
+    #   bias_ij = -relu(d_ij / (softplus(v_raw) * |dt|) - 1).
+    # This 30 m/s value initializes v_raw; after construction the active speed
+    # comes from the parameter, not from the config value.
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+
+    # Heads 1-11 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    # No LayerScale: every layer adds out_proj(attended) to the residual stream
+    # as is. layer_scale_init would have nothing to initialize, so it is absent.
+    layer_scale: false
+
+  # One pre-LN block after the temporal stack: x + Attn(LN(x)), then
+  # + FFN(LN(.)) with a SiLU FFN whose last layer starts at zero. Every token
+  # attends to all tokens of both sweeps within radius_m at their reference-frame
+  # positions (itself included), without QK RMSNorm or LayerScale. 3D RoPE at
+  # base 10^1.2 and 2*pi/0.4 rad/m gives six wavelengths per axis from 0.4 m (the
+  # voxel) to 4.0 m; the longest half-wavelength, 2 m, exceeds the 0.8 m radius.
+  # query_chunk_size is how many queries (one FlashAttention2 varlen sequence
+  # each) go into one call; FlashAttention2 takes at most 65535.
+  local_attention:
+    radius_m: 0.8
+    num_heads: 12
+    mlp_ratio: 4
+    rope_base: 15.848931924611133      # 10^1.2
+    rope_position_scale: 15.707963267948966  # 2*pi/0.4 -> wavelengths 0.4-4.0 m
+    implementation: flash_varlen
+    query_chunk_size: 4096
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+loss:
+  w_chamfer: 0.02

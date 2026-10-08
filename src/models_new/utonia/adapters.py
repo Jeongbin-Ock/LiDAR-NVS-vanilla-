@@ -6,8 +6,13 @@ and the stage pooling projections, and adapts the rest differently:
 
 - Stem. The pretrained XYZ columns and bias stay frozen. A separate
   zero-initialized intensity column ``w_I`` is trained directly, and a
-  zero-output nonlinear adapter reading ``[x, y, z, I]`` is added to the Linear
-  output before the stem LayerNorm. The stem has no LoRA.
+  zero-output nonlinear adapter is added around the stem's LayerNorm and
+  activation. The stem has no LoRA. Where the adapter sits is
+  ``utonia_adaptation.stem.adapter_position``. ``pre_norm`` (V14/V14.1, and the
+  default) adds an adapter reading ``[x, y, z, I]`` to the Linear output before
+  the stem LayerNorm. ``post_activation`` (V15) has no pre-LayerNorm adapter:
+  it adds ``B act(A h)`` to ``h = GELU(LN(W x))``, so the stem's
+  input side is exactly frozen XYZ plus ``w_I``.
 - FFN. Every executed block keeps its pretrained ``C -> 4C -> C`` MLP as plain
   frozen Linears. An AdaptFormer-style ``C -> b -> C`` branch reads the same
   ``norm2`` output and adds ``scale * adapter(z)`` to the MLP output, so the
@@ -35,6 +40,7 @@ from src.experiment_config.definitions import (
     UTONIA_ADAPTER_ACTIVATIONS,
     UTONIA_LORA_TARGETS,
     UTONIA_PARAM_GROUP_ROLES,
+    UTONIA_STEM_ADAPTER_POSITIONS,
 )
 
 from .lora import (
@@ -85,6 +91,7 @@ class UtoniaHybridSettings:
     ffn_activation: str
     ffn_scale: float
     ffn_dropout: float
+    stem_adapter_position: str = "pre_norm"
 
 
 def _positive_finite(value, name) -> float:
@@ -147,6 +154,12 @@ def resolve_utonia_adaptation_settings(cfg):
     stem_hidden = int(_cfg_get(stem, "adapter_hidden", 0))
     if stem_hidden <= 0:
         raise ValueError("utonia_adaptation.stem.adapter_hidden must be positive")
+    stem_position = str(_cfg_get(stem, "adapter_position", "pre_norm")).lower()
+    if stem_position not in UTONIA_STEM_ADAPTER_POSITIONS:
+        raise ValueError(
+            "utonia_adaptation.stem.adapter_position must be one of "
+            f"{UTONIA_STEM_ADAPTER_POSITIONS}, got {stem_position!r}"
+        )
     widths = tuple(int(width) for width in _cfg_get(ffn, "widths", ()))
     if not widths or any(width <= 0 for width in widths):
         raise ValueError(
@@ -183,6 +196,7 @@ def resolve_utonia_adaptation_settings(cfg):
             _cfg_get(ffn, "scale", None), "utonia_adaptation.ffn_adapter.scale"
         ),
         ffn_dropout=dropout,
+        stem_adapter_position=stem_position,
     )
 
 
@@ -222,19 +236,19 @@ class NonlinearAdapter(nn.Module):
         return output
 
 
-class XYZIAdapterStem(nn.Module):
-    """``W_xyz p + b0 + w_I I + adapter([p, I])``, replacing ``stem.linear``.
+class XYZIStem(nn.Module):
+    """``W_xyz p + b0 + w_I I``, replacing ``stem.linear``.
 
     ``xyz`` holds the pretrained stem's XYZ columns and bias and stays frozen.
     The intensity column is a parameter of its own, so neither the optimizer
-    nor weight decay ever touches the XYZ columns. With ``w_I = 0`` and the
-    adapter's zero output this is exactly the pretrained 9D stem fed
-    ``[xyz, zero_rgb, zero_normal]``. The stem LayerNorm and GELU that follow
-    are unchanged.
+    nor weight decay ever touches the XYZ columns. With ``w_I = 0`` this is
+    exactly the pretrained 9D stem fed ``[xyz, zero_rgb, zero_normal]``. The
+    stem LayerNorm and GELU that follow are unchanged. This is the whole stem
+    Linear of the ``post_activation`` adaptation (V15); the ``pre_norm`` one
+    (V14) is :class:`XYZIAdapterStem`.
     """
 
-    def __init__(self, xyz: nn.Linear, *, hidden: int, activation: str,
-                 scale: float):
+    def __init__(self, xyz: nn.Linear):
         super().__init__()
         if xyz.in_features != 3:
             raise ValueError("the stem's frozen XYZ projection must read 3 columns")
@@ -244,9 +258,6 @@ class XYZIAdapterStem(nn.Module):
             device=xyz.weight.device,
             dtype=xyz.weight.dtype,
         ))
-        self.adapter = NonlinearAdapter(
-            4, hidden, xyz.out_features, activation=activation, scale=scale,
-        ).to(device=xyz.weight.device, dtype=xyz.weight.dtype)
         self.statistics = {}
 
     @property
@@ -257,16 +268,48 @@ class XYZIAdapterStem(nn.Module):
     def out_features(self):
         return self.xyz.out_features
 
-    def forward(self, feature):
+    def _projection_terms(self, feature):
+        """``(W_xyz p + b0, w_I I)`` for ``[x, y, z, i]`` rows."""
         if feature.shape[-1] != 4:
             raise ValueError(
                 f"the XYZI stem expects [x, y, z, i] rows, got {feature.shape[-1]}"
             )
         xyz_term = self.xyz(feature[..., :3])
         intensity_term = feature[..., 3:4] * self.intensity_weight
-        adapter_term = self.adapter(feature)
-        # Pre-LN magnitudes of the three summands. They are 0-D device tensors,
+        return xyz_term, intensity_term
+
+    def forward(self, feature):
+        xyz_term, intensity_term = self._projection_terms(feature)
+        # Pre-LN magnitudes of the two summands. They are 0-D device tensors,
         # so recording them costs no host synchronization.
+        with torch.no_grad():
+            self.statistics = {
+                "xyz_rms": _rms(xyz_term),
+                "intensity_rms": _rms(intensity_term),
+            }
+        return xyz_term + intensity_term
+
+
+class XYZIAdapterStem(XYZIStem):
+    """``W_xyz p + b0 + w_I I + adapter([p, I])``, replacing ``stem.linear``.
+
+    :class:`XYZIStem` plus a nonlinear adapter reading the same ``[x, y, z, I]``
+    row, added before the stem LayerNorm (V14/V14.1). With ``w_I = 0`` and the
+    adapter's zero output this is still exactly the pretrained 9D stem fed
+    ``[xyz, zero_rgb, zero_normal]``.
+    """
+
+    def __init__(self, xyz: nn.Linear, *, hidden: int, activation: str,
+                 scale: float):
+        super().__init__(xyz)
+        self.adapter = NonlinearAdapter(
+            4, hidden, xyz.out_features, activation=activation, scale=scale,
+        ).to(device=xyz.weight.device, dtype=xyz.weight.dtype)
+
+    def forward(self, feature):
+        xyz_term, intensity_term = self._projection_terms(feature)
+        adapter_term = self.adapter(feature)
+        # Pre-LN magnitudes of the three summands (0-D device tensors).
         with torch.no_grad():
             self.statistics = {
                 "xyz_rms": _rms(xyz_term),
@@ -274,6 +317,34 @@ class XYZIAdapterStem(nn.Module):
                 "adapter_rms": _rms(adapter_term),
             }
         return xyz_term + intensity_term + adapter_term
+
+
+class PostActivationStemAdapter(nn.Module):
+    """The stem activation with a residual adapter: ``h + B act(A h)``.
+
+    Replaces ``stem.act`` (V15). ``activation`` is the pretrained GELU, so
+    ``h = GELU(LN(W x))`` is the pretrained stem output; ``adapter`` reads it
+    and its zero-initialized ``up`` projection makes the branch add nothing
+    until it moves, which leaves the stem exactly the pretrained one at init.
+    """
+
+    def __init__(self, activation: nn.Module, adapter: NonlinearAdapter):
+        super().__init__()
+        self.activation = activation
+        self.adapter = adapter
+        self.statistics = {}
+
+    def forward(self, feature):
+        activated = self.activation(feature)
+        adapter_term = self.adapter(activated)
+        # Post-activation magnitudes of the stem output and of what the adapter
+        # adds to it (0-D device tensors).
+        with torch.no_grad():
+            self.statistics = {
+                "activation_rms": _rms(activated),
+                "adapter_rms": _rms(adapter_term),
+            }
+        return activated + adapter_term
 
 
 class ParallelAdapterMLP(nn.Module):
@@ -316,6 +387,14 @@ def adapt_utonia_stem_to_hybrid(feature_extractor,
                                 settings: UtoniaHybridSettings) -> int:
     """Split the pretrained stem into frozen XYZ, ``w_I`` and an adapter.
 
+    ``settings.stem_adapter_position`` places the adapter. ``pre_norm`` replaces
+    ``stem.linear`` with :class:`XYZIAdapterStem`, whose adapter reads
+    ``[x, y, z, I]`` and adds to the Linear output before the LayerNorm.
+    ``post_activation`` replaces it with the adapter-free :class:`XYZIStem` and
+    wraps ``stem.act`` in a :class:`PostActivationStemAdapter` that adds a
+    residual adapter to ``GELU(LN(W x))``; the stem's LayerNorm and activation
+    are the pretrained modules either way.
+
     Returns the checkpoint stem's input width. Only the XYZ columns and the
     bias are copied; the checkpoint's colour and normal columns only ever saw
     zeros from our loader.
@@ -332,18 +411,40 @@ def adapt_utonia_stem_to_hybrid(feature_extractor,
         raise ValueError(
             f"Utonia stem needs at least xyz columns, got {old_in_channels}"
         )
+    post_activation = settings.stem_adapter_position == "post_activation"
+    if post_activation:
+        activation = stem._modules.get("act")
+        if stem._modules.get("norm") is None or activation is None:
+            raise ValueError(
+                "the post-activation stem adapter needs the pretrained stem "
+                "LayerNorm and activation (embedding.stem.norm and "
+                "embedding.stem.act)"
+            )
     xyz = nn.Linear(3, base.out_features, bias=base.bias is not None)
     xyz = xyz.to(device=base.weight.device, dtype=base.weight.dtype)
     with torch.no_grad():
         xyz.weight.copy_(base.weight[:, :3])
         if base.bias is not None:
             xyz.bias.copy_(base.bias)
-    stem._modules["linear"] = XYZIAdapterStem(
-        xyz,
-        hidden=settings.stem_hidden,
-        activation=settings.stem_activation,
-        scale=settings.stem_scale,
-    )
+    if post_activation:
+        stem._modules["linear"] = XYZIStem(xyz)
+        stem._modules["act"] = PostActivationStemAdapter(
+            activation,
+            NonlinearAdapter(
+                base.out_features,
+                settings.stem_hidden,
+                base.out_features,
+                activation=settings.stem_activation,
+                scale=settings.stem_scale,
+            ).to(device=base.weight.device, dtype=base.weight.dtype),
+        )
+    else:
+        stem._modules["linear"] = XYZIAdapterStem(
+            xyz,
+            hidden=settings.stem_hidden,
+            activation=settings.stem_activation,
+            scale=settings.stem_scale,
+        )
     feature_extractor.embedding.in_channels = 4
     return old_in_channels
 
@@ -447,8 +548,9 @@ def freeze_utonia_and_enable_hybrid(feature_extractor: nn.Module,
     """Freeze the pretrained base, then enable exactly the hybrid scope.
 
     Only modules under ``active_roots`` (the stages the encoder executes) can
-    become trainable: LoRA A/B, the nonlinear adapters, the stem's intensity
-    column and, when configured, every LayerNorm's pretrained gamma/beta.
+    become trainable: LoRA A/B, the nonlinear adapters (the stem's included,
+    wherever it sits), the stem's intensity column and, when configured, every
+    LayerNorm's pretrained gamma/beta.
     """
     for parameter in feature_extractor.parameters():
         parameter.requires_grad = False
@@ -459,7 +561,7 @@ def freeze_utonia_and_enable_hybrid(feature_extractor: nn.Module,
             elif isinstance(module, _ADAPTER_TYPES):
                 for parameter in module.parameters():
                     parameter.requires_grad = True
-            elif isinstance(module, XYZIAdapterStem):
+            elif isinstance(module, XYZIStem):
                 module.intensity_weight.requires_grad = (
                     settings.train_intensity_column
                 )
@@ -491,14 +593,14 @@ def utonia_parameter_roles(named_roots):
 
     Roles come from module types, never from names or tensor rank: ``w_I`` is
     a weight column even though it is 1-D, and a new adapter deep inside a
-    pretrained block is still a new adapter. Returns
-    ``{role: [(name, parameter), ...]}`` for every role in
+    pretrained block (or behind the stem activation) is still a new adapter.
+    Returns ``{role: [(name, parameter), ...]}`` for every role in
     ``UTONIA_PARAMETER_ROLES`` (possibly empty).
     """
     roles = {role: [] for role in UTONIA_PARAMETER_ROLES}
     for root_name, root in named_roots:
         for module_name, module in root.named_modules(prefix=root_name):
-            if isinstance(module, XYZIAdapterStem):
+            if isinstance(module, XYZIStem):
                 roles["intensity"].append(
                     (f"{module_name}.intensity_weight", module.intensity_weight)
                 )
@@ -529,6 +631,43 @@ def utonia_parameter_roles(named_roots):
     }
 
 
+def _downstream_no_decay_parameters(downstream_named_parameters, names):
+    """The trainable downstream parameters ``train.downstream_no_decay`` names.
+
+    Each name is relative to Point2Gaus and must match exactly one trainable
+    downstream parameter: a typo or a frozen parameter would otherwise leave
+    the decay silently switched on, or the group empty.
+    """
+    if len(set(names)) != len(names):
+        raise ValueError("train.downstream_no_decay must not repeat a name")
+    matches = {
+        name: [
+            parameter for candidate, parameter in downstream_named_parameters
+            if candidate == name
+        ]
+        for name in names
+    }
+    problems = []
+    for label, bad in (
+        ("unknown", [name for name, found in matches.items() if not found]),
+        ("ambiguous", [
+            name for name, found in matches.items() if len(found) > 1
+        ]),
+        ("frozen", [
+            name for name, found in matches.items()
+            if len(found) == 1 and not found[0].requires_grad
+        ]),
+    ):
+        if bad:
+            problems.append(f"{label}: {', '.join(bad)}")
+    if problems:
+        raise ValueError(
+            "train.downstream_no_decay must name trainable downstream "
+            "parameters, relative to Point2Gaus (" + "; ".join(problems) + ")"
+        )
+    return [found[0] for found in matches.values()]
+
+
 def build_hybrid_param_groups(named_roots, downstream_named_parameters,
                               train_cfg):
     """AdamW groups for the hybrid scope, then everything after Utonia.
@@ -538,6 +677,12 @@ def build_hybrid_param_groups(named_roots, downstream_named_parameters,
     Empty roles (e.g. LayerNorm when it is frozen) get no group. The one
     scheduler multiplies every group's LR by the same factor, so the ratios
     hold throughout warmup and cosine decay.
+
+    ``train.downstream_no_decay`` (optional) lists downstream parameters, by
+    name relative to Point2Gaus, that leave the ``downstream`` group for a last
+    ``downstream_no_decay`` group at ``train.lr`` with weight decay 0; V15 uses
+    it for the learned max speed ``v_raw``. Absent or empty, the groups are
+    exactly the ones without the key.
     """
     group_cfg = _cfg_get(train_cfg, "utonia_param_groups", None)
     if group_cfg is None:
@@ -565,15 +710,39 @@ def build_hybrid_param_groups(named_roots, downstream_named_parameters,
                 f"train.utonia_param_groups.{config_role}.{decay_key}",
             ),
         })
+    downstream = list(downstream_named_parameters)
+    no_decay_names = _cfg_get(train_cfg, "downstream_no_decay", None)
+    if isinstance(no_decay_names, str):
+        raise ValueError("train.downstream_no_decay must be a list of names")
+    no_decay_ids = set()
+    if no_decay_names is not None and len(no_decay_names) > 0:
+        no_decay_ids = {
+            id(parameter) for parameter in _downstream_no_decay_parameters(
+                downstream, [str(name) for name in no_decay_names]
+            )
+        }
+    trainable = [
+        parameter for _, parameter in downstream if parameter.requires_grad
+    ]
     groups.append({
         "name": "downstream",
         "params": [
-            parameter for _, parameter in downstream_named_parameters
-            if parameter.requires_grad
+            parameter for parameter in trainable
+            if id(parameter) not in no_decay_ids
         ],
         "lr": float(_cfg_get(train_cfg, "lr")),
         "weight_decay": float(_cfg_get(train_cfg, "weight_decay")),
     })
+    if no_decay_ids:
+        groups.append({
+            "name": "downstream_no_decay",
+            "params": [
+                parameter for parameter in trainable
+                if id(parameter) in no_decay_ids
+            ],
+            "lr": float(_cfg_get(train_cfg, "lr")),
+            "weight_decay": 0.0,
+        })
     return groups
 
 
@@ -603,14 +772,26 @@ def check_param_group_coverage(groups, trainable_named_parameters) -> None:
 
 
 def hybrid_adaptation_statistics(feature_extractor, stage: int):
-    """Pre-LN stem magnitudes and FFN adapter/FFN output ratios per stage.
+    """Stem magnitudes and FFN adapter/FFN output ratios per stage.
 
-    Values come from the most recent forward and stay 0-D device tensors.
+    ``stem_xyz_rms`` and ``stem_intensity_rms`` are pre-LN summands of the stem
+    Linear. ``pre_norm`` adds ``stem_adapter_rms``, the pre-LN adapter summand;
+    ``post_activation`` adds ``stem_activation_rms``, the RMS of
+    ``h = GELU(LN(W x))``, and ``stem_adapter_rms``, the RMS of what the
+    adapter adds to ``h``. Values come from the most recent forward and stay
+    0-D device tensors.
     """
-    stem = feature_extractor.embedding.stem._modules["linear"]
+    stem_modules = feature_extractor.embedding.stem._modules
     stats = {
-        f"stem_{name}": value for name, value in stem.statistics.items()
+        f"stem_{name}": value
+        for name, value in stem_modules["linear"].statistics.items()
     }
+    activation = stem_modules.get("act")
+    if isinstance(activation, PostActivationStemAdapter):
+        stats.update({
+            f"stem_{name}": value
+            for name, value in activation.statistics.items()
+        })
     ratios = {}
     for index, block in _executed_blocks(feature_extractor, stage):
         record = block.mlp._modules["0"].statistics
@@ -626,9 +807,11 @@ def hybrid_adaptation_statistics(feature_extractor, stage: int):
 __all__ = [
     "NonlinearAdapter",
     "ParallelAdapterMLP",
+    "PostActivationStemAdapter",
     "UTONIA_PARAMETER_ROLES",
     "UtoniaHybridSettings",
     "XYZIAdapterStem",
+    "XYZIStem",
     "adapt_utonia_stem_to_hybrid",
     "attach_utonia_ffn_adapters",
     "build_hybrid_param_groups",

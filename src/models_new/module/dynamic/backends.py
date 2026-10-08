@@ -10,11 +10,17 @@ import torch.nn as nn
 from src.experiment_config.definitions import (
     FIXED_COUNT_SEED_MODES,
     SEED_MODE_RANGE_QUANTILE,
+    SEED_MODE_TOKEN,
 )
 
 from ...utils import boxes as box_utils
 from .common import _cfg_get
+from .gaussian_slots import DenseCountGaussianHead
 from .heads import EmbeddedInitVelocityHead, GaussianAttributeHead
+from .local_attention import RadiusLocalAttentionBlock
+from .nested_count import NestedCountGaussianHead
+from .option_experts import OptionExpertGaussianHead
+from .ordinal_count import OrdinalCountGaussianHead
 from .temporal import (
     CosineRoPELayerWeightedCrossAttention,
     FinalFeatureBarrierCrossAttention,
@@ -904,6 +910,297 @@ class SingleGaussianBarrierVelocityGaussianBackend(DynamicGaussianBackend):
         return GroupedGainBarrierCrossAttention(cfg.temporal, self.dim)
 
 
+class LocalAttentionBarrierVelocityGaussianBackend(DynamicGaussianBackend):
+    """The V15 family: V14.1's temporal stack, local attention, a token head.
+
+    * The temporal stack is V14.1's global-softplus barrier cross-attention
+      (built without LayerScale by ``temporal.layer_scale=false``), and the
+      velocity is read from its output exactly as in V14.1: ``v_init`` from the
+      head-0 layer mixture, ``v_offset`` from the temporal feature.
+    * One pre-LN radius local-attention block then refines every token from the
+      tokens of both sweeps within ``local_attention.radius_m`` of it, in the
+      window reference frame. Only the Gaussian head reads this refined feature.
+    * The Gaussian head decodes every token's Gaussians around its one anchor,
+      the Utonia token position. A subclass picks the head, and with it which
+      Gaussians a token renders.
+
+    Every head returns ``(rendered, auxiliary, routing)``. ``rendered`` becomes
+    ``batch_gaussians``, so evaluation, the test script and every tool render
+    exactly it. A routed head also returns ``routing``, published as
+    ``routing_stats``, and in training it may return ``auxiliary``, a
+    router-free second set published as ``auxiliary_batch_gaussians``, which
+    ``ModelWrapper`` renders and averages into the optimized loss. Every
+    Gaussian of a token shares that token's velocity, and every token's first
+    packed Gaussian has ``gaussian_slot_index == 0``, which is what keeps the
+    per-token velocity prior counting each token once.
+
+    ``ROUTED`` heads choose the count after refinement, so their tokens carry
+    one seed (``gaussians_per_token=1``) and need ``p2g.grid_query``'s routed
+    count block; the dense head takes ``gaussians_per_token`` from the
+    fixed-count seed contract and accepts no count config.
+    """
+
+    ROUTED = True
+
+    def __init__(self, cfg, gs_params, dim: int, offset_bound: float,
+                 gaussians_per_token: int = 1, gaussian_count_cfg=None,
+                 seed_mode: str = SEED_MODE_TOKEN):
+        if self.ROUTED:
+            if gaussian_count_cfg is None:
+                raise ValueError(
+                    f"{type(self).__name__} needs p2g.grid_query with its "
+                    "routed count block"
+                )
+            if int(gaussians_per_token) != 1:
+                raise ValueError(
+                    "routed tokens carry one shared anchor; the router, not "
+                    "the seed contract, decides how many Gaussians a token "
+                    "renders"
+                )
+        elif gaussian_count_cfg is not None:
+            raise ValueError(
+                f"{type(self).__name__} has no count router; its count is "
+                "the fixed-count seed contract's K_max"
+            )
+        if str(seed_mode).lower() != SEED_MODE_TOKEN:
+            raise ValueError(
+                "the V15 family anchors every Gaussian at its Utonia token "
+                f"position (seed_mode={SEED_MODE_TOKEN!r}), got {seed_mode!r}"
+            )
+        super().__init__(
+            cfg, gs_params, dim, offset_bound,
+            gaussians_per_token=gaussians_per_token,
+            gaussian_count_cfg=gaussian_count_cfg,
+            seed_mode=seed_mode,
+        )
+        self.local_attention = self._build_local_attention(cfg)
+
+    def _build_temporal(self, cfg):
+        return GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            cfg.temporal, self.dim
+        )
+
+    def _build_local_attention(self, cfg):
+        local_cfg = _cfg_get(cfg, "local_attention", None)
+        if local_cfg is None:
+            raise ValueError(
+                "the V15 family needs a dynamic_2dgs.local_attention block"
+            )
+        return RadiusLocalAttentionBlock(local_cfg, self.dim)
+
+    @staticmethod
+    def _token_gaussian_fields(packed, geometry, token_velocity,
+                               token_motion_fields, token_gaussian_count,
+                               sample_count):
+        """Expand per-token fields onto a packed Gaussian set and split it."""
+        token_index = packed["token_index"]
+        motion_fields = {
+            name: value[token_index]
+            for name, value in token_motion_fields.items()
+        }
+        if "opacity_gate" in packed:
+            motion_fields["opacity_gate"] = packed["opacity_gate"]
+        if "blend_mask" in packed:
+            motion_fields["blend_mask"] = packed["blend_mask"]
+        return DynamicGaussianBackend._assemble_batch_gaussians(
+            sample_count=sample_count,
+            batch_index=geometry["batch"][token_index],
+            position=packed["position"],
+            raw=packed["raw"],
+            velocity=token_velocity[token_index],
+            time_sec=geometry["time_sec"][token_index],
+            time_normalized=geometry["time_normalized"][token_index],
+            duration_sec=geometry["duration_sec"][token_index],
+            extra_fields={
+                **motion_fields,
+                "source_token_index": token_index,
+                "selected_k": token_gaussian_count[token_index],
+                "gaussian_slot_index": packed["slot_index"],
+            },
+        )
+
+    def forward(
+        self,
+        fused_feature,
+        token_position_local,
+        seed_local,
+        token_offset,
+        frame_batch_idx,
+        pose_list,
+        timestamps_normalized,
+        timestamps_sec,
+        window_duration_sec,
+        seed_delta_local=None,
+        seed_delta_sensor=None,
+    ):
+        if seed_delta_local is not None or seed_delta_sensor is not None:
+            raise ValueError(
+                "the V15 family decodes around the shared token anchor and "
+                "reads no seed deltas"
+            )
+        if fused_feature.ndim != 2 or fused_feature.shape[1] != self.dim:
+            raise ValueError(f"dynamic fused_feature must be (N,{self.dim})")
+        seed_local = self._check_fixed_count_seeds(
+            seed_local, token_position_local
+        )
+        geometry = self._reference_geometry_and_time(
+            token_position_local,
+            seed_local,
+            token_offset,
+            frame_batch_idx,
+            pose_list,
+            timestamps_normalized,
+            timestamps_sec,
+            window_duration_sec,
+        )
+        refined, temporal_fields = self._temporal_refine(
+            fused_feature,
+            geometry,
+            token_offset,
+            frame_batch_idx,
+        )
+        # The velocity offset reads the temporal feature, before the local
+        # refinement, exactly where V14.1 reads it.
+        token_velocity, token_motion_fields = self._predict_motion(
+            refined, geometry, None, temporal_fields
+        )
+        local_feature = self.local_attention(
+            refined, geometry["token_ref"], geometry["batch"]
+        )
+        # Every slot of a token-seeded token sits on the same anchor.
+        rendered, auxiliary, routing = self.gaussian_head(
+            local_feature, geometry["seed_ref"][:, 0]
+        )
+
+        sample_count = len(pose_list)
+        if routing is None:
+            token_count = torch.full(
+                (local_feature.shape[0],),
+                self.gaussian_head.gaussians_per_token,
+                dtype=torch.long, device=local_feature.device,
+            )
+        else:
+            token_count = routing["count"]
+        batch_gaussians = self._token_gaussian_fields(
+            rendered, geometry, token_velocity, token_motion_fields,
+            token_count, sample_count,
+        )
+        output = {
+            "batch_gaussians": batch_gaussians,
+            "gaussians": batch_gaussians,
+            "batch": geometry["batch"][rendered["token_index"]],
+        }
+        if routing is not None:
+            output["routing_stats"] = {
+                "k_logits": routing["logits"].detach(),
+                "selected_option": routing["option"].detach(),
+                "selected_k": routing["count"].detach(),
+                "option_counts": self.gaussian_head.option_count_values,
+                "token_position_local": token_position_local.detach(),
+            }
+        if auxiliary is not None:
+            auxiliary_count = torch.full_like(
+                token_count, self.gaussian_head.auxiliary_count
+            )
+            output["auxiliary_batch_gaussians"] = self._token_gaussian_fields(
+                auxiliary, geometry, token_velocity, token_motion_fields,
+                auxiliary_count, sample_count,
+            )
+        return output
+
+
+class NestedCountBarrierVelocityGaussianBackend(
+    LocalAttentionBarrierVelocityGaussianBackend
+):
+    """V15 and V15.1: a router picks a nested prefix of G1..G5 per token.
+
+    :class:`NestedCountGaussianHead` decodes G1..G5 around the token anchor and
+    routes each token to ``{G1}``, ``{G1..G3}`` or ``{G1..G5}``. In V15's
+    training the auxiliary set is every token's G1..G3; V15.1 has none.
+    """
+
+    def _build_gaussian_head(self, cfg, gs_params, offset_bound,
+                             gaussian_count_cfg):
+        return NestedCountGaussianHead(
+            gaussian_count_cfg,
+            _cfg_get(cfg, "gaussian_head", None),
+            gs_params,
+            self.dim,
+            offset_bound,
+        )
+
+
+class OptionExpertBarrierVelocityGaussianBackend(
+    LocalAttentionBarrierVelocityGaussianBackend
+):
+    """V15.2: V15's router, but every option renders its own expert.
+
+    :class:`OptionExpertGaussianHead` decodes E1, E3 and E5 from one shared
+    trunk around the token anchor and renders the chosen option's expert,
+    every Gaussian of it gated by that option. In training the auxiliary set is
+    every token's E5.
+    """
+
+    def _build_gaussian_head(self, cfg, gs_params, offset_bound,
+                             gaussian_count_cfg):
+        return OptionExpertGaussianHead(
+            gaussian_count_cfg,
+            _cfg_get(cfg, "gaussian_head", None),
+            gs_params,
+            self.dim,
+            offset_bound,
+        )
+
+
+class OrdinalCountBarrierVelocityGaussianBackend(
+    LocalAttentionBarrierVelocityGaussianBackend
+):
+    """V16: V15's nested G1..G5, chosen by two bounded ordinal gates.
+
+    :class:`OrdinalCountGaussianHead` decodes G1..G5 around the token anchor
+    with V15's decoder; a keep gate (G2/G3) and an add gate (G4/G5 given
+    G2/G3) pick ``{G1}``, ``{G1..G3}`` or ``{G1..G5}``. In training the routed
+    set is every token's G1..G5 carrying per-Gaussian ``blend_mask`` values for
+    masked rasterization, and the auxiliary set is the same Gaussians
+    unmasked; evaluation renders each token's most probable prefix.
+    """
+
+    def _build_gaussian_head(self, cfg, gs_params, offset_bound,
+                             gaussian_count_cfg):
+        return OrdinalCountGaussianHead(
+            gaussian_count_cfg,
+            _cfg_get(cfg, "gaussian_head", None),
+            gs_params,
+            self.dim,
+            offset_bound,
+        )
+
+
+class DenseCountBarrierVelocityGaussianBackend(
+    LocalAttentionBarrierVelocityGaussianBackend
+):
+    """V15.3: V15 without the router; every token renders five Gaussians.
+
+    :class:`DenseCountGaussianHead` is V15's two-layer decoder with nothing
+    routed: every token's ``gaussians_per_token`` (V15.3: five) decoded
+    Gaussians are rendered, in training and at evaluation, with no opacity
+    gate, no auxiliary render and no ``routing_stats``.
+    """
+
+    ROUTED = False
+
+    def _build_gaussian_head(self, cfg, gs_params, offset_bound,
+                             gaussian_count_cfg):
+        del gaussian_count_cfg
+        return DenseCountGaussianHead(
+            _cfg_get(cfg, "gaussian_head", None),
+            gs_params,
+            self.dim,
+            offset_bound,
+            gaussians_per_token=self.gaussians_per_token,
+        )
+
+
 __all__ = [
     "DynamicGaussianBackend",
     "RouterCapableGaussianBackend",
@@ -920,4 +1217,9 @@ __all__ = [
     "SeedConditionedBarrierVelocityGaussianBackend",
     "SeedConditionedCosineRoPEVelocityGaussianBackend",
     "SingleGaussianBarrierVelocityGaussianBackend",
+    "LocalAttentionBarrierVelocityGaussianBackend",
+    "NestedCountBarrierVelocityGaussianBackend",
+    "OptionExpertBarrierVelocityGaussianBackend",
+    "OrdinalCountBarrierVelocityGaussianBackend",
+    "DenseCountBarrierVelocityGaussianBackend",
 ]

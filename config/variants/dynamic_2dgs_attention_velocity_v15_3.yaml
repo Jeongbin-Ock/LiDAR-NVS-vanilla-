@@ -1,0 +1,158 @@
+# Bbox-free Dynamic 2DGS V15.3.
+#
+# V15 without its router: right after the radius local-attention block, every
+# token decodes five Gaussians around its token anchor through V15's two-layer
+# decoder, LN(f) -> Linear(432 -> 576) -> SiLU -> Linear(576 -> 5 x 42), and all
+# five are rendered, in training and at evaluation alike. There is no count
+# choice, no opacity gate and no second training render, so training optimizes
+# one render loss. The count is the ordinary fixed-count contract pinned to
+# K_max 5 at the token anchor, and the decoder's hidden width moves to
+# dynamic_2dgs.gaussian_head.decoder_hidden because no count block is left to
+# hold it. Every other key is V15's
+# (config/variants/dynamic_2dgs_attention_velocity_v15.yaml): the post-activation
+# Utonia stem adapter, v_raw without weight decay, no temporal LayerScale and
+# the 0.8 m radius local-attention block.
+#
+# The decoder is V15's and V15.2's E5 path, module for module, so V15.3 is the
+# router-free reference for both.
+model:
+  variant: dynamic_2dgs_attention_velocity_v15_3
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  utonia_adaptation:
+    mode: hybrid
+    lora_targets: [attention, cpe, pooling]
+    train_layer_norm: true
+    stem:
+      train_intensity_column: true
+      adapter_position: post_activation
+      adapter_hidden: 16
+      adapter_activation: gelu
+      adapter_scale: 1.0
+    ffn_adapter:
+      widths: [8, 16, 32, 64]
+      activation: relu
+      scale: 0.1
+      dropout: 0.0
+  grid_query:
+    count_mode: legacy
+    K_max: 5
+    seed_mode: token
+
+train:
+  utonia_param_groups:
+    intensity:
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+    adapter:
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+      bias_weight_decay: 0.0
+    lora:
+      lr: 5.0e-5
+      weight_decay: 1.0e-4
+    layer_norm:
+      lr: 5.0e-5
+      weight_decay: 0.0
+  # Names relative to Point2Gaus. These parameters train at train.lr with no
+  # weight decay, in a last `downstream_no_decay` group.
+  downstream_no_decay: [dynamic_backend.temporal.v_raw]
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+
+data:
+  dataset_name: nuscenes_dynamic_lidar4d
+  mode: nvs
+  bbox_json_path: null
+  train_excluded_scenes: null
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.2
+    eval_seed: 42
+    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
+    # train scenes. Hold out each complete scene to prevent overlap.
+    train_excluded_scenes: [scene-0757, scene-1094]
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # V14.1's linear hinge at the learned global speed:
+    #   bias_ij = -relu(d_ij / (softplus(v_raw) * |dt|) - 1).
+    # This 30 m/s value initializes v_raw; after construction the active speed
+    # comes from the parameter, not from the config value.
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+
+    # Heads 1-11 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    # No LayerScale: every layer adds out_proj(attended) to the residual stream
+    # as is. layer_scale_init would have nothing to initialize, so it is absent.
+    layer_scale: false
+
+  # One pre-LN block after the temporal stack: x + Attn(LN(x)), then
+  # + FFN(LN(.)) with a SiLU FFN whose last layer starts at zero. Every token
+  # attends to all tokens of both sweeps within radius_m at their reference-frame
+  # positions (itself included), without QK RMSNorm or LayerScale. 3D RoPE at
+  # base 10^1.2 and 2*pi/0.4 rad/m gives six wavelengths per axis from 0.4 m (the
+  # voxel) to 4.0 m; the longest half-wavelength, 2 m, exceeds the 0.8 m radius.
+  # query_chunk_size is how many queries (one FlashAttention2 varlen sequence
+  # each) go into one call; FlashAttention2 takes at most 65535.
+  local_attention:
+    radius_m: 0.8
+    num_heads: 12
+    mlp_ratio: 4
+    rope_base: 15.848931924611133      # 10^1.2
+    rope_position_scale: 15.707963267948966  # 2*pi/0.4 -> wavelengths 0.4-4.0 m
+    implementation: flash_varlen
+    query_chunk_size: 4096
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+    # Hidden width of the router-free decoder (V15's decoder_hidden).
+    decoder_hidden: 576
+
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+loss:
+  w_chamfer: 0.02

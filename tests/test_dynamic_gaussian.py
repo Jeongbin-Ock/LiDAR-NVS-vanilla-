@@ -3219,5 +3219,274 @@ class V11_1GroupedGainSingleGaussianTest(unittest.TestCase):
         torch.testing.assert_close(item["velocity"], item["velocity_init"])
 
 
+class V15TemporalWithoutLayerScaleTest(unittest.TestCase):
+    """``temporal.layer_scale: false`` (V15) builds no gate and adds the branch as is."""
+
+    HEADS = 12
+    DIM = 144
+    LAYERS = 2
+
+    @staticmethod
+    def _forward_args(feature, position, first_frame_tokens, duration=0.8):
+        return V11MaxSpeedBarrierAttentionTest._forward_args(
+            feature, position, first_frame_tokens, duration
+        )
+
+    @staticmethod
+    def _without_layer_scale(cfg):
+        cfg.layer_scale = False
+        del cfg["layer_scale_init"]
+        return cfg
+
+    def _cfg(self, *, layer_scale):
+        cfg = v12_temporal_cfg(layers=self.LAYERS, heads=self.HEADS)
+        return self._without_layer_scale(cfg) if not layer_scale else cfg
+
+    @staticmethod
+    def _randomize_ffn(module):
+        # The FFN's last layer starts at zero; make the whole layer matter.
+        with torch.no_grad():
+            for ffn in module.ffn:
+                ffn[-1].weight.normal_(0.0, 0.1)
+                ffn[-1].bias.normal_(0.0, 0.1)
+
+    def _unit_gain_pair(self, module_cls, cfg_factory, *, dim, **kwargs):
+        """(no LayerScale, LayerScale with every gamma 1.0), same other weights."""
+        torch.manual_seed(151)
+        plain = module_cls(
+            self._without_layer_scale(cfg_factory()), dim=dim, **kwargs
+        ).eval()
+        self._randomize_ffn(plain)
+        cfg_on = cfg_factory()
+        cfg_on.layer_scale = True
+        gated = module_cls(cfg_on, dim=dim, **kwargs).eval()
+        incompatible = gated.load_state_dict(plain.state_dict(), strict=False)
+        self.assertEqual(incompatible.unexpected_keys, [])
+        self.assertEqual(
+            incompatible.missing_keys,
+            [f"cross_layer_scale.{layer}" for layer in range(plain.n_layers)],
+        )
+        with torch.no_grad():
+            for gamma in gated.cross_layer_scale:
+                gamma.fill_(1.0)
+        return plain, gated
+
+    def _assert_same_outputs(self, plain, gated, dim):
+        torch.manual_seed(152)
+        tokens = 9
+        feature = torch.randn(tokens, dim)
+        position = torch.randn(tokens, 3) * 6.0
+        args = self._forward_args(feature, position, 4)
+        with torch.no_grad():
+            refined_plain, fields_plain = plain(*args)
+            refined_gated, fields_gated = gated(*args)
+        torch.testing.assert_close(
+            refined_plain, refined_gated, atol=0.0, rtol=0.0
+        )
+        self.assertEqual(set(fields_plain), set(fields_gated))
+        for name, value in fields_plain.items():
+            torch.testing.assert_close(
+                value, fields_gated[name], atol=0.0, rtol=0.0
+            )
+        return refined_plain, fields_plain
+
+    def test_no_layer_scale_equals_unit_gain_layer_scale(self):
+        plain, gated = self._unit_gain_pair(
+            GlobalSoftplusMaxSpeedBarrierCrossAttention,
+            lambda: v12_temporal_cfg(layers=self.LAYERS, heads=self.HEADS),
+            dim=self.DIM,
+        )
+        refined, fields = self._assert_same_outputs(plain, gated, self.DIM)
+        self.assertIn("matched_position", fields)
+        self.assertGreater(float(refined.abs().max()), 0.0)
+
+        # The comparison is sensitive: the default 0.1 gain changes the result.
+        with torch.no_grad():
+            for gamma in gated.cross_layer_scale:
+                gamma.fill_(0.1)
+            torch.manual_seed(152)
+            feature = torch.randn(9, self.DIM)
+            position = torch.randn(9, 3) * 6.0
+            args = self._forward_args(feature, position, 4)
+            self.assertFalse(torch.equal(plain(*args)[0], gated(*args)[0]))
+
+    def test_every_residual_site_honours_the_flag(self):
+        """V11.2's and V13's layer loops add the branch through the same helper."""
+        cases = (
+            (
+                FinalFeatureBarrierCrossAttention,
+                lambda: v11_2_temporal_cfg(layers=self.LAYERS, heads=self.HEADS),
+            ),
+            (
+                RawQKRoPELayerWeightedCrossAttention,
+                lambda: v13_2_temporal_cfg(layers=self.LAYERS, heads=self.HEADS),
+            ),
+        )
+        for module_cls, cfg_factory in cases:
+            with self.subTest(module=module_cls.__name__):
+                plain, gated = self._unit_gain_pair(
+                    module_cls, cfg_factory, dim=self.DIM
+                )
+                self._assert_same_outputs(plain, gated, self.DIM)
+
+    def test_the_flag_builds_no_layer_scale_parameters(self):
+        gated = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            self._cfg(layer_scale=True), dim=self.DIM
+        )
+        plain = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            self._cfg(layer_scale=False), dim=self.DIM
+        )
+        self.assertIsNone(plain.cross_layer_scale)
+        self.assertEqual(
+            [name for name, _ in plain.named_parameters()
+             if "cross_layer_scale" in name],
+            [],
+        )
+        self.assertEqual(
+            [key for key in plain.state_dict() if "cross_layer_scale" in key],
+            [],
+        )
+        # Exactly the LayerScale parameters are missing; the rest, and their
+        # order, are the gated module's.
+        gated_names = [name for name, _ in gated.named_parameters()]
+        self.assertEqual(
+            [name for name in gated_names if "cross_layer_scale" in name],
+            [f"cross_layer_scale.{layer}" for layer in range(self.LAYERS)],
+        )
+        self.assertEqual(
+            [name for name, _ in plain.named_parameters()],
+            [name for name in gated_names if "cross_layer_scale" not in name],
+        )
+        self.assertEqual(
+            sum(p.numel() for p in gated.parameters())
+            - sum(p.numel() for p in plain.parameters()),
+            self.LAYERS * self.DIM,
+        )
+        # out_proj keeps its default initialization, not a shrunk one.
+        self.assertGreater(float(plain.out_proj[0].weight.abs().max()), 0.0)
+
+    def test_layer_scale_true_or_absent_is_unchanged(self):
+        absent = v12_temporal_cfg(layers=self.LAYERS, heads=self.HEADS)
+        self.assertNotIn("layer_scale", absent)
+        explicit = v12_temporal_cfg(layers=self.LAYERS, heads=self.HEADS)
+        explicit.layer_scale = True
+        torch.manual_seed(153)
+        default_module = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            absent, dim=self.DIM
+        )
+        torch.manual_seed(153)
+        explicit_module = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            explicit, dim=self.DIM
+        )
+        self.assertIsInstance(default_module.cross_layer_scale, torch.nn.ParameterList)
+        self.assertEqual(
+            list(default_module.state_dict()), list(explicit_module.state_dict())
+        )
+        for gamma in default_module.cross_layer_scale:
+            torch.testing.assert_close(gamma, torch.full((self.DIM,), 0.1))
+        for key, value in default_module.state_dict().items():
+            torch.testing.assert_close(
+                value, explicit_module.state_dict()[key], atol=0.0, rtol=0.0
+            )
+        # With the gate the branch is gamma * out_proj(attended).
+        branch = torch.randn(3, self.DIM)
+        torch.testing.assert_close(
+            default_module._cross_branch(1, branch),
+            default_module.cross_layer_scale[1] * branch,
+        )
+        plain = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            self._cfg(layer_scale=False), dim=self.DIM
+        )
+        self.assertIs(plain._cross_branch(1, branch), branch)
+
+    def test_no_layer_scale_rejects_an_init_and_non_boolean_flags(self):
+        cfg = v12_temporal_cfg(layers=self.LAYERS, heads=self.HEADS)
+        cfg.layer_scale = False
+        self.assertEqual(float(cfg.layer_scale_init), 0.1)
+        with self.assertRaisesRegex(ValueError, "layer_scale_init"):
+            GlobalSoftplusMaxSpeedBarrierCrossAttention(cfg, dim=self.DIM)
+        for value in ("false", 0, None):
+            with self.subTest(layer_scale=value):
+                cfg = self._cfg(layer_scale=True)
+                cfg.layer_scale = value
+                with self.assertRaisesRegex(ValueError, "true or false"):
+                    GlobalSoftplusMaxSpeedBarrierCrossAttention(
+                        cfg, dim=self.DIM
+                    )
+        # The gate's own range check is unchanged.
+        cfg = self._cfg(layer_scale=True)
+        cfg.layer_scale_init = 1.5
+        with self.assertRaisesRegex(ValueError, "layer_scale_init"):
+            GlobalSoftplusMaxSpeedBarrierCrossAttention(cfg, dim=self.DIM)
+
+
+class NestedCountSeedConfigTest(unittest.TestCase):
+    """V15's nested count reads as one token-position anchor per token."""
+
+    @staticmethod
+    def _p2g(variant):
+        from src.config_loader import compose_fresh_config
+
+        config, _source = compose_fresh_config(
+            OmegaConf.from_dotlist([f"model.variant={variant}"])
+        )
+        return config.p2g
+
+    def test_nested_tokens_resolve_to_one_token_anchor(self):
+        from src.config_loader import DYNAMIC_VARIANT_V15
+        from src.models_new.module.builders.grid_seed_config import (
+            GridSeedConfig,
+            resolve_grid_seed_config,
+        )
+
+        p2g = self._p2g(DYNAMIC_VARIANT_V15)
+        seed = resolve_grid_seed_config(p2g)
+        self.assertEqual(
+            seed, GridSeedConfig(count_mode="legacy", k_max=1, seed_mode="token")
+        )
+        self.assertFalse(seed.learned)
+        self.assertEqual(seed.gaussians_per_token, 1)
+        self.assertFalse(seed.distinct_slot_seeds)
+
+        container = OmegaConf.to_container(p2g, resolve=True)
+        # An absent seed_mode can only mean the one legal value.
+        del container["grid_query"]["nested_count"]["seed_mode"]
+        self.assertEqual(
+            resolve_grid_seed_config(OmegaConf.create(container)), seed
+        )
+        # Nested tokens have no medoid or range-quantile seeds to choose.
+        for other in ("medoid", "range_quantile"):
+            container["grid_query"]["nested_count"]["seed_mode"] = other
+            with self.assertRaisesRegex(ValueError, "seed_mode must be 'token'"):
+                resolve_grid_seed_config(OmegaConf.create(container))
+        del container["grid_query"]["nested_count"]
+        with self.assertRaisesRegex(ValueError, "nested_count is required"):
+            resolve_grid_seed_config(OmegaConf.create(container))
+
+    def test_other_count_modes_resolve_as_before(self):
+        from src.config_loader import DYNAMIC_VARIANT_V11_6, DYNAMIC_VARIANT_V14_1
+        from src.models_new.module.builders.grid_seed_config import (
+            GridSeedConfig,
+            resolve_grid_seed_config,
+        )
+
+        self.assertEqual(
+            resolve_grid_seed_config(self._p2g(DYNAMIC_VARIANT_V14_1)),
+            GridSeedConfig(
+                count_mode="learned_gumbel", k_max=3, seed_mode="token"
+            ),
+        )
+        self.assertEqual(
+            resolve_grid_seed_config(self._p2g(DYNAMIC_VARIANT_V11_6)),
+            GridSeedConfig(
+                count_mode="legacy", k_max=3, seed_mode="range_quantile"
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "nested_gumbel"):
+            resolve_grid_seed_config(
+                OmegaConf.create({"grid_query": {"count_mode": "bogus"}})
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

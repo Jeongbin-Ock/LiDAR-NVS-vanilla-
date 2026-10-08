@@ -16,45 +16,84 @@ def _validated_range_edges(range_edges_m: Sequence[float]) -> tuple[float, ...]:
     return edges
 
 
+def routing_option_counts(
+    routing: Mapping[str, torch.Tensor],
+    option_count: int,
+    device=None,
+) -> torch.Tensor:
+    """How many Gaussians each routing option renders.
+
+    The learned_gumbel router's option ``k - 1`` renders ``k`` Gaussians and
+    publishes no mapping. V15's nested router publishes ``option_counts``
+    ([1, 3, 5] for reduce/keep/add).
+    """
+    counts = routing.get("option_counts")
+    if counts is None:
+        return torch.arange(1, int(option_count) + 1, device=device)
+    counts = torch.as_tensor(counts, device=device).long()
+    if tuple(counts.shape) != (int(option_count),):
+        raise ValueError(
+            "routing option_counts must list one count per router logit"
+        )
+    return counts
+
+
 def routing_sufficient_statistics(
     routing: Mapping[str, torch.Tensor],
     range_edges_m: Sequence[float],
 ) -> dict[str, torch.Tensor]:
     """Summarize learned-count routing without retaining its autograd graph.
 
-    Produces the global K distribution and its breakdown by token range.
+    Produces the option distribution, the Gaussian count it implies, the
+    router's expected count and top-2 logit margin, and the count's breakdown
+    by token range. A router reports its sampled choice either as
+    ``selected_option`` (an index into the logits) or, like the
+    learned_gumbel K={1,2,3} router, as ``selected_k = option + 1``.
     """
     with torch.no_grad():
         logits = routing["k_logits"].detach().float()
-        selected_k = routing["selected_k"].detach().long()
 
         if logits.ndim != 2 or logits.shape[1] < 2:
             raise ValueError("routing k_logits must have shape (N, K) with K >= 2")
         token_count, k_max = logits.shape
         expected_shape = (token_count,)
-        if tuple(selected_k.shape) != expected_shape:
-            raise ValueError("routing selected_k must align with k_logits")
+        if "selected_option" in routing:
+            selected_index = routing["selected_option"].detach().long()
+        else:
+            selected_index = routing["selected_k"].detach().long() - 1
+        if tuple(selected_index.shape) != expected_shape:
+            raise ValueError("routing selection must align with k_logits")
 
         dtype = logits.dtype
-        argmax_k = logits.argmax(dim=-1) + 1
-        selected_index = selected_k - 1
+        device = logits.device
+        option_counts = routing_option_counts(
+            routing, k_max, device=device
+        ).to(dtype)
+        argmax_index = logits.argmax(dim=-1)
         if token_count > 0 and (
             (selected_index < 0).any() or (selected_index >= k_max).any()
         ):
-            raise ValueError("routing selected_k contains an invalid count")
+            raise ValueError("routing selection contains an invalid option")
+        sampled_k = option_counts[selected_index]
+        argmax_k = option_counts[argmax_index]
 
         selected_counts = torch.bincount(
             selected_index, minlength=k_max
         ).to(dtype)
         argmax_counts = torch.bincount(
-            argmax_k - 1, minlength=k_max
+            argmax_index, minlength=k_max
         ).to(dtype)
+        probability = torch.softmax(logits, dim=-1)
+        top_two = logits.topk(2, dim=-1).values
         statistics = {
             "token_count": logits.new_tensor(float(token_count)),
             "selected_counts": selected_counts,
             "argmax_counts": argmax_counts,
-            "sampled_k_sum": selected_k.to(dtype).sum(),
-            "argmax_k_sum": argmax_k.to(dtype).sum(),
+            "sampled_k_sum": sampled_k.sum(),
+            "argmax_k_sum": argmax_k.sum(),
+            "expected_k_sum": (probability * option_counts).sum(),
+            "probability_sums": probability.sum(dim=0),
+            "logit_margin_sum": (top_two[:, 0] - top_two[:, 1]).sum(),
         }
         edges = _validated_range_edges(range_edges_m)
         token_position_local = routing["token_position_local"].detach().float()
@@ -63,7 +102,6 @@ def routing_sufficient_statistics(
                 "routing token_position_local must have shape (N, 3)"
             )
 
-        device = logits.device
         ranges = token_position_local.norm(dim=-1)
         boundaries = torch.tensor(
             edges[1:], device=device, dtype=ranges.dtype
@@ -82,7 +120,7 @@ def routing_sufficient_statistics(
             ones, range_index, num_range_bins
         )
         range_sampled_k_sums = scatter_sum(
-            selected_k, range_index, num_range_bins
+            sampled_k, range_index, num_range_bins
         )
         range_argmax_k_sums = scatter_sum(
             argmax_k, range_index, num_range_bins
@@ -130,5 +168,6 @@ def range_bin_labels(range_edges_m: Sequence[float]) -> tuple[str, ...]:
 __all__ = [
     "distributed_sum_statistics",
     "range_bin_labels",
+    "routing_option_counts",
     "routing_sufficient_statistics",
 ]

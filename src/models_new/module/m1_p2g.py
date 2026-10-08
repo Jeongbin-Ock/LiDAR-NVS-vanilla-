@@ -5,6 +5,8 @@ import os
 import torch
 import torch.nn as nn
 
+from src.experiment_config.definitions import ROUTED_COUNT_BLOCKS
+
 from .. import utonia
 from ..utonia.adapters import (
     adapt_utonia_stem_to_hybrid,
@@ -29,13 +31,25 @@ from .builders import OccupiedGridTokenBuilder
 from .builders.common import GridSeedConfig, UtoniaGridMapper
 
 
-def _uses_learned_count(cfg) -> bool:
-    """Whether ``p2g.grid_query`` asks the router to predict the count."""
+def _grid_count_mode(cfg) -> str:
     grid_query = getattr(cfg, "grid_query", None)
     if grid_query is None:
-        return False
-    count_mode = str(getattr(grid_query, "count_mode", "legacy")).lower()
-    return count_mode in GridSeedConfig.LEARNED_COUNT_MODES
+        return GridSeedConfig.LEGACY_COUNT_MODE
+    return str(getattr(grid_query, "count_mode", "legacy")).lower()
+
+
+def _uses_learned_count(cfg) -> bool:
+    """Whether ``p2g.grid_query`` asks the router to predict the count."""
+    return _grid_count_mode(cfg) in GridSeedConfig.LEARNED_COUNT_MODES
+
+
+def _uses_routed_count(cfg) -> bool:
+    """Whether ``p2g.grid_query`` asks a V15-family router to pick 1, 3 or 5.
+
+    V15/V15.1's ``nested_gumbel`` picks a prefix of G1..G5 and V15.2's
+    ``expert_gumbel`` one of three experts, both after the local refinement.
+    """
+    return _grid_count_mode(cfg) in ROUTED_COUNT_BLOCKS
 
 
 class Point2Gaus(nn.Module):
@@ -138,6 +152,11 @@ class Point2Gaus(nn.Module):
         # while a learned count_mode hands the decision to the router. Nothing
         # about that choice is pinned to the variant name.
         self.dynamic_adaptive_count = _uses_learned_count(cfg)
+        # V15's nested count and V15.2's per-option experts give every token
+        # one shared anchor (the token position) and let a router choose 1, 3
+        # or 5 Gaussians after the temporal and local refinement, so the seed
+        # contract is one slot.
+        self.dynamic_routed_count = _uses_routed_count(cfg)
         self.anchor_builder = OccupiedGridTokenBuilder(cfg)
         self.dynamic_gaussians_per_token = (
             1 if self.dynamic_adaptive_count
@@ -165,15 +184,24 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V13_4,
             DYNAMIC_VARIANT_V14,
             DYNAMIC_VARIANT_V14_1,
+            DYNAMIC_VARIANT_V15,
+            DYNAMIC_VARIANT_V15_1,
+            DYNAMIC_VARIANT_V15_2,
+            DYNAMIC_VARIANT_V15_3,
+            DYNAMIC_VARIANT_V16,
         )
         from .dynamic_gaussian import (
             CosineRoPEVelocityGaussianBackend,
+            DenseCountBarrierVelocityGaussianBackend,
             FinalFeatureBarrierVelocityGaussianBackend,
             FixedMotionGainMaxSpeedBarrierVelocityGaussianBackend,
             GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend,
             LayerwiseSoftplusMaxSpeedBarrierVelocityGaussianBackend,
             LearnableMaxSpeedBarrierVelocityGaussianBackend,
             MaxSpeedBarrierVelocityGaussianBackend,
+            NestedCountBarrierVelocityGaussianBackend,
+            OptionExpertBarrierVelocityGaussianBackend,
+            OrdinalCountBarrierVelocityGaussianBackend,
             RawQKRoPEVelocityGaussianBackend,
             RMSNormFeatureRoPEVelocityGaussianBackend,
             RMSNormRoPEVelocityGaussianBackend,
@@ -206,7 +234,14 @@ class Point2Gaus(nn.Module):
         # head 3D RoPE so the complete stack stays on FlashAttention. V13.4
         # keeps that stack and RMSNorm but leaves match head 0 unrotated.
         # V14 is V11.4's backend behind the hybrid Utonia adaptation, and
-        # V14.1 learns its one global barrier speed as softplus(v_raw).
+        # V14.1 learns its one global barrier speed as softplus(v_raw). V15
+        # keeps V14.1's temporal stack without LayerScale, adds one radius
+        # local-attention block, and decodes a nested G1..G5 set per token
+        # whose rendered prefix a router picks. V15.1 shares V15's class and
+        # differs only by training on the routed render alone. V15.2 keeps
+        # V15's router but renders the chosen option's own expert (E1/E3/E5
+        # on one shared trunk); V15.3 has no router and renders five
+        # Gaussians per token.
         backend_cls = {
             DYNAMIC_VARIANT_V11: MaxSpeedBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V11_1: SingleGaussianBarrierVelocityGaussianBackend,
@@ -233,6 +268,11 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V14_1: (
                 GlobalSoftplusMaxSpeedBarrierVelocityGaussianBackend
             ),
+            DYNAMIC_VARIANT_V15: NestedCountBarrierVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V15_1: NestedCountBarrierVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V15_2: OptionExpertBarrierVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V15_3: DenseCountBarrierVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V16: OrdinalCountBarrierVelocityGaussianBackend,
         }.get(self.dynamic_variant)
         if backend_cls is None:
             raise ValueError(
@@ -245,6 +285,11 @@ class Point2Gaus(nn.Module):
         }
         if self.dynamic_adaptive_count:
             backend_kwargs["gaussian_count_cfg"] = cfg.grid_query
+        elif self.dynamic_routed_count:
+            backend_kwargs["gaussian_count_cfg"] = cfg.grid_query
+            backend_kwargs["gaussians_per_token"] = (
+                self.dynamic_gaussians_per_token
+            )
         else:
             backend_kwargs["gaussians_per_token"] = (
                 self.dynamic_gaussians_per_token
@@ -269,6 +314,20 @@ class Point2Gaus(nn.Module):
         old_input_channels = adapt_utonia_stem_to_hybrid(
             self.feature_extractor, settings
         )
+        embed_channels = self.feature_extractor.embedding.embed_channels
+        # V14 reads [x, y, z, I] before the stem LayerNorm; V15 reads the
+        # post-GELU stem feature h and adds its output back onto h.
+        if getattr(settings, "stem_adapter_position", "pre_norm") == (
+            "post_activation"
+        ):
+            stem_adapter = (
+                f"stem adapter post-activation {embed_channels}->"
+                f"{settings.stem_hidden}->{embed_channels}"
+            )
+        else:
+            stem_adapter = (
+                f"stem adapter 4->{settings.stem_hidden}->{embed_channels}"
+            )
         self.utonia_lora_report = inject_selected_utonia_lora(
             self.feature_extractor,
             self.utonia_feature_stage,
@@ -288,9 +347,7 @@ class Point2Gaus(nn.Module):
         print(
             "Utonia hybrid adaptation: "
             f"input={old_input_channels}->4 (xyzi), "
-            f"stem adapter 4->{settings.stem_hidden}->"
-            f"{self.feature_extractor.embedding.embed_channels} "
-            f"{settings.stem_activation}, "
+            f"{stem_adapter} {settings.stem_activation}, "
             f"intensity column trainable={settings.train_intensity_column}, "
             f"ffn adapters={self.utonia_ffn_adapter_count} "
             f"widths={list(settings.ffn_widths)} {settings.ffn_activation} "
@@ -332,7 +389,10 @@ class Point2Gaus(nn.Module):
         list of trainable parameters in module order, so their optimizer state
         and resume behaviour are unchanged. The hybrid adaptation returns one
         group per Utonia role plus a last ``downstream`` group, and checks that
-        every trainable parameter sits in exactly one of them.
+        every trainable parameter sits in exactly one of them. Parameters
+        listed in ``train.downstream_no_decay`` (V15: the learned max speed
+        ``dynamic_backend.temporal.v_raw``) leave ``downstream`` for a final
+        ``downstream_no_decay`` group at ``train.lr`` without weight decay.
         """
         trainable = [
             (name, parameter)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 from omegaconf import ListConfig, OmegaConf
 
@@ -9,7 +10,14 @@ from .definitions import (
     BARRIER_MATCH_DYNAMIC_VARIANTS,
     COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
     COORDINATE_FRAMES,
+    DENSE_COUNT_DYNAMIC_VARIANTS,
+    DENSE_COUNT_GAUSSIANS_PER_TOKEN,
     DYNAMIC_VARIANT_V12_1,
+    EXPERT_AUXILIARY_RENDER_BY_VARIANT,
+    EXPERT_AUXILIARY_RENDERS,
+    EXPERT_COUNT_DYNAMIC_VARIANTS,
+    EXPERT_COUNT_MODE,
+    EXPERT_COUNT_OPTION_COUNTS,
     FEATURE_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
     FIXED_COUNT_SEED_MODES,
     FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
@@ -17,12 +25,30 @@ from .definitions import (
     LEARNED_COUNT_MODES,
     LEARNED_COUNT_SEED_MODES,
     LEGACY_COUNT_MODE,
+    LOCAL_ATTENTION_DYNAMIC_VARIANTS,
+    LOCAL_ATTENTION_IMPLEMENTATIONS,
+    LOCAL_ATTENTION_MAX_QUERY_CHUNK_SIZE,
+    NESTED_AUXILIARY_RENDER_BY_VARIANT,
+    NESTED_AUXILIARY_RENDERS,
+    NESTED_COUNT_DYNAMIC_VARIANTS,
+    NESTED_COUNT_MODE,
+    NESTED_COUNT_OPTION_COUNTS,
+    NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS,
+    ORDINAL_AUXILIARY_RENDER_BY_VARIANT,
+    ORDINAL_AUXILIARY_RENDERS,
+    ORDINAL_COUNT_DYNAMIC_VARIANTS,
+    ORDINAL_COUNT_MODE,
+    ORDINAL_COUNT_OPTION_COUNTS,
+    POST_ACTIVATION_STEM_DYNAMIC_VARIANTS,
     RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS,
+    ROUTED_COUNT_BLOCKS,
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+    SEED_MODE_TOKEN,
     UTONIA_ADAPTATION_MODE_HYBRID,
     UTONIA_ADAPTER_ACTIVATIONS,
     UTONIA_LORA_TARGETS,
     UTONIA_PARAM_GROUP_ROLES,
+    UTONIA_STEM_ADAPTER_POSITIONS,
     VARIANT_CONFIG_PATHS,
     _REQUIRED_ROOTS,
     _UTONIA_ENCODER_STAGE_DIMS,
@@ -114,13 +140,28 @@ def _require_finite(config, path: str, *, minimum: float,
         raise ValueError(f"{path} must be {bound} and finite")
 
 
+def _require_int(config, path: str) -> int:
+    """The named path must hold a positive YAML integer (not a float or bool)."""
+    value = OmegaConf.select(config, path)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{path} must be a positive integer")
+    return value
+
+
+def _only_available_to(variants) -> str:
+    """``V15`` / ``V14, V14.1, V15``: who a variant-gated key is reserved for."""
+    return ", ".join(_variant_label(name) for name in variants)
+
+
 def _validate_utonia_adaptation_config(config, variant, label: str) -> None:
     """The hybrid Utonia adaptation block and its AdamW role groups.
 
     V14-family variants require ``p2g.utonia_adaptation`` (mode ``hybrid``)
     and ``train.utonia_param_groups``. Every other variant adapts Utonia with
     LoRA on every Linear/SubMConv3d and rejects both blocks, so neither can be
-    carried along silently unused.
+    carried along silently unused. Within the family, ``stem.adapter_position``
+    is the one key that tells V15's post-activation stem adapter from
+    V14/V14.1's pre-LayerNorm one.
     """
     path = "p2g.utonia_adaptation"
     groups_path = "train.utonia_param_groups"
@@ -181,7 +222,7 @@ def _validate_utonia_adaptation_config(config, variant, label: str) -> None:
         config, stem_path,
         {
             "train_intensity_column", "adapter_hidden", "adapter_activation",
-            "adapter_scale",
+            "adapter_scale", "adapter_position",
         },
     )
     _require_flag(config, f"{stem_path}.train_intensity_column")
@@ -192,6 +233,26 @@ def _validate_utonia_adaptation_config(config, variant, label: str) -> None:
     _require_finite(
         config, f"{stem_path}.adapter_scale", minimum=0.0, inclusive=False
     )
+    # An absent adapter_position is V14/V14.1's adapter before the stem
+    # LayerNorm; V15 moves it behind the activation and must say so.
+    position_path = f"{stem_path}.adapter_position"
+    if _has_path(config, position_path):
+        _require_choice(config, position_path, UTONIA_STEM_ADAPTER_POSITIONS)
+    position = str(OmegaConf.select(
+        config, position_path, default="pre_norm"
+    )).lower()
+    if variant in POST_ACTIVATION_STEM_DYNAMIC_VARIANTS:
+        if position != "post_activation":
+            raise ValueError(
+                f"{label} requires {position_path}='post_activation' (the stem "
+                "adapter reads GELU(LN(W x)) and adds a residual to it)"
+            )
+    elif position != "pre_norm":
+        raise ValueError(
+            f"{label} keeps the stem adapter before the stem LayerNorm; "
+            f"{position_path}={position!r} is only available to "
+            + _only_available_to(POST_ACTIVATION_STEM_DYNAMIC_VARIANTS)
+        )
 
     ffn_path = f"{path}.ffn_adapter"
     _reject_unknown_keys(
@@ -247,6 +308,40 @@ def _validate_adam_settings(config) -> None:
         _require_finite(config, "train.adam_eps", minimum=0.0, inclusive=False)
 
 
+def _validate_downstream_no_decay(config, variant, label: str) -> None:
+    """Optional ``train.downstream_no_decay``: downstream parameters without decay.
+
+    Names are relative to Point2Gaus (``dynamic_backend.temporal.v_raw``) and
+    move from the ``downstream`` optimizer group into a last group at
+    ``train.lr`` with weight decay 0. Only the hybrid Utonia variants build
+    per-role optimizer groups; every other variant trains one flat parameter
+    list, so the key would have nothing to act on. Utonia parameters are
+    excluded because their roles already set their own decay.
+    """
+    path = "train.downstream_no_decay"
+    names = OmegaConf.select(config, path, default=None)
+    if names is None:
+        return
+    if variant not in HYBRID_UTONIA_DYNAMIC_VARIANTS:
+        raise ValueError(
+            f"{label} trains one flat parameter group; {path} is only "
+            "available to " + _only_available_to(HYBRID_UTONIA_DYNAMIC_VARIANTS)
+        )
+    if not isinstance(names, (list, tuple, ListConfig)):
+        raise ValueError(f"{path} must be a list of parameter names")
+    entries = list(names)
+    if any(not isinstance(name, str) or not name.strip() for name in entries):
+        raise ValueError(f"{path} entries must be non-empty strings")
+    if len(set(entries)) != len(entries):
+        raise ValueError(f"{path} must not repeat an entry")
+    for name in entries:
+        if name.startswith("feature_extractor."):
+            raise ValueError(
+                f"{path} lists downstream parameters only; {name!r} is a Utonia "
+                "parameter, whose weight decay comes from train.utonia_param_groups"
+            )
+
+
 def _configured_p2g_trunk_dim(config) -> int:
     """Token width entering temporal attention: the Utonia exit-stage width."""
     stage = int(OmegaConf.select(config, "p2g.utonia_feature_stage"))
@@ -296,7 +391,9 @@ def _configured_count_mode(config) -> str:
     """The Gaussian-count contract ``p2g.grid_query`` asks for.
 
     An absent block is the historical fixed-count default: one Gaussian per
-    occupied token, seeded at that token's observed medoid.
+    occupied token, seeded at that token's observed medoid. Otherwise this is
+    the ``count_mode`` string as written, lower-cased: ``legacy``,
+    ``learned_gumbel``, V15's ``nested_gumbel`` or V15.2's ``expert_gumbel``.
     """
     if not _has_path(config, "p2g.grid_query"):
         return LEGACY_COUNT_MODE
@@ -339,9 +436,96 @@ def _validate_fixed_gaussian_count(config, label: str) -> None:
         )
 
 
+class _RoutedCount(NamedTuple):
+    """One count mode whose router picks 1, 3 or 5 Gaussians after refinement."""
+
+    variants: tuple
+    option_counts: tuple
+    renders: tuple
+    render_by_variant: dict
+    head: str
+    purpose: str
+    options: str
+    # Required block keys beyond the ones every routed count shares.
+    extra_keys: tuple = ()
+
+
+_ROUTED_COUNTS = {
+    NESTED_COUNT_MODE: _RoutedCount(
+        variants=NESTED_COUNT_DYNAMIC_VARIANTS,
+        option_counts=NESTED_COUNT_OPTION_COUNTS,
+        renders=NESTED_AUXILIARY_RENDERS,
+        render_by_variant=NESTED_AUXILIARY_RENDER_BY_VARIANT,
+        head="nested count head",
+        purpose="its head decodes G1..G5 and a router picks how many to render",
+        options="reduce {G1}, keep {G1..G3}, add {G1..G5}",
+    ),
+    EXPERT_COUNT_MODE: _RoutedCount(
+        variants=EXPERT_COUNT_DYNAMIC_VARIANTS,
+        option_counts=EXPERT_COUNT_OPTION_COUNTS,
+        renders=EXPERT_AUXILIARY_RENDERS,
+        render_by_variant=EXPERT_AUXILIARY_RENDER_BY_VARIANT,
+        head="per-option expert head",
+        purpose="a router picks one of its E1 / E3 / E5 experts per token",
+        options="reduce E1, keep E3, add E5",
+    ),
+    ORDINAL_COUNT_MODE: _RoutedCount(
+        variants=ORDINAL_COUNT_DYNAMIC_VARIANTS,
+        option_counts=ORDINAL_COUNT_OPTION_COUNTS,
+        renders=ORDINAL_AUXILIARY_RENDERS,
+        render_by_variant=ORDINAL_AUXILIARY_RENDER_BY_VARIANT,
+        head="ordinal nested count head",
+        purpose=(
+            "its head decodes G1..G5 and two bounded gates pick how many to "
+            "render, trained through masked rasterization"
+        ),
+        options="reduce {G1}, keep {G1..G3}, add {G1..G5}",
+        extra_keys=("router_scale",),
+    ),
+}
+
+
 def _validate_dynamic_gaussian_count(config, variant, label: str) -> None:
     """Route the config to the count contract it selected, and check it fits."""
     count_mode = _configured_count_mode(config)
+    own_mode = next(
+        (
+            mode for mode, routed in _ROUTED_COUNTS.items()
+            if variant in routed.variants
+        ),
+        None,
+    )
+    if count_mode in _ROUTED_COUNTS and count_mode != own_mode:
+        routed = _ROUTED_COUNTS[count_mode]
+        raise ValueError(
+            f"{label} has no {routed.head}; p2g.grid_query.count_mode="
+            f"{count_mode!r} is only available to "
+            + _only_available_to(routed.variants)
+        )
+    if own_mode is not None:
+        routed = _ROUTED_COUNTS[own_mode]
+        if count_mode != own_mode:
+            raise ValueError(
+                f"{label} requires p2g.grid_query.count_mode={own_mode!r} "
+                f"({routed.purpose}), got {count_mode!r}"
+            )
+        _validate_routed_gaussian_count(config, label, own_mode)
+        # Whether training also renders a router-free set is what separates
+        # V15 from V15.1, so each variant pins its own value.
+        block = ROUTED_COUNT_BLOCKS[own_mode]
+        expected_render = routed.render_by_variant[variant]
+        render = str(OmegaConf.select(
+            config, f"p2g.grid_query.{block}.auxiliary_render"
+        )).lower()
+        if render != expected_render:
+            raise ValueError(
+                f"{label} requires p2g.grid_query.{block}."
+                f"auxiliary_render={expected_render!r}, got {render!r}"
+            )
+        return
+    if variant in DENSE_COUNT_DYNAMIC_VARIANTS:
+        _validate_dense_gaussian_count(config, label, count_mode)
+        return
     if count_mode == LEGACY_COUNT_MODE:
         _validate_fixed_gaussian_count(config, label)
         return
@@ -360,6 +544,129 @@ def _validate_dynamic_gaussian_count(config, variant, label: str) -> None:
             )
         )
     _validate_adaptive_gaussian_count(config, label)
+
+
+def _validate_routed_gaussian_count(config, label: str, count_mode: str) -> None:
+    """A V15-family routed count: one token anchor and a {1, 3, 5} router.
+
+    V15/V15.1 (``nested_gumbel``) render a prefix of G1..G5, V15.2
+    (``expert_gumbel``) one of three experts and V16 (``nested_ordinal``) a
+    prefix of G1..G5 chosen by two ordinal gates, each mode configured by its
+    own block (``nested_count`` / ``expert_count`` / ``ordinal_count``) with the
+    same keys; the ordinal block also needs its gates' fixed cosine scale,
+    ``router_scale``. ``p2g.grid_query`` holds exactly ``count_mode`` and that
+    block, and every block key but ``logging`` and ``auxiliary_views`` is
+    required: the decoder and router widths, the router temperature and the
+    auxiliary render are all experiment choices, so none of them falls back to
+    a code default. ``auxiliary_views`` (absent or null = every target view)
+    renders the auxiliary set at that many target views per window, drawn
+    uniformly at random each step; a block without an auxiliary render rejects
+    it.
+    """
+    routed = _ROUTED_COUNTS[count_mode]
+    block = ROUTED_COUNT_BLOCKS[count_mode]
+    count_path = "p2g.grid_query"
+    _reject_unknown_keys(config, count_path, {"count_mode", block})
+    block_path = f"{count_path}.{block}"
+    if OmegaConf.select(config, block_path, default=None) is None:
+        raise ValueError(f"{label} requires {block_path}")
+    required = (
+        "option_counts", "seed_mode", "tau", "decoder_hidden", "router_hidden",
+        "auxiliary_render", *routed.extra_keys,
+    )
+    _reject_unknown_keys(
+        config, block_path, {*required, "logging", "auxiliary_views"}
+    )
+    missing = [
+        name for name in required if not _has_path(config, f"{block_path}.{name}")
+    ]
+    if missing:
+        raise ValueError(f"{block_path} is missing keys: " + ", ".join(missing))
+
+    option_counts = OmegaConf.select(config, f"{block_path}.option_counts")
+    if not isinstance(option_counts, (list, tuple, ListConfig)) or (
+        list(option_counts) != list(routed.option_counts)
+    ):
+        raise ValueError(
+            f"{block_path}.option_counts must be "
+            f"{list(routed.option_counts)}: {routed.options}"
+        )
+    # One shared anchor: every Gaussian starts at its token's Utonia position
+    # and the head's bounded offsets place it.
+    _require_choice(config, f"{block_path}.seed_mode", (SEED_MODE_TOKEN,))
+    _require_finite(config, f"{block_path}.tau", minimum=0.0, inclusive=False)
+    if "router_scale" in routed.extra_keys:
+        _require_finite(
+            config, f"{block_path}.router_scale", minimum=0.0, inclusive=False
+        )
+    _require_int(config, f"{block_path}.decoder_hidden")
+    router_hidden = OmegaConf.select(config, f"{block_path}.router_hidden")
+    if (
+        not isinstance(router_hidden, (list, tuple, ListConfig))
+        or not router_hidden
+        or any(
+            isinstance(width, bool) or not isinstance(width, int) or width <= 0
+            for width in router_hidden
+        )
+    ):
+        raise ValueError(
+            f"{block_path}.router_hidden must be a non-empty list of positive "
+            "integer hidden widths (V15: [256, 128])"
+        )
+    _require_choice(config, f"{block_path}.auxiliary_render", routed.renders)
+    views_path = f"{block_path}.auxiliary_views"
+    if OmegaConf.select(config, views_path, default=None) is not None:
+        render = str(OmegaConf.select(config, f"{block_path}.auxiliary_render"))
+        if render.lower() == "none":
+            raise ValueError(
+                f"{label} renders no auxiliary set ({block_path}."
+                f"auxiliary_render='none'), so {views_path} cannot be set"
+            )
+        _require_int(config, views_path)
+    if _has_path(config, f"{block_path}.logging"):
+        logging_path = f"{block_path}.logging"
+        _reject_unknown_keys(
+            config, logging_path, {"enable", "interval", "range_edges_m"}
+        )
+        _require_positive(config, f"{logging_path}.interval", kind=int)
+
+
+def _validate_dense_gaussian_count(config, label: str, count_mode: str) -> None:
+    """V15.3's fixed count: five Gaussians per token, all on the token anchor.
+
+    V15.3 has no router, so its count is the ordinary fixed-count contract,
+    pinned: ``count_mode: legacy``, ``K_max`` = five and ``seed_mode: token``
+    (its decoder places every Gaussian around the one token anchor, so per-slot
+    seeds would be ignored).
+    """
+    count_path = "p2g.grid_query"
+    expected = (
+        f"count_mode='legacy', K_max={DENSE_COUNT_GAUSSIANS_PER_TOKEN}, "
+        f"seed_mode={SEED_MODE_TOKEN!r}"
+    )
+    if count_mode != LEGACY_COUNT_MODE or not _has_path(config, count_path):
+        raise ValueError(
+            f"{label} has no count router and requires p2g.grid_query with "
+            f"{expected}, got count_mode={count_mode!r}"
+        )
+    _validate_fixed_gaussian_count(config, label)
+    k_max = OmegaConf.select(config, f"{count_path}.K_max")
+    if (
+        isinstance(k_max, bool) or not isinstance(k_max, int)
+        or k_max != DENSE_COUNT_GAUSSIANS_PER_TOKEN
+    ):
+        raise ValueError(
+            f"{label} renders {DENSE_COUNT_GAUSSIANS_PER_TOKEN} Gaussians per "
+            f"token; p2g.grid_query.K_max must be "
+            f"{DENSE_COUNT_GAUSSIANS_PER_TOKEN}, got {k_max!r}"
+        )
+    seed_mode = OmegaConf.select(config, f"{count_path}.seed_mode", default=None)
+    if seed_mode is None or str(seed_mode).lower() != SEED_MODE_TOKEN:
+        raise ValueError(
+            f"{label} decodes every Gaussian around the token anchor; "
+            f"p2g.grid_query.seed_mode must be {SEED_MODE_TOKEN!r}, got "
+            f"{seed_mode!r}"
+        )
 
 
 def _validate_adaptive_gaussian_count(config, label: str) -> None:
@@ -497,6 +804,39 @@ def _validate_legacy_train_exclusions(config) -> None:
         raise ValueError(f"{path} must not contain duplicates")
 
 
+def _validate_temporal_layer_scale(config, variant: str, label: str) -> None:
+    """The temporal LayerScale gate: kept by every variant but V15.
+
+    An absent ``layer_scale`` is the historical gate, initialized by
+    ``layer_scale_init``. V15 drops the gate, so it must say
+    ``layer_scale: false`` and has no init to configure.
+    """
+    temporal_path = "dynamic_2dgs.temporal"
+    flag_path = f"{temporal_path}.layer_scale"
+    declared = _has_path(config, flag_path)
+    if declared:
+        _require_flag(config, flag_path)
+    gated = bool(OmegaConf.select(config, flag_path)) if declared else True
+    if variant in NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS:
+        if gated:
+            raise ValueError(
+                f"{label} requires {flag_path}=false: its temporal "
+                "cross-attention adds the out_proj branch without a LayerScale"
+            )
+        if _has_path(config, f"{temporal_path}.layer_scale_init"):
+            raise ValueError(
+                f"{label} has no temporal LayerScale, so "
+                f"{temporal_path}.layer_scale_init cannot be set"
+            )
+    elif not gated:
+        raise ValueError(
+            f"{label} keeps the temporal LayerScale; {flag_path}=false is only "
+            "available to " + _only_available_to(
+                NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS
+            )
+        )
+
+
 def _validate_temporal_config(config, variant: str, label: str) -> None:
     """The temporal-attention keys and contract of the variant's family."""
     temporal_path = "dynamic_2dgs.temporal"
@@ -504,7 +844,7 @@ def _validate_temporal_config(config, variant: str, label: str) -> None:
         "implementation", "layers", "num_heads", "mlp_ratio",
         "use_time_embedding", "time_frequencies", "time_embedding_dim",
         "time_reference_sec", "position_encoding", "rope_base",
-        "rope_position_scale", "qk_norm", "layer_scale_init",
+        "rope_position_scale", "qk_norm", "layer_scale_init", "layer_scale",
     }
     if variant in FLASH_ROPE_MATCH_DYNAMIC_VARIANTS:
         if variant in COSINE_ROPE_MATCH_DYNAMIC_VARIANTS:
@@ -517,6 +857,7 @@ def _validate_temporal_config(config, variant: str, label: str) -> None:
         if variant == DYNAMIC_VARIANT_V12_1:
             temporal_keys.add("barrier_lambda_init")
     _reject_unknown_keys(config, temporal_path, temporal_keys)
+    _validate_temporal_layer_scale(config, variant, label)
 
     if not bool(OmegaConf.select(
         config, f"{temporal_path}.use_time_embedding"
@@ -597,6 +938,75 @@ def _validate_temporal_config(config, variant: str, label: str) -> None:
         )
 
 
+def _validate_local_attention_config(config, variant: str, label: str) -> None:
+    """V15's radius local-attention block; every other variant has none."""
+    path = "dynamic_2dgs.local_attention"
+    block = OmegaConf.select(config, path, default=None)
+    if variant not in LOCAL_ATTENTION_DYNAMIC_VARIANTS:
+        if block is not None:
+            raise ValueError(
+                f"{label} has no radius local-attention block; {path} is only "
+                "available to " + _only_available_to(
+                    LOCAL_ATTENTION_DYNAMIC_VARIANTS
+                )
+            )
+        return
+    if block is None:
+        raise ValueError(f"{label} requires {path}")
+    keys = (
+        "radius_m", "num_heads", "mlp_ratio", "rope_base",
+        "rope_position_scale", "implementation", "query_chunk_size",
+    )
+    _reject_unknown_keys(config, path, keys)
+    missing = [name for name in keys if not _has_path(config, f"{path}.{name}")]
+    if missing:
+        raise ValueError(f"{path} is missing keys: " + ", ".join(missing))
+
+    for name in ("radius_m", "mlp_ratio", "rope_base", "rope_position_scale"):
+        _require_finite(config, f"{path}.{name}", minimum=0.0, inclusive=False)
+    _validate_3d_rope_width(
+        _configured_p2g_trunk_dim(config),
+        _require_int(config, f"{path}.num_heads"),
+        "dynamic local attention",
+    )
+    _require_choice(
+        config, f"{path}.implementation", LOCAL_ATTENTION_IMPLEMENTATIONS
+    )
+    # Every query is one FlashAttention2 varlen sequence, so a chunk larger than
+    # the kernel's sequence-count limit fails at launch rather than at config.
+    chunk_size = _require_int(config, f"{path}.query_chunk_size")
+    if chunk_size > LOCAL_ATTENTION_MAX_QUERY_CHUNK_SIZE:
+        raise ValueError(
+            f"{path}.query_chunk_size must be at most "
+            f"{LOCAL_ATTENTION_MAX_QUERY_CHUNK_SIZE}, the FlashAttention2 "
+            f"varlen sequence-count limit; got {chunk_size}"
+        )
+
+
+def _validate_gaussian_head_config(config, variant: str, label: str) -> None:
+    """``dynamic_2dgs.gaussian_head``: the priors, and V15.3's decoder width.
+
+    Every variant may set the initial opacity and scale. ``decoder_hidden`` is
+    the hidden width of V15.3's router-free decoder and is required there;
+    every other variant sizes its decoder elsewhere (the routed V15-family
+    heads under their ``p2g.grid_query`` count block) and rejects it.
+    """
+    head_path = "dynamic_2dgs.gaussian_head"
+    _reject_unknown_keys(
+        config, head_path, {"initial_opacity", "initial_scale_m", "decoder_hidden"}
+    )
+    hidden_path = f"{head_path}.decoder_hidden"
+    if variant in DENSE_COUNT_DYNAMIC_VARIANTS:
+        if not _has_path(config, hidden_path):
+            raise ValueError(f"{label} requires {hidden_path}")
+        _require_int(config, hidden_path)
+    elif _has_path(config, hidden_path):
+        raise ValueError(
+            f"{label} sizes its Gaussian decoder elsewhere; {hidden_path} is "
+            "only available to " + _only_available_to(DENSE_COUNT_DYNAMIC_VARIANTS)
+        )
+
+
 def _validate_motion_regularization(config) -> None:
     """The velocity prior: independent squared norms on v_init and v_offset."""
     regularization_path = "dynamic_2dgs.regularization"
@@ -661,6 +1071,7 @@ def validate_experiment_config(config) -> None:
     _validate_utonia_lora_config(config, label)
     _validate_utonia_adaptation_config(config, variant, label)
     _validate_adam_settings(config)
+    _validate_downstream_no_decay(config, variant, label)
 
     # Checkpoints embed the anchor mode from when a second one existed.
     anchor_mode = OmegaConf.select(config, "p2g.anchor_mode", default=None)
@@ -689,14 +1100,14 @@ def validate_experiment_config(config) -> None:
     _reject_unknown_keys(
         config,
         "dynamic_2dgs",
-        {"temporal", "gaussian_head", "motion", "regularization"},
+        {
+            "temporal", "gaussian_head", "motion", "regularization",
+            "local_attention",
+        },
     )
     _validate_temporal_config(config, variant, label)
-    _reject_unknown_keys(
-        config,
-        "dynamic_2dgs.gaussian_head",
-        {"initial_opacity", "initial_scale_m"},
-    )
+    _validate_local_attention_config(config, variant, label)
+    _validate_gaussian_head_config(config, variant, label)
     # Every offset head embeds the v_init it corrects.
     _reject_unknown_keys(
         config,

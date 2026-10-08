@@ -190,6 +190,11 @@ class Loss(nn.Module):
             raw_scale = batch_item.get("scaling")
             if raw_scale is None:
                 raise KeyError("Gaussian output is missing 'scaling'")
+            blend_mask = batch_item.get("blend_mask")
+            if blend_mask is not None:
+                # V16's training set holds every decoded Gaussian; count only
+                # the ones its masks render.
+                raw_scale = raw_scale[blend_mask.detach().reshape(-1) > 0]
             if raw_scale.shape[0] == 0:
                 continue
             scales = F.softplus(raw_scale[:, :2])

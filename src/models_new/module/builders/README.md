@@ -13,7 +13,13 @@ through token aggregation to the seed generator.
 
 - `grid_geometry.py` owns metric coordinates, Utonia grid mapping, and cell
   centers.
-- `grid_seed_config.py` validates the config-selected seed/count contract.
+- `grid_seed_config.py` validates the config-selected seed/count contract:
+  a fixed count per token, the learned-count candidate bank, or a V15-family
+  routed count (V15's `nested_gumbel`, V15.2's `expert_gumbel`), which has one
+  shared token-position anchor per token (a `legacy`, `K_max=1`,
+  `seed_mode=token` config) because its router picks 1, 3 or 5 Gaussians only
+  after refinement. V15.3 is an ordinary fixed count (`K_max=5`,
+  `seed_mode=token`).
 - `grid_seeds.py` owns deterministic seed placement and learned-count banks.
 - `token_aggregation.py` maps raw points to occupied token rows and optionally
   attaches membership or seeds.

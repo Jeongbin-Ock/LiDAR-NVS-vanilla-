@@ -33,6 +33,11 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v13_3
 python main.py model.variant=dynamic_2dgs_attention_velocity_v13_4
 python main.py model.variant=dynamic_2dgs_attention_velocity_v14
 python main.py model.variant=dynamic_2dgs_attention_velocity_v14_1
+python main.py model.variant=dynamic_2dgs_attention_velocity_v15
+python main.py model.variant=dynamic_2dgs_attention_velocity_v15_1
+python main.py model.variant=dynamic_2dgs_attention_velocity_v15_2
+python main.py model.variant=dynamic_2dgs_attention_velocity_v15_3
+python main.py model.variant=dynamic_2dgs_attention_velocity_v16
 ```
 
 A fresh run defaults to `dynamic_2dgs_attention_velocity_v11_4`. Every listed
@@ -43,16 +48,22 @@ overlay inherits it and it stays an ordinary CLI-overridable runtime setting.
 Every variant feeds the Utonia stage-3 XYZI token (432D, 0.4 m cells) with
 adapters on the frozen base (`p2g.utonia_lora.enable=true` is required) straight
 into temporal attention; there is no separate intensity stream, fusion MLP or
-token refiner. V11-V13 put LoRA on every Utonia Linear and SubMConv3d; V14 and
-V14.1 use the hybrid adaptation described under **V14** below. V11.1, V11.3,
-V11.5, V11.6 and V13.1 emit a fixed number of Gaussians per occupied endpoint
-token -- one observed-medoid seed by default, two range quantiles in
+token refiner. V11-V13 put LoRA on every Utonia Linear and SubMConv3d; V14,
+V14.1 and the V15 family use the hybrid adaptation described under **V14**
+below. V11.1,
+V11.3, V11.5, V11.6 and V13.1 emit a fixed number of Gaussians per occupied
+endpoint token -- one observed-medoid seed by default, two range quantiles in
 V11.3/V11.5/V13.1 and three in V11.6; V11, V11.2, V11.4, V12, V12.1, V12.2,
 V13, V13.2, V13.3, V13.4, V14 and V14.1 let a router select one to three
 Gaussians instead, range-quantile-seeded except in V14/V14.1, which anchor
-every slot at the token position. `p2g.grid_query` chooses between the two,
-sets the fixed count and selects where seeds start (`seed_mode`) -- see
-"Gaussians per token" below.
+every slot at the token position. V15 decodes five Gaussians per token around
+that anchor and lets a router pick one, three or five (`nested_gumbel`); V15.2
+gives each of those three options its own expert (`expert_gumbel`), V15.3
+has no router and renders five Gaussians per token (`legacy`, `K_max: 5`), and
+V16 picks V15's prefixes with two bounded ordinal gates trained through masked
+rasterization (`nested_ordinal`).
+`p2g.grid_query` chooses between these, sets the fixed count and selects where
+seeds start (`seed_mode`) -- see "Gaussians per token" below.
 
 Every variant embeds `time_coordinate = relative_seconds / time_reference_sec`,
 where `time_reference_sec=1.0` is fixed across samples. An irregular 0.8-second
@@ -709,6 +720,100 @@ optimizer steps; there is no clamp and no prior toward 30 m/s.
 `barrier_speed_mps`, and `barrier_speed_initial_mps`. Every other config value
 is V14's.
 
+**V15** is V14.1 with five changes. Every key it adds is opt-in: an overlay
+without it keeps today's behaviour, and V11-V14.1 reject the V15-only values, so
+their checkpoints resume unchanged (same module tree, state-dict keys and
+optimizer groups).
+
+| Part | V14.1 | V15 |
+| --- | --- | --- |
+| Utonia stem adapter | `4 -> 16 -> 54` on `[x, y, z, I]`, added before the stem LN | no adapter before the LN; a `54 -> 16 -> 54` GELU residual adapter on `h = GELU(LN(W x))` (`stem.adapter_position: post_activation`) |
+| `v_raw` (learned max speed) | `downstream` group, weight decay 1e-4 | `downstream_no_decay` group, weight decay 0 (`train.downstream_no_decay`) |
+| Temporal LayerScale | `cross_layer_scale` gate, init 0.1 | none (`temporal.layer_scale: false`) |
+| After the temporal stack | -- | one radius local-attention block (`dynamic_2dgs.local_attention`); `v_offset` still reads the stack's output |
+| Gaussian count | `learned_gumbel` router, K = 1, 2, 3 | `nested_gumbel`: five decoded Gaussians, a router over {1, 3, 5}, two training renders |
+
+**Stem.** `p2g.utonia_adaptation.stem.adapter_position` is `pre_norm` (the
+default when the key is absent; V14/V14.1) or `post_activation` (V15). V15's
+pre-LN stem is the frozen XYZ columns, the bias and the zero-initialized
+`w_I`, nothing else. The adapter adds `B GELU(A h)` to `h`, with `A` 54x16 plus
+bias and `B` 16x54 plus bias, `B` starting at zero, so a fresh stem is exactly
+the pretrained one. The stem LayerNorm stays trainable. The adapter's 1,798
+parameters replace V14's 998 and land in the same `utonia_adapter_weight` /
+`utonia_adapter_bias` groups, so Utonia trains 4,423,930 parameters (V14:
+4,423,130). V14 and V14.1 reject `post_activation`; V15 requires it. The stem
+statistics logged as `utonia/stem_*` are `stem_xyz_rms` and
+`stem_intensity_rms` (pre-LN summands), `stem_activation_rms` (RMS of `h`) and
+`stem_adapter_rms` (RMS of what the adapter adds to `h`); `pre_norm` keeps its
+`xyz`/`intensity`/`adapter` trio.
+
+**Optimizer groups.** `train.downstream_no_decay` (optional) lists downstream
+parameters by name relative to Point2Gaus. They leave `downstream` for a last
+group named `downstream_no_decay` at `train.lr` with weight decay 0; V15 lists
+`dynamic_backend.temporal.v_raw`, and every other downstream parameter keeps
+`train.weight_decay`. Each name must match exactly one trainable downstream
+parameter, or building the optimizer raises and lists the unknown or frozen
+names. The list must hold unique non-empty strings and may not name a Utonia
+(`feature_extractor.*`) parameter, whose decay comes from
+`train.utonia_param_groups`. Only the hybrid variants (V14, V14.1, V15) build
+role groups, so only they accept the key; absent or empty gives exactly the
+groups it always did.
+
+**Temporal LayerScale.** `dynamic_2dgs.temporal.layer_scale` (bool, absent =
+true) switches the per-layer gate. `false` builds no `cross_layer_scale`
+parameters, so each layer computes `x = snapshot + out_proj(attended)` with
+`out_proj` at its default initialization (the FFN's last layer still starts at
+zero), and `layer_scale_init` must then be absent. V15 requires `false`; every
+other variant accepts only an absent or `true` value, which is the historical
+gate.
+
+**Local attention.** V15 alone carries a `dynamic_2dgs.local_attention` block,
+and every key is required:
+
+```yaml
+dynamic_2dgs:
+  local_attention:
+    radius_m: 0.8
+    num_heads: 12
+    mlp_ratio: 4
+    rope_base: 15.848931924611133            # 10^1.2
+    rope_position_scale: 15.707963267948966  # 2*pi/0.4 -> wavelengths 0.4-4.0 m
+    implementation: flash_varlen             # flash_varlen | sdpa | auto
+    query_chunk_size: 4096                   # at most 65535
+```
+
+`radius_m`, `mlp_ratio`, `rope_base` and `rope_position_scale` are positive and
+finite. `num_heads` must divide the token width into heads whose width is
+divisible by six (432 / 12 = 36), the same xyz/sin-cos 3D RoPE constraint as the
+temporal stack. Each query is one FlashAttention2 varlen sequence, so
+`query_chunk_size`, how many queries go into one call, may not exceed the
+kernel's 65535-sequence limit; larger values are rejected when the config is
+validated rather than when the kernel launches.
+
+**Count.** See "Gaussians per token" below for the `nested_gumbel` contract.
+V15 keeps V14.1's temporal stack, loader and coordinate frame; its overlay
+differs from V14.1's in exactly the five changes above.
+
+**V15.1, V15.2, V15.3 and V16** keep every V15 key above -- stem, optimizer
+groups, temporal stack without LayerScale, local attention, loader -- and change
+only how the Gaussian head turns a token into Gaussians:
+
+| Variant | Count contract | Rendered per token | Training renders |
+| --- | --- | --- | --- |
+| V15 | `nested_gumbel` | router: prefix {G1} / {G1..G3} / {G1..G5} of one G1..G5 decoder | routed set + every token's G1..G3, mean of the two losses |
+| V15.1 | `nested_gumbel` | as V15 | routed set only |
+| V15.2 | `expert_gumbel` | router: expert E1 / E3 / E5 on one shared trunk | routed set + every token's E5, mean of the two losses |
+| V15.3 | `legacy`, `K_max: 5`, `seed_mode: token` | all five decoded Gaussians, no router | one render |
+| V16 | `nested_ordinal` | V15's prefixes, chosen by a keep gate and an add gate (cosine logits, \|u\| <= 3) | every token's G1..G5 with blend masks (masked rasterization) + every token's G1..G5 unmasked at 2 views, mean of the two losses |
+
+V15.2's head is `LN(f) -> Linear(432, 576) -> SiLU` shared, then three linear
+experts `576 -> 1x42`, `576 -> 3x42`, `576 -> 5x42` (the second layer predicts
+1 + 3 + 5 Gaussians); the router is V15's. Every Gaussian of the chosen expert
+carries that option's opacity gate, so every token sends the router a gradient,
+reduce included. V15.3's head is V15's decoder, `LN(f) -> Linear(432, 576) ->
+SiLU -> Linear(576, 5x42)`, module for module, without the router; it is also
+V15.2's E5 path. See "Gaussians per token" for both contracts.
+
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other
 weights shows a=0 to a=4 is decisive (mass beyond the radius 11.2% -> 0.85%,
@@ -845,16 +950,174 @@ feature, and `token` puts every slot of every row on the token anchor, so the
 trunk reads the feature alone (`Linear(dim, dim)` instead of
 `Linear(dim + 3 * K_max, dim)`).
 
-Both counts are structural: `p2g` is a checkpoint-protected root, so a resume or
-evaluation cannot change how many Gaussians a checkpoint's tokens produce.
+**Nested count (`count_mode: nested_gumbel`).** V15 only, and it is not the
+learned count above. Every token has one anchor, its Utonia position
+(`seed_mode: token`, the only accepted value: the seed builder resolves it to a
+single `(N, 1, 3)` token-position seed per token). A decoder places G1..G5 around
+that anchor from the refined feature, and a router picks a prefix: reduce
+{G1}, keep {G1..G3} or add {G1..G5}. `p2g.grid_query` then holds exactly these
+two keys, and every `nested_count` key but `logging` is required:
+
+```yaml
+p2g:
+  grid_query:
+    count_mode: nested_gumbel
+    nested_count:
+      option_counts: [1, 3, 5]      # must be exactly this
+      seed_mode: token              # must be exactly this
+      tau: 1.0                      # Gumbel-softmax temperature, positive
+      decoder_hidden: 576           # positive integer
+      router_hidden: [256, 128]     # non-empty list of positive integers
+      auxiliary_render: dense_keep  # dense_keep | none
+      logging:                      # optional
+        enable: true
+        interval: 20                # positive integer
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+```
+
+The router samples its choice with hard Gumbel-softmax in training (`tau` is
+fixed and shapes only the straight-through backward) and takes the argmax of
+its logits at evaluation; nothing is annealed.
+
+`auxiliary_render: dense_keep` also renders every token's G1..G3 during
+training and optimizes the mean of that render's loss and the routed set's;
+`none` renders the routed set alone. Evaluation renders the routed set in both.
+During training the routed set carries an `opacity_gate` tensor: G1 is ungated,
+G2/G3 use `y_keep + y_add`, and G4/G5 use `y_add`. Raw opacity logits remain
+unchanged; the Python renderer applies the gates after sigmoid, before the
+CUDA rasterizer. Selected forward opacities are bit-identical to their ungated
+values, and saturated opacity does not lose router gradients to a logit clamp.
+The auxiliary set and evaluation carry no gates. Existing learned-count
+variants keep their historical raw-logit STE path.
+`nested_gumbel` is rejected for every variant but V15 and V15.1, and both reject
+`legacy` and `learned_gumbel`. `auxiliary_render` is each variant's identity:
+V15 requires `dense_keep` and V15.1 (`config/variants/dynamic_2dgs_attention_velocity_v15_1.yaml`,
+otherwise identical to V15) requires `none`.
+
+**Per-option experts (`count_mode: expert_gumbel`).** V15.2 only. The token
+anchor, the router (`router_hidden`, `tau`, hard Gumbel-softmax in training,
+argmax at evaluation) and the block's keys are the nested count's, under
+`p2g.grid_query.expert_count` instead of `nested_count`:
+
+```yaml
+p2g:
+  grid_query:
+    count_mode: expert_gumbel
+    expert_count:
+      option_counts: [1, 3, 5]      # must be exactly this
+      seed_mode: token              # must be exactly this
+      tau: 1.0
+      decoder_hidden: 576           # the shared trunk's width
+      router_hidden: [256, 128]
+      auxiliary_render: dense_add   # dense_add | none; V15.2 requires dense_add
+      auxiliary_views: 2            # optional; null/absent = every target view
+      logging:                      # optional, as for nested_count
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+```
+
+What changes is what each option renders. `LN(f) -> Linear(dim,
+decoder_hidden) -> SiLU` is one shared trunk and `experts[i] =
+Linear(decoder_hidden, option_counts[i] * 42)` reads it, so reduce, keep and
+add render E1, E3 and E5 -- separate Gaussians, not prefixes of one set. All of
+them start from the dynamic-head priors on the anchor. During training every
+Gaussian of the chosen expert carries `opacity_gate = y_ST[chosen option]`
+(forward exactly one, applied after sigmoid like V15's gates), so the router
+receives `sum o * dL/do'` over the chosen expert through the softmax from
+every token; in V15 a token that reduces renders only the ungated G1 and sends
+nothing. Experts a token did not choose are neither rendered nor compared.
+`dense_add` also renders every token's E5, ungated, during training and
+optimizes the mean of the two render losses (`aux_*` / `routed_total` are
+logged as in V15); evaluation renders the routed set alone.
+`auxiliary_views: k` (optional in both routed blocks, a positive integer)
+renders that second set at only k target views per window, drawn uniformly
+from all of the window's targets -- input endpoints and novel sweeps alike --
+anew every step and kept in time order; a window with at most k targets keeps
+them all. Each view is equally likely, so the auxiliary loss keeps its
+all-view expectation (up to the pooled-pixel normalization of its means) at a
+fraction of the render cost. V15.2 uses 2 of its 3-5 views; absent or null
+renders every view (V15). A block with `auxiliary_render: none` rejects it. Each token's
+rendered rows count from `gaussian_slot_index` 0 within its expert, so the
+velocity prior still counts every token once. `expert_gumbel` is rejected for
+every variant but V15.2, and V15.2 rejects every other count mode.
+
+**Ordinal nested count (`count_mode: nested_ordinal`).** V16 only. The token
+anchor, V15's G1..G5 decoder and the nested choices reduce {G1}, keep {G1..G3}
+and add {G1..G5} are the nested count's; the block lives under
+`p2g.grid_query.ordinal_count`, with the nested keys plus `router_scale`:
+
+```yaml
+p2g:
+  grid_query:
+    count_mode: nested_ordinal
+    ordinal_count:
+      option_counts: [1, 3, 5]      # must be exactly this
+      seed_mode: token              # must be exactly this
+      tau: 1.0                      # straight-through sigmoid temperature
+      decoder_hidden: 576
+      router_hidden: [256, 128]
+      router_scale: 3.0             # fixed cosine scale of both gates, positive
+      auxiliary_render: dense_add   # dense_add | none; V16 requires dense_add
+      auxiliary_views: 2            # optional; null/absent = every target view
+      logging:                      # optional, as for nested_count
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+```
+
+The router (own LayerNorm, `router_hidden` SiLU layers) ends in two gates
+without bias, `u = router_scale * cos(w, h)`, so `|u| <= router_scale` however
+the weights grow: the keep gate opens G2/G3 and the add gate opens G4/G5 given
+G2/G3. With `q = sigmoid(u)` the options have probabilities
+`p(reduce) = 1 - q_keep`, `p(keep) = q_keep (1 - q_add)` and
+`p(add) = q_keep q_add`; at scale 3 each gate stays in [0.047, 0.953]. Training
+samples each gate as a hard Bernoulli(q) through logistic noise (the two-class
+Gumbel-max) with the straight-through derivative of `sigmoid((u + noise) /
+tau)`; there is no three-way softmax. Evaluation takes the most probable
+option. The routing statistics read the option log-probabilities, so V16's
+`logit_margin` is the log-probability margin of the top two options.
+
+What changes most is how the choice is rendered in training. The routed set is
+every token's G1..G5, each carrying a `blend_mask` -- G1 = 1, G2/G3 = M_keep,
+G4/G5 = M_keep * M_add, forward values exactly 0 or 1 -- which the rasterizer
+multiplies onto the blending weight only (`mask * alpha`); culling, the Python
+`opacity > 1/255` prefilter and the kernels' 1/255 alpha cut use the unmasked
+alpha (MaskGaussian's masked rasterization). A Gaussian at mask 0 changes no
+output, median depth included, and its own attributes get no gradient, but its
+mask does: `dL/dmask` is the first-order change of the loss from inserting it
+(at mask 1, from removing it). So every token's gates learn from both sides,
+whichever option it sampled; a reduce token sends its keep gate the slope of
+inserting G2/G3 (with G4/G5 when the add gate was sampled open) and nothing to
+the add gate. `dense_add` also renders every token's G1..G5 unmasked at
+`auxiliary_views` target views, so the Gaussians a token did not render keep
+training; the optimized loss is the mean of the two renders' losses (`aux_*` /
+`routed_total` are logged as in V15). Evaluation renders each token's chosen
+prefix without masks, which for 0/1 masks is exactly the training render of the
+same choice. There is no Gaussian-count cost. `nested_ordinal` is rejected for
+every variant but V16, and V16 rejects every other count mode.
+
+**V15.3's fixed five.** V15.3 has no router. Its count is the ordinary
+fixed-count contract pinned to `count_mode: legacy`, `K_max: 5`,
+`seed_mode: token` (any other value is rejected): the seed builder gives every
+token five slots on its anchor, and the head decodes them with V15's two-layer
+decoder and renders all five, in training and at evaluation alike, with no
+gate, no auxiliary render and no routing statistics. Without a count block,
+the decoder's hidden width is `dynamic_2dgs.gaussian_head.decoder_hidden`
+(576), which V15.3 requires and every other variant rejects.
+
+Every count contract is structural: `p2g` is a checkpoint-protected root (and
+V15.3's `dynamic_2dgs.gaussian_head.decoder_hidden` sits under the protected
+`dynamic_2dgs` root), so a resume or evaluation cannot change how many
+Gaussians a checkpoint's tokens produce.
 
 ## Random-duration windows (`data.dataset_name=nuscenes_dynamic_lidar4d`)
 
 `src/dataloader/nuscene_dynamic_lidar4d.py` is the barrier family's
-alternative to the legacy bbox-compatible `nuscene.py`. V11.6, V12.2, V14 and
-V14.1 are the only overlays that ship with it; the other barrier-family variants
-(V11-V11.5, V12, V12.1) train on `nuscene.py` with the scene holdouts and can
-opt into this loader from the CLI, as V11-V11.4 briefly did. The loader retains the old flat index's keyframe start sweep and 0.5-second sliding
+alternative to the legacy bbox-compatible `nuscene.py`. V11.6, V12.2, V14, V14.1
+and the V15 family are the only overlays that ship with it; the other barrier-family
+variants (V11-V11.5, V12, V12.1) train on `nuscene.py` with the scene holdouts
+and can opt into this loader from the CLI, as V11-V11.4 briefly did. The loader retains the old flat index's keyframe start sweep and 0.5-second sliding
 stride, but samples the actual second endpoint uniformly from the available
 0.1-second-grid sweeps whose measured timestamp is between 0.2 and 1.2 seconds
 after that start. Selecting it replaces the data block; its holdouts live under
@@ -974,8 +1237,9 @@ the physical interval varies under that loader.
 `enable: false` restores full-split validation. `train`/`test` dataloaders are
 untouched.
 
-Every overlay except V11.6, V12.2, V14 and V14.1 uses the shared
-bbox-compatible loader; those four ship the minimal dynamic loader above
+Every overlay except V11.6, V12.2, V14, V14.1 and the V15 family (V15,
+V15.1, V15.2, V15.3) uses the shared bbox-compatible loader; those ship the
+minimal dynamic loader above
 (`data.mode=nvs`), which
 the other barrier-family overlays can opt into. Both loader contracts expose
 relative `timestamps_sec` plus `window_duration_sec`; every variant uses those
