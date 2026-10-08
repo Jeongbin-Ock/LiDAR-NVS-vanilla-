@@ -598,13 +598,15 @@ class ConfigLoaderTest(unittest.TestCase):
             "scale": 0.1,
             "dropout": 0.0,
         })
-        self.assertEqual(groups, {
-            "intensity": {"lr": 1.0e-3, "weight_decay": 1.0e-4},
+        # Since 2026-10-08 every role follows train.lr and keeps its decay.
+        self.assertTrue(all(role["lr"] == "${train.lr}" for role in groups.values()))
+        self.assertEqual(OmegaConf.to_container(v14.train.utonia_param_groups, resolve=True), {
+            "intensity": {"lr": 5.0e-4, "weight_decay": 1.0e-4},
             "adapter": {
-                "lr": 1.0e-3, "weight_decay": 1.0e-4, "bias_weight_decay": 0.0,
+                "lr": 5.0e-4, "weight_decay": 1.0e-4, "bias_weight_decay": 0.0,
             },
-            "lora": {"lr": 5.0e-5, "weight_decay": 1.0e-4},
-            "layer_norm": {"lr": 5.0e-5, "weight_decay": 0.0},
+            "lora": {"lr": 5.0e-4, "weight_decay": 1.0e-4},
+            "layer_norm": {"lr": 5.0e-4, "weight_decay": 0.0},
         })
         # The downstream group, warmup and clip are the shared base values.
         self.assertEqual(v14.train.lr, 5.0e-4)
@@ -723,8 +725,9 @@ class ConfigLoaderTest(unittest.TestCase):
 
             config, _source = load_checkpoint_config(checkpoint)
             self.assertEqual(config.p2g.utonia_adaptation.mode, "hybrid")
+            # The checkpoint embeds the resolved ${train.lr}.
             self.assertEqual(
-                config.train.utonia_param_groups.lora.lr, 5.0e-5
+                config.train.utonia_param_groups.lora.lr, 5.0e-4
             )
             with self.assertRaisesRegex(ValueError, "changed roots: p2g"):
                 resolve_main_config(OmegaConf.from_dotlist([

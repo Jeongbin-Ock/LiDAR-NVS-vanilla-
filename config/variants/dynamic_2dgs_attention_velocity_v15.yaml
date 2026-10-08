@@ -74,19 +74,23 @@ p2g:
         range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
 
 train:
+  # One learning rate for the whole model: since 2026-10-08 every Utonia role
+  # follows train.lr (previously 1e-3 intensity/adapter, 5e-5 LoRA/LayerNorm).
+  # Each role keeps its weight decay; earlier checkpoints resume with the rates
+  # embedded in their config.
   utonia_param_groups:
     intensity:
-      lr: 1.0e-3
+      lr: ${train.lr}
       weight_decay: 1.0e-4
     adapter:
-      lr: 1.0e-3
+      lr: ${train.lr}
       weight_decay: 1.0e-4
       bias_weight_decay: 0.0
     lora:
-      lr: 5.0e-5
+      lr: ${train.lr}
       weight_decay: 1.0e-4
     layer_norm:
-      lr: 5.0e-5
+      lr: ${train.lr}
       weight_decay: 0.0
   # Names relative to Point2Gaus. These parameters train at train.lr with no
   # weight decay, in a last `downstream_no_decay` group.

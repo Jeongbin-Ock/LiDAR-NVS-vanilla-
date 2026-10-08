@@ -27,11 +27,12 @@
 # Utonia then trains 4,423,130 parameters: w_I 54, stem adapter 998, FFN
 # adapters 725,238, LayerNorm 39,528, LoRA 3,657,312.
 #
-# 5. Optimizer (train.utonia_param_groups). AdamW groups by role: w_I and the
-#    new adapters at 1e-3 (adapter biases without weight decay), LoRA at 5e-5,
-#    LayerNorm at 5e-5 without weight decay, and everything after Utonia
-#    (temporal stack, router, Gaussian and motion heads) at train.lr = 5e-4 with
-#    train.weight_decay = 1e-4. One 500-step linear warmup + cosine schedule
+# 5. Optimizer (train.utonia_param_groups). AdamW groups by role: w_I, the new
+#    adapters (biases without weight decay), LoRA and LayerNorm (without weight
+#    decay), plus everything after Utonia (temporal stack, router, Gaussian and
+#    motion heads) with train.weight_decay = 1e-4. Since 2026-10-08 every group
+#    trains at train.lr = 5e-4; before that w_I and the adapters ran at 1e-3 and
+#    LoRA and LayerNorm at 5e-5. One 500-step linear warmup + cosine schedule
 #    scales every group alike, and grad_clip 1.0 still applies to all of them.
 #
 # Differences from the V11.4 dynamic-window run besides Utonia:
@@ -90,19 +91,23 @@ p2g:
 train:
   # train.lr / train.weight_decay (5e-4 / 1e-4 from nuscene_train.yaml) are
   # the downstream group's; these are the Utonia roles'.
+  # One learning rate for the whole model: since 2026-10-08 every Utonia role
+  # follows train.lr (previously 1e-3 intensity/adapter, 5e-5 LoRA/LayerNorm).
+  # Each role keeps its weight decay; earlier checkpoints resume with the rates
+  # embedded in their config.
   utonia_param_groups:
     intensity:
-      lr: 1.0e-3
+      lr: ${train.lr}
       weight_decay: 1.0e-4
     adapter:
-      lr: 1.0e-3
+      lr: ${train.lr}
       weight_decay: 1.0e-4
       bias_weight_decay: 0.0
     lora:
-      lr: 5.0e-5
+      lr: ${train.lr}
       weight_decay: 1.0e-4
     layer_norm:
-      lr: 5.0e-5
+      lr: ${train.lr}
       weight_decay: 0.0
   adam_betas: [0.9, 0.999]
   adam_eps: 1.0e-8

@@ -675,12 +675,18 @@ Utonia at `train.lr` / `train.weight_decay`:
 
 | Group | LR | weight decay |
 | --- | ---: | ---: |
-| `utonia_intensity` (`w_I`) | 1e-3 | 1e-4 |
-| `utonia_adapter_weight` (stem + FFN adapters) | 1e-3 | 1e-4 |
-| `utonia_adapter_bias` | 1e-3 | 0 |
-| `utonia_lora` | 5e-5 | 1e-4 |
-| `utonia_layer_norm` | 5e-5 | 0 |
-| `downstream` (temporal, router, Gaussian and motion heads) | 5e-4 | 1e-4 |
+| `utonia_intensity` (`w_I`) | `train.lr` (5e-4) | 1e-4 |
+| `utonia_adapter_weight` (stem + FFN adapters) | `train.lr` (5e-4) | 1e-4 |
+| `utonia_adapter_bias` | `train.lr` (5e-4) | 0 |
+| `utonia_lora` | `train.lr` (5e-4) | 1e-4 |
+| `utonia_layer_norm` | `train.lr` (5e-4) | 0 |
+| `downstream` (temporal, router, Gaussian and motion heads) | `train.lr` (5e-4) | 1e-4 |
+
+Since 2026-10-08 every hybrid overlay (V14 through V16) sets each Utonia role's
+`lr` to `${train.lr}`, so the whole model trains at one learning rate. Each role
+keeps its own weight decay. Before that date, `w_I` and the adapters trained at
+1e-3 and LoRA and LayerNorm at 5e-5. Checkpoints embed their resolved rates, so
+earlier runs resume unchanged.
 
 Roles come from module types, so the 1-D `w_I` is a weight rather than a bias
 and a new adapter deep inside a pretrained block still trains at the adapter
