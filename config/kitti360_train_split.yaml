@@ -1,0 +1,39 @@
+# Data split preparation only; not a runnable main.py training configuration.
+# Rebuild: python -m src.kitti360 --config config/kitti360_train_split.yaml
+dataroot: /data1/kitti360
+manifest_path: config/kitti360_train_split.json
+# Train/Val raw pool. Official 3D validation intervals are held out below.
+sequences:
+  - 2013_05_28_drive_0000_sync
+  - 2013_05_28_drive_0002_sync
+  - 2013_05_28_drive_0003_sync
+  - 2013_05_28_drive_0004_sync
+  - 2013_05_28_drive_0005_sync
+  - 2013_05_28_drive_0006_sync
+  - 2013_05_28_drive_0007_sync
+  - 2013_05_28_drive_0009_sync
+  - 2013_05_28_drive_0010_sync
+# Remove complete inclusive clips, including endpoints/GT, retaining drive 0000's remainder.
+excluded_benchmark_scenes: [1538, 1728, 1908, 3353, 2350, 4950, 8120, 10200, 10750, 11400]
+# Split segments at saved-timestamp gaps; no raw scans are deleted by this rule.
+max_sweep_gap_sec: 0.2
+# For measuring overlap with the current inference overlay, not training sampling.
+eval_input_offsets_sec: [-0.5, 0.5]
+# Starting-anchor time grid, snapped to the nearest saved sweep within each run.
+# The runtime data profile in kitti360_train.yaml uses the same default.
+window_stride_sec: 0.5
+validation:
+  # Project inclusive accumulated-cloud frame ranges onto actual raw sweeps.
+  protocol: official_3d_window_ranges
+  train_list_path: config/kitti360_official_splits/2013_05_28_drive_train.txt
+  val_list_path: config/kitti360_official_splits/2013_05_28_drive_val.txt
+  # Bbox-free NVS can also use raw scans outside semantic annotation windows.
+  keep_unlisted_raw_for_training: true
+# Random-duration sampling uses physical timestamps and every retained sweep.
+# Endpoints are model inputs and GT; sample up to three distinct interior GT views.
+sweep_hop: 1
+gt_middle_count: 3
+dynamic_window:
+  endpoint_min_sec: 0.2
+  endpoint_max_sec: 1.0
+  eval_seed: 42

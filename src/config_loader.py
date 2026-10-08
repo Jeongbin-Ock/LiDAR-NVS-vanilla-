@@ -8,6 +8,7 @@ prefer embedded configs and retain the historical W&B fallback.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf

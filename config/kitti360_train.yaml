@@ -1,0 +1,42 @@
+# Fresh training data profile. Architecture/loss/optimizer use the chosen variant.
+# python main.py data_config=config/kitti360_train.yaml device=[1]
+# No exp_name here: KITTI-360 runs are named <variant label>_kitti (v15.3_kitti),
+# and a CLI exp_name gains the _kitti suffix unless it already mentions kitti.
+data:
+  dataset_name: kitti360_dynamic
+  dataroot: /data1/kitti360
+  version: KITTI-360
+  train_split: train
+  eval_split: val
+  test_split: test
+  coordinate_frame: ego_vehicle
+  mode: nvs
+  bbox_json_path: null
+  train_excluded_scenes: null
+  split_manifest_path: config/kitti360_train_split.json
+  # Fresh config composition binds this to the manifest's SHA-256.
+  split_manifest_sha256: null
+  window_stride_sec: 0.5
+  max_sweep_gap_sec: 0.2
+  sweep_hop: 1
+  gt_middle_count: 3
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.0
+    eval_seed: 42
+  pose_missing_policy: interpolate
+  panorama_projection: hdl64e_kitti360_calibrated
+  column_assignment: firing_slot
+  image_height: 64
+  image_width: 2178
+  vfov: [-24.9, 2.0]
+  hfov: [-180.0, 180.0]
+  ring_to_elevation_deg: null
+  ego_radius: 2.5
+  gt_ego_radius: 2.5
+  max_depth_m: 80.0
+  num_workers: 4
+  eval_num_workers: 0
+  compact_val:
+    enable: false
+  verbose: true

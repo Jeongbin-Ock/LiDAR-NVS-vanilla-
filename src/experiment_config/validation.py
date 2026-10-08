@@ -798,6 +798,40 @@ def _validate_dynamic_window_loader(config, variant: str) -> None:
         raise ValueError("train_excluded_scenes must not contain duplicates")
 
 
+def _validate_kitti360_training(config, variant: str) -> None:
+    if str(OmegaConf.select(config, "data.dataset_name")) != "kitti360_dynamic":
+        return
+    if variant not in BARRIER_MATCH_DYNAMIC_VARIANTS:
+        raise ValueError("kitti360_dynamic requires a V11 or later physical-time variant")
+    if str(OmegaConf.select(config, "data.mode")) != "nvs":
+        raise ValueError("kitti360_dynamic requires data.mode=nvs")
+    if bool(OmegaConf.select(config, "data.compact_val.enable", default=False)):
+        raise ValueError("kitti360_dynamic does not use the nuScenes compact_val manifest")
+    _require_choice(config, "data.pose_missing_policy", ("interpolate",))
+    _require_choice(config, "data.panorama_projection", ("uniform", "hdl64e_kitti360_calibrated"))
+    _require_positive(config, "data.window_stride_sec", "data.max_sweep_gap_sec", "data.max_depth_m")
+    for path in ("data.window_stride_sec", "data.max_sweep_gap_sec", "data.max_depth_m"):
+        if not math.isfinite(float(OmegaConf.select(config, path))):
+            raise ValueError(f"{path} must be finite")
+    if int(OmegaConf.select(config, "data.sweep_hop", default=0)) != 1:
+        raise ValueError("kitti360_dynamic requires data.sweep_hop=1")
+    middle = OmegaConf.select(config, "data.gt_middle_count")
+    if isinstance(middle, bool) or not isinstance(middle, int) or middle < 0:
+        raise ValueError("kitti360_dynamic gt_middle_count must be a nonnegative integer")
+    minimum = float(OmegaConf.select(config, "data.dynamic_window.endpoint_min_sec"))
+    maximum = float(OmegaConf.select(config, "data.dynamic_window.endpoint_max_sec"))
+    if not all(map(math.isfinite, (minimum, maximum))) or not 0 < minimum <= maximum:
+        raise ValueError("KITTI360 endpoint durations must satisfy 0 < min <= max")
+    if OmegaConf.select(config, "data.ring_to_elevation_deg") is not None:
+        raise ValueError("KITTI360 raw scans have no ring field; data.ring_to_elevation_deg must be null")
+    if str(OmegaConf.select(config, "data.panorama_projection")) == "hdl64e_kitti360_calibrated":
+        if int(OmegaConf.select(config, "data.image_height")) != 64:
+            raise ValueError("KITTI360 calibrated projection requires image_height=64")
+        _require_choice(config, "data.column_assignment", ("nearest", "firing_slot"))
+    if not OmegaConf.select(config, "data.split_manifest_path") or not OmegaConf.select(config, "data.split_manifest_sha256"):
+        raise ValueError("kitti360_dynamic requires a checkpoint-bound split manifest path and hash")
+
+
 def _validate_legacy_train_exclusions(config) -> None:
     """Validate whole-scene holdouts consumed by the legacy nuscene.py loader."""
     path = "data.train_excluded_scenes"
@@ -1077,6 +1111,7 @@ def validate_experiment_config(config) -> None:
         )
 
     _validate_dynamic_window_loader(config, variant)
+    _validate_kitti360_training(config, variant)
     _validate_legacy_train_exclusions(config)
     _validate_retired_loss_options(config)
     _validate_utonia_lora_config(config, label)

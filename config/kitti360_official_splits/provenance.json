@@ -1,0 +1,21 @@
+{
+  "source_page": "https://www.cvlibs.net/datasets/kitti-360/download.php",
+  "archive_bytes": 11909490403,
+  "bytes_fetched": 103736,
+  "files": [
+    {
+      "archive_member": "data_3d_semantics/train/2013_05_28_drive_train.txt",
+      "local_path": "config/kitti360_official_splits/2013_05_28_drive_train.txt",
+      "bytes": 20076,
+      "sha256": "ad6d839348befc04795d38178e9e71a3aa7db0c3c4d3d7715ed6ba8a25c30cc7",
+      "source_url": "https://s3.eu-central-1.amazonaws.com/avg-projects/KITTI-360/6489aabd632d115c4280b978b2dcf72cb0142ad9/data_3d_semantics.zip"
+    },
+    {
+      "archive_member": "data_3d_semantics/train/2013_05_28_drive_val.txt",
+      "local_path": "config/kitti360_official_splits/2013_05_28_drive_val.txt",
+      "bytes": 5124,
+      "sha256": "cc4ebc13e18c6fc0fc7584f74c83482c397c5b541d8dde5d4ddb6e34bcf1c3c8",
+      "source_url": "https://s3.eu-central-1.amazonaws.com/avg-projects/KITTI-360/6489aabd632d115c4280b978b2dcf72cb0142ad9/data_3d_semantics.zip"
+    }
+  ]
+}

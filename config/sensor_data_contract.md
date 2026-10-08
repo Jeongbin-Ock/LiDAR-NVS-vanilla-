@@ -242,6 +242,12 @@ pose의 최대 위치 차이는 0.643mm이며, 실제 점의 ref↔camera 왕복
 calibration 파일 및 pose/camera에 적용하던 추가 원점 변환을 제거했다. 과거
 실험 결과는 당시 좌표 기준을 기록한 채 보존한다.
 
+현재 training registry에는 `kitti360_dynamic`도 등록되어 있다.
+`src/dataloader/kitti360_dynamic.py`는 공통 `KITTI360SequenceReader`의 calibration,
+pose와 calibrated GT camera 경로를 재사용한다. `data_config=config/kitti360_train.yaml`로
+선택하며, 0.5s 시작 격자와 0.2~1.0s 랜덤 endpoint를 사용한다.
+자세한 실행·검증 방법은 [kitti360_train.md](kitti360_train.md)에 있다.
+
 센서가 바뀌어도 `p2g.gs_params`, attention layer/head 수, adaptation rank 등을
 beam 수에 비례해 바꾸지 않는다. 특히 `p2g.gs_params.shs:32`는 intensity/raydrop
 SH coefficient 개수이며 LiDAR의 32 channels가 아니다. XYZI input 계약,

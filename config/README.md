@@ -1271,6 +1271,26 @@ Add new variants to the loader allow-list instead of accepting arbitrary config
 paths.  This keeps a misspelled or path-traversing selector from silently loading
 an unintended architecture.
 
+## KITTI-360 training
+
+Use `python main.py data_config=config/kitti360_train.yaml device='[6]'` from
+the repository root. The registered `kitti360_dynamic` loader reuses the
+inference loader's calibrated GT/camera path and the nuScenes dynamic XYZI
+collation. Model/loss/optimizer settings come from the selected variant.
+The run's W&B name and `logs/` folder end in `_kitti`: `v15.3_kitti` by default,
+and a CLI `exp_name` without "kitti" gains the suffix.
+
+The training pool and complete LiDAR4D clip exclusions are in
+[`kitti360_train_split.md`](kitti360_train_split.md), with rebuild settings in
+`kitti360_train_split.yaml` and allowed frame segments in
+`kitti360_train_split.json`. The raw NVS split projects official 3D validation
+intervals onto sweeps, leaving 61,809 train / 14,344 val sweeps after benchmark
+exclusions. Random endpoint durations are 0.2–1.0s with up to three interior GT
+views. The selected start stride is a 0.5s time grid, snapped to saved sweeps.
+After pose eligibility, there are 12,770 train / 2,996 val windows. The split
+manifest hash and sensor/time settings are protected on resume. See
+[`kitti360_train.md`](kitti360_train.md) for configuration, GT maps and checks.
+
 ## KITTI-360 inference
 
 `config/kitti360_inference.yaml` is a data/rendering overlay for
