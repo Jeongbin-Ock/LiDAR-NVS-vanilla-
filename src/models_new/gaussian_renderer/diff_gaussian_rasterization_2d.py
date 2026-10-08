@@ -109,7 +109,10 @@ def rasterize_gaussians(
         cov3Ds_precomp,
         mask,
         raster_settings,
+        blend_mask=None,
 ):
+    if blend_mask is None:
+        blend_mask = torch.empty((0,), device=means3D.device, dtype=torch.float32)
     return _RasterizeGaussians.apply(
         means3D,
         means2D,
@@ -121,6 +124,7 @@ def rasterize_gaussians(
         rotations,
         cov3Ds_precomp,
         mask,
+        blend_mask,
         raster_settings,
     )
 
@@ -139,6 +143,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             rotations,
             cov3Ds_precomp,
             mask,
+            blend_mask,
             raster_settings,
     ):
 
@@ -154,6 +159,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.scale_modifier,
             cov3Ds_precomp,
             mask,
+            blend_mask,
             raster_settings.viewmatrix,
             raster_settings.projmatrix,
             raster_settings.tanfovx,
@@ -188,7 +194,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
-        ctx.save_for_backward(colors_precomp, features, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer, contrib)
+        ctx.save_for_backward(colors_precomp, features, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer, contrib, blend_mask)
         return contrib, color, feature, depth, 1 - T, radii
 
     @staticmethod
@@ -196,7 +202,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
-        colors_precomp, features, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer, contrib = ctx.saved_tensors
+        colors_precomp, features, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer, contrib, blend_mask = ctx.saved_tensors
 
         # Restructure args as C++ method expects them
         args = (raster_settings.bg,
@@ -208,6 +214,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 rotations,
                 raster_settings.scale_modifier,
                 cov3Ds_precomp,
+                blend_mask,
                 raster_settings.viewmatrix,
                 raster_settings.projmatrix,
                 raster_settings.tanfovx,
@@ -236,13 +243,13 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args)  # Copy them before they can be corrupted
             try:
-                grad_means2D, grad_colors_precomp, grad_features, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)
+                grad_means2D, grad_colors_precomp, grad_features, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations, grad_blend_mask = _C.rasterize_gaussians_backward(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_bw.dump")
                 print("\nAn error occured in backward. Writing snapshot_bw.dump for debugging.\n")
                 raise ex
         else:
-            grad_means2D, grad_colors_precomp, grad_features, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)
+            grad_means2D, grad_colors_precomp, grad_features, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations, grad_blend_mask = _C.rasterize_gaussians_backward(*args)
 
         grads = (
             grad_means3D,
@@ -255,6 +262,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations,
             grad_cov3Ds_precomp,
             None,
+            grad_blend_mask if blend_mask.numel() > 0 else None,
             None,
         )
 
@@ -296,7 +304,15 @@ class GaussianRasterizer(nn.Module):
 
         return visible
 
-    def forward(self, means3D, means2D, opacities, shs=None, colors_precomp=None, features=None, scales=None, rotations=None, cov3D_precomp=None, mask=None):
+    def forward(self, means3D, means2D, opacities, shs=None, colors_precomp=None, features=None, scales=None, rotations=None, cov3D_precomp=None, mask=None, blend_mask=None):
+        """Rasterize; ``blend_mask`` is an optional per-Gaussian value in [0, 1].
+
+        A masked Gaussian blends with ``blend_mask * alpha`` while culling and
+        the 1/255 alpha cut still use its unmasked alpha (MaskGaussian's masked
+        rasterization), so a Gaussian at zero changes no output but the mask
+        still receives its gradient there. ``None`` renders every Gaussian
+        unmasked with the original kernels.
+        """
 
         raster_settings = self.raster_settings
 
@@ -336,6 +352,10 @@ class GaussianRasterizer(nn.Module):
             mask = torch.ones((means3D.shape[0],), device=device, dtype=torch.bool)
         else:
             mask = mask.to(device=device, dtype=torch.bool).reshape(-1).contiguous()
+        if blend_mask is not None:
+            if blend_mask.numel() != means3D.shape[0]:
+                raise ValueError("blend_mask must hold one value per Gaussian")
+            blend_mask = blend_mask.to(device=device, dtype=torch.float32).reshape(-1).contiguous()
 
         # Invoke C++/CUDA rasterization routine
         return rasterize_gaussians(
@@ -350,4 +370,5 @@ class GaussianRasterizer(nn.Module):
             cov3D_precomp,
             mask,
             raster_settings,
+            blend_mask=blend_mask,
         )

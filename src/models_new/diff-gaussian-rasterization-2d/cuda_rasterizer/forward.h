@@ -65,6 +65,7 @@ namespace FORWARD
 		const float *transMats,
 		const float *depths,
 		const float4 *normal_opacity,
+		const float *blend_mask,
 		float *final_T,
 		int32_t *n_contrib,
 		const float *bg_color,

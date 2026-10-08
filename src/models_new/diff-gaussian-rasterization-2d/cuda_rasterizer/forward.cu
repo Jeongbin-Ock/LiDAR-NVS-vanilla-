@@ -324,7 +324,13 @@ __global__ void preprocessCUDA(
 // Main rasterization method. Collaboratively works on one tile per
 // block, each thread treats one pixel. Alternates between fetching
 // and rasterizing data.
-template <uint32_t CHANNELS>
+// MASKED renders with a per-Gaussian blend mask m in [0, 1] (MaskGaussian's
+// masked rasterization): a Gaussian blends with weight m * alpha, while
+// culling and the 1/255 alpha cut keep using its unmasked alpha. A Gaussian
+// with m = 0 therefore leaves every output unchanged, exactly as if it were
+// absent, yet it is still visited here and in the backward pass, which
+// differentiates the outputs with respect to m at m = 0 as well.
+template <uint32_t CHANNELS, bool MASKED>
 __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	renderCUDA(
 		const uint2 *__restrict__ ranges,
@@ -336,6 +342,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 		const float *__restrict__ transMats,
 		const float *__restrict__ depths,
 		const float4 *__restrict__ normal_opacity,
+		const float *__restrict__ blend_mask,
 		float *__restrict__ final_T,
 		int32_t *__restrict__ n_contrib,
 		const float *__restrict__ bg_color,
@@ -375,6 +382,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	__shared__ float3 collected_Tu[BLOCK_SIZE];
 	__shared__ float3 collected_Tv[BLOCK_SIZE];
 	__shared__ float3 collected_Tw[BLOCK_SIZE];
+	__shared__ float collected_blend_mask[MASKED ? BLOCK_SIZE : 1];
 
 	// Initialize helper variables
 	float T = 1.0f;
@@ -417,6 +425,8 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			collected_Tu[block.thread_rank()] = {transMats[9 * coll_id + 0], transMats[9 * coll_id + 1], transMats[9 * coll_id + 2]};
 			collected_Tv[block.thread_rank()] = {transMats[9 * coll_id + 3], transMats[9 * coll_id + 4], transMats[9 * coll_id + 5]};
 			collected_Tw[block.thread_rank()] = {transMats[9 * coll_id + 6], transMats[9 * coll_id + 7], transMats[9 * coll_id + 8]};
+			if (MASKED)
+				collected_blend_mask[block.thread_rank()] = blend_mask[coll_id];
 		}
 		block.sync();
 
@@ -471,6 +481,18 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			float alpha = min(0.99f, opa * exp(power));
 			if (alpha < 1.0f / 255.0f)
 				continue;
+			if (MASKED)
+			{
+				const float mask = collected_blend_mask[j];
+				if (mask == 0.0f)
+				{
+					// Absent: no output changes (median depth included),
+					// but the backward pass must still reach it.
+					last_contributor = contributor;
+					continue;
+				}
+				alpha *= mask;
+			}
 			float test_T = T * (1 - alpha);
 			if (test_T < 0.0001f)
 			{
@@ -547,6 +569,7 @@ void FORWARD::render(
 	const float *transMats,
 	const float *depths,
 	const float4 *normal_opacity,
+	const float *blend_mask,
 	float *final_T,
 	int32_t *n_contrib,
 	const float *bg_color,
@@ -560,28 +583,54 @@ void FORWARD::render(
 	const float *row_to_theta,
 	const float scale_factor)
 {
-	renderCUDA<NUM_CHANNELS><<<grid, block>>>(
-		ranges,
-		point_list,
-		S, W, H,
-		means2D,
-		colors,
-		features,
-		transMats,
-		depths,
-		normal_opacity,
-		final_T,
-		n_contrib,
-		bg_color,
-		out_color,
-		out_feature,
-		out_depth,
-		vfov_min,
-		vfov_max,
-		hfov_min,
-		hfov_max,
-		row_to_theta,
-		scale_factor);
+	if (blend_mask != nullptr)
+		renderCUDA<NUM_CHANNELS, true><<<grid, block>>>(
+			ranges,
+			point_list,
+			S, W, H,
+			means2D,
+			colors,
+			features,
+			transMats,
+			depths,
+			normal_opacity,
+			blend_mask,
+			final_T,
+			n_contrib,
+			bg_color,
+			out_color,
+			out_feature,
+			out_depth,
+			vfov_min,
+			vfov_max,
+			hfov_min,
+			hfov_max,
+			row_to_theta,
+			scale_factor);
+	else
+		renderCUDA<NUM_CHANNELS, false><<<grid, block>>>(
+			ranges,
+			point_list,
+			S, W, H,
+			means2D,
+			colors,
+			features,
+			transMats,
+			depths,
+			normal_opacity,
+			nullptr,
+			final_T,
+			n_contrib,
+			bg_color,
+			out_color,
+			out_feature,
+			out_depth,
+			vfov_min,
+			vfov_max,
+			hfov_min,
+			hfov_max,
+			row_to_theta,
+			scale_factor);
 }
 
 void FORWARD::preprocess(

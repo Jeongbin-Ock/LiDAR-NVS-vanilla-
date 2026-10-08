@@ -44,6 +44,7 @@ RasterizeGaussiansCUDA(
 	const float scale_modifier,
 	const torch::Tensor &cov3D_precomp,
 	const torch::Tensor &mask,
+	const torch::Tensor &blend_mask,
 	const torch::Tensor &viewmatrix,
 	const torch::Tensor &projmatrix,
 	const float tan_fovx,
@@ -71,6 +72,11 @@ RasterizeGaussiansCUDA(
 	const int S = features.size(1);
 	const int H = image_height;
 	const int W = image_width;
+	// An empty blend_mask renders every Gaussian unmasked.
+	if (blend_mask.numel() != 0 && (blend_mask.numel() != P || blend_mask.scalar_type() != torch::kFloat32))
+	{
+		AT_ERROR("blend_mask must be empty or hold one float32 value per Gaussian");
+	}
 
 	auto int_opts = means3D.options().dtype(torch::kInt32);
 	auto float_opts = means3D.options().dtype(torch::kFloat32);
@@ -110,6 +116,7 @@ RasterizeGaussiansCUDA(
 		auto rotations_contig = rotations.contiguous();
 		auto cov3D_precomp_contig = cov3D_precomp.contiguous();
 		auto mask_contig = mask.contiguous();
+		auto blend_mask_contig = blend_mask.contiguous();
 		auto viewmatrix_contig = viewmatrix.contiguous();
 		auto projmatrix_contig = projmatrix.contiguous();
 		auto campos_contig = campos.contiguous();
@@ -118,6 +125,7 @@ RasterizeGaussiansCUDA(
 		const float *sh_ptr = sh_contig.numel() > 0 ? sh_contig.data_ptr<float>() : nullptr;
 		const float *colors_ptr = colors_contig.numel() > 0 ? colors_contig.data_ptr<float>() : nullptr;
 		const float *cov3D_ptr = cov3D_precomp_contig.numel() > 0 ? cov3D_precomp_contig.data_ptr<float>() : nullptr;
+		const float *blend_mask_ptr = blend_mask_contig.numel() > 0 ? blend_mask_contig.data_ptr<float>() : nullptr;
 
 		rendered = CudaRasterizer::Rasterizer::forward(
 			geomFunc,
@@ -136,6 +144,7 @@ RasterizeGaussiansCUDA(
 			rotations_contig.data_ptr<float>(),
 			cov3D_ptr,
 			mask_contig.data_ptr<bool>(),
+			blend_mask_ptr,
 			viewmatrix_contig.data_ptr<float>(),
 			projmatrix_contig.data_ptr<float>(),
 			campos_contig.data_ptr<float>(),
@@ -159,7 +168,7 @@ RasterizeGaussiansCUDA(
 	return std::make_tuple(rendered, out_contrib, out_color, out_feature, out_depth, out_T, radii, geomBuffer, binningBuffer, imgBuffer);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansBackwardCUDA(
 	const torch::Tensor &background,
 	const torch::Tensor &means3D,
@@ -170,6 +179,7 @@ RasterizeGaussiansBackwardCUDA(
 	const torch::Tensor &rotations,
 	const float scale_modifier,
 	const torch::Tensor &cov3D_precomp,
+	const torch::Tensor &blend_mask,
 	const torch::Tensor &viewmatrix,
 	const torch::Tensor &projmatrix,
 	const float tan_fovx,
@@ -210,6 +220,7 @@ RasterizeGaussiansBackwardCUDA(
 	torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options());
 	torch::Tensor dL_dfeatures = torch::zeros({P, S}, means3D.options());
 	torch::Tensor dL_dopacity = torch::zeros({P, 1}, means3D.options());
+	torch::Tensor dL_dblend_mask = torch::zeros({P}, means3D.options());
 	torch::Tensor dL_dcov3D = torch::zeros({P, 6}, means3D.options());
 	torch::Tensor dL_dsh = torch::zeros({P, M, NUM_CHANNELS}, means3D.options());
 	torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
@@ -228,6 +239,7 @@ RasterizeGaussiansBackwardCUDA(
 		auto scales_contig = scales.contiguous();
 		auto rotations_contig = rotations.contiguous();
 		auto cov3D_precomp_contig = cov3D_precomp.contiguous();
+		auto blend_mask_contig = blend_mask.contiguous();
 		auto viewmatrix_contig = viewmatrix.contiguous();
 		auto projmatrix_contig = projmatrix.contiguous();
 		auto campos_contig = campos.contiguous();
@@ -236,6 +248,7 @@ RasterizeGaussiansBackwardCUDA(
 		const float *sh_ptr = sh_contig.numel() > 0 ? sh_contig.data_ptr<float>() : nullptr;
 		const float *colors_ptr = colors_contig.numel() > 0 ? colors_contig.data_ptr<float>() : nullptr;
 		const float *cov3D_ptr = cov3D_precomp_contig.numel() > 0 ? cov3D_precomp_contig.data_ptr<float>() : nullptr;
+		const float *blend_mask_ptr = blend_mask_contig.numel() > 0 ? blend_mask_contig.data_ptr<float>() : nullptr;
 
 		CudaRasterizer::Rasterizer::backward(P, S, degree, M, R,
 											 background_contig.data_ptr<float>(),
@@ -248,6 +261,7 @@ RasterizeGaussiansBackwardCUDA(
 											 scale_modifier,
 											 rotations_contig.data_ptr<float>(),
 											 cov3D_ptr,
+											 blend_mask_ptr,
 											 viewmatrix_contig.data_ptr<float>(),
 											 projmatrix_contig.data_ptr<float>(),
 											 campos_contig.data_ptr<float>(),
@@ -264,6 +278,7 @@ RasterizeGaussiansBackwardCUDA(
 											 dL_dout_feature.contiguous().data_ptr<float>(),
 											 dL_dmeans2D.contiguous().data_ptr<float>(),
 											 dL_dopacity.contiguous().data_ptr<float>(),
+											 dL_dblend_mask.contiguous().data_ptr<float>(),
 											 dL_dcolors.contiguous().data_ptr<float>(),
 											 dL_dmeans3D.contiguous().data_ptr<float>(),
 											 dL_dcov3D.contiguous().data_ptr<float>(),
@@ -283,7 +298,7 @@ RasterizeGaussiansBackwardCUDA(
 	}
 
 	return std::make_tuple(dL_dmeans2D, dL_dcolors, dL_dfeatures, dL_dopacity, dL_dmeans3D, dL_dcov3D,
-						   dL_dsh, dL_dscales, dL_drotations);
+						   dL_dsh, dL_dscales, dL_drotations, dL_dblend_mask);
 }
 
 torch::Tensor markVisible(

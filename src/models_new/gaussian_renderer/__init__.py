@@ -102,6 +102,9 @@ def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifie
     mask = (opacity[:, 0] > 1 / 255) if mask is None else mask & (opacity[:, 0] > 1 / 255)
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
+    # A ``blend_mask`` (V16's routed training render) scales each Gaussian's
+    # blending weight only, after the prefilter above and the kernels' culling
+    # and alpha cut, which all see the unmasked opacity.
     contrib, rendered_image, rendered_feature, rendered_depth, rendered_opacity, radii = rasterizer(
         means3D=means3D,
         means2D=means2D,
@@ -112,7 +115,8 @@ def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifie
         scales=scales,
         rotations=rotations,
         cov3D_precomp=cov3D_precomp,
-        mask=mask)
+        mask=mask,
+        blend_mask=pc.get("blend_mask"))
 
     _, rendered_intensity_sh, rendered_raydrop = rendered_image.split([2, 1, 1], dim=0)
     rendered_other, rendered_normal = rendered_feature.split([S_other, 3], dim=0)
