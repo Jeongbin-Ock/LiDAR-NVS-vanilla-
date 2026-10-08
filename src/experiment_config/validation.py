@@ -308,6 +308,17 @@ def _validate_adam_settings(config) -> None:
         _require_finite(config, "train.adam_eps", minimum=0.0, inclusive=False)
 
 
+def _validate_spconv_precision(config) -> None:
+    """Optional ``train.spconv_allow_tf32``: a YAML boolean when present.
+
+    Absent means false -- FP32 sparse convolutions, which is what every
+    checkpoint saved before the key existed trained with.
+    """
+    path = "train.spconv_allow_tf32"
+    if _has_path(config, path):
+        _require_flag(config, path)
+
+
 def _validate_downstream_no_decay(config, variant, label: str) -> None:
     """Optional ``train.downstream_no_decay``: downstream parameters without decay.
 
@@ -1071,6 +1082,7 @@ def validate_experiment_config(config) -> None:
     _validate_utonia_lora_config(config, label)
     _validate_utonia_adaptation_config(config, variant, label)
     _validate_adam_settings(config)
+    _validate_spconv_precision(config)
     _validate_downstream_no_decay(config, variant, label)
 
     # Checkpoints embed the anchor mode from when a second one existed.

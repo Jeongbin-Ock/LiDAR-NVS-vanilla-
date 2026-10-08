@@ -19,6 +19,7 @@ from src.config_loader import DYNAMIC_VARIANT, compose_fresh_config
 from src.dataloader import dataset_dict
 from src.dataloader.nuscene import multiframe_collate_fn
 from src.model_wrapper import ModelWrapper
+from src.runtime_precision import apply_spconv_tf32
 
 
 def to_device(value, device):
@@ -225,6 +226,8 @@ def main():
         *args.override,
     ])
     cfg, _ = compose_fresh_config(cli)
+    # As main.py: before the first sparse convolution of the process.
+    apply_spconv_tf32(cfg)
     dataset_class = dataset_dict[cfg.data.dataset_name]
     dataset = dataset_class(cfg.data, split=args.split)
     indices = args.indices or list(range(args.batch_size))

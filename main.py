@@ -28,6 +28,7 @@ from src.model_wrapper import ModelWrapper
 from src.models_new.utils.model_utils import DataModule
 from src.dataloader import dataset_dict
 from src.config_loader import resolve_main_config
+from src.runtime_precision import apply_spconv_tf32
 
 warnings.filterwarnings(
     "ignore",
@@ -67,6 +68,11 @@ def main(cfg, config_source="unspecified"):
     # Seed before logger, model, and DataModule construction so initialization,
     # Gumbel sampling, data shuffling, and DataLoader workers are reproducible.
     seed_everything(int(cfg.seed), workers=True)
+    # Before the model exists: spconv fixes its kernel per shape at the first
+    # sparse convolution (the sanity validation), and Lightning's DDP ranks
+    # each re-run this function.
+    spconv_tf32 = apply_spconv_tf32(cfg)
+    print(f"[precision] torch matmul=high (TF32), spconv TF32={spconv_tf32}")
     os.makedirs(cfg.logger.dir, exist_ok=True)
     global_rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
     effective_config_path = os.path.join(cfg.logger.dir, "effective_config.yaml")

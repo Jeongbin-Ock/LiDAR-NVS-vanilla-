@@ -2397,6 +2397,38 @@ class V15SiblingConfigTest(unittest.TestCase):
             variant=DYNAMIC_VARIANT_V15_1,
         )
 
+    def test_fresh_runs_use_tf32_sparse_convolutions(self):
+        for variant in (DYNAMIC_VARIANT_V11_4, DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3):
+            with self.subTest(variant=variant):
+                config, _ = self._compose(variant=variant)
+                self.assertIs(config.train.spconv_allow_tf32, True)
+        config, _ = self._compose(
+            "train.spconv_allow_tf32=false", variant=DYNAMIC_VARIANT_V15_3
+        )
+        self.assertIs(config.train.spconv_allow_tf32, False)
+        self._rejected(
+            "spconv_allow_tf32 must be true or false",
+            "train.spconv_allow_tf32=1", variant=DYNAMIC_VARIANT_V15_3,
+        )
+        # A checkpoint config saved before the key existed stays FP32 and may
+        # still be switched at resume, since train.* is a runtime root.
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "epoch=0.ckpt"
+            stored, _ = self._compose(variant=DYNAMIC_VARIANT_V15)
+            stored = OmegaConf.to_container(stored, resolve=True)
+            del stored["train"]["spconv_allow_tf32"]
+            torch.save({"experiment_config": stored}, checkpoint)
+            resumed, _ = resolve_main_config(OmegaConf.from_dotlist([
+                f"train.ckpt_path={checkpoint}",
+            ]))
+            self.assertIsNone(
+                OmegaConf.select(resumed, "train.spconv_allow_tf32", default=None)
+            )
+            resumed, _ = resolve_main_config(OmegaConf.from_dotlist([
+                f"train.ckpt_path={checkpoint}", "train.spconv_allow_tf32=true",
+            ]))
+            self.assertIs(resumed.train.spconv_allow_tf32, True)
+
     def test_checkpoints_protect_the_new_heads(self):
         with tempfile.TemporaryDirectory() as tmp:
             for variant, overrides in (

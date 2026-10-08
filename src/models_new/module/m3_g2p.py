@@ -141,6 +141,10 @@ class DynamicGausRender(nn.Module):
                     pc["opacity_gate"] = b_gs["opacity_gate"]
                 if "blend_mask" in b_gs:
                     pc["blend_mask"] = b_gs["blend_mask"]
+                if "opacity_gate" in b_gs:
+                    pc["opacity_gate"] = b_gs["opacity_gate"]
+                if "blend_mask" in b_gs:
+                    pc["blend_mask"] = b_gs["blend_mask"]
 
                 # 랜더링
                 render_pkg = render(

@@ -33,6 +33,10 @@ train:
   max_steps: 1000000
   ckpt_path: null   # train from scratch (scheduler + grad clipping stability fix)
   grad_accum_steps: 4
+  # Utonia's sparse convolutions (spconv) on TF32 Tensor Cores, like every
+  # torch matmul under main.py's "high" precision. An absent key is false, so
+  # checkpoints saved before 2026-10-02 resume with FP32 sparse convolutions.
+  spconv_allow_tf32: true
 test:
   batch_size: 1
   ckpt_path: null

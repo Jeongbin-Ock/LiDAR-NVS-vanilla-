@@ -1106,6 +1106,23 @@ gate, no auxiliary render and no routing statistics. Without a count block,
 the decoder's hidden width is `dynamic_2dgs.gaussian_head.decoder_hidden`
 (576), which V15.3 requires and every other variant rejects.
 
+**Sparse-convolution precision (`train.spconv_allow_tf32`).** main.py sets
+`torch.set_float32_matmul_precision("high")`, so every torch matmul -- Utonia's
+stem and attention Linears included -- trains on TF32 Tensor Cores. Utonia's
+sparse convolutions (each block's CPE `SubMConv3d` and its LoRA) run through
+spconv, which ignores that switch. `train.spconv_allow_tf32: true` (the base
+config's value since 2026-10-02) sets `spconv.constants.SPCONV_ALLOW_TF32` so
+they may use TF32 kernels as well; an absent key means false, so checkpoints
+saved before the key existed resume with FP32 sparse convolutions unless the
+resume passes `train.spconv_allow_tf32=true`. `src/runtime_precision.py` applies
+it at the start of `main()` and in `tests/run_dynamic_smoke.py`: spconv fixes
+the kernel it picks for each shape at the first sparse convolution, so setting
+it later in a process has no effect. `test_lidar4d_nvs.py` does not apply it and
+evaluates in full FP32 (it also leaves torch matmuls at FP32). Measured on a
+V15.2 training-shaped batch, it cut the step from 2.39 s to 2.09 s; the change
+in Utonia features and gradients was the size of the change from Utonia's
+random per-cell input point choice (`GridSample(mode="train")`).
+
 Every count contract is structural: `p2g` is a checkpoint-protected root (and
 V15.3's `dynamic_2dgs.gaussian_head.decoder_hidden` sits under the protected
 `dynamic_2dgs` root), so a resume or evaluation cannot change how many

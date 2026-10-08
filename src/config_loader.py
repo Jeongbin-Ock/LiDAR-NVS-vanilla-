@@ -124,10 +124,26 @@ def _load_variant_overlay(variant: str) -> tuple[DictConfig, Path]:
     return overlay, path
 
 
-def compose_fresh_config(cli=None) -> tuple[DictConfig, str]:
-    """Compose defaults -> shared base -> selected variant -> CLI overrides."""
+KITTI360_EXP_NAME_SUFFIX = "_kitti"
 
-    cli = _as_config(cli)
+
+def _kitti360_exp_name(config, *, named: bool) -> str:
+    """A KITTI-360 run's W&B name and logs/ folder always carry ``_kitti``.
+
+    An unnamed run takes the variant's short label (``v15.3_kitti``). A given
+    name gains the suffix unless it already mentions kitti, so a KITTI-360 run
+    never writes into a nuScenes run's ``logs/<exp_name>`` checkpoints.
+    """
+    name = str(config.exp_name) if named else _variant_label(_variant(config)).lower()
+    return name if "kitti" in name.lower() else name + KITTI360_EXP_NAME_SUFFIX
+
+
+def compose_fresh_config(cli=None) -> tuple[DictConfig, str]:
+    """Compose base -> variant -> optional training data profile -> CLI."""
+
+    cli = OmegaConf.create(OmegaConf.to_container(_as_config(cli), resolve=False))
+    data_profile_path = cli.pop("data_config", None)
+    named = "exp_name" in cli
     base = OmegaConf.load(DEFAULT_CONFIG_PATH)
     selected = _variant(cli, default=_variant(base))
     overlay, overlay_path = _load_variant_overlay(selected)
@@ -135,15 +151,37 @@ def compose_fresh_config(cli=None) -> tuple[DictConfig, str]:
         OmegaConf.create(STRUCTURAL_DEFAULTS),
         base,
         overlay,
-        cli,
     )
+    data_source = ""
+    if data_profile_path:
+        path = Path(str(data_profile_path)).expanduser().resolve()
+        profile = OmegaConf.load(path)
+        unknown = set(profile) - {"data", "exp_name"}
+        if unknown or not OmegaConf.is_dict(profile.get("data")):
+            raise ValueError("data_config requires data and can only add exp_name")
+        # Replace the nuScenes data block completely, including its compact-val
+        # settings and variant-local scene holdouts.
+        config.data = profile.data
+        if "exp_name" in profile:
+            config.exp_name = OmegaConf.to_container(profile, resolve=False)["exp_name"]
+            named = True
+        data_source = f" data_profile={path}"
+    config = OmegaConf.merge(config, cli)
+    if str(config.data.dataset_name) == "kitti360_dynamic":
+        manifest = Path(str(config.data.split_manifest_path))
+        digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        expected = OmegaConf.select(config, "data.split_manifest_sha256")
+        if expected is not None and str(expected) != digest:
+            raise ValueError("KITTI360 split manifest hash differs from data.split_manifest_sha256")
+        config.data.split_manifest_sha256 = digest
+        config.exp_name = _kitti360_exp_name(config, named=named)
     if _variant(config) != selected:
         raise ValueError(
             "The composed model.variant changed after selecting its overlay: "
             f"selected={selected!r}, composed={_variant(config)!r}"
         )
     validate_experiment_config(config)
-    source = f"base={DEFAULT_CONFIG_PATH.resolve()} overlay={overlay_path.resolve()}"
+    source = f"base={DEFAULT_CONFIG_PATH.resolve()} overlay={overlay_path.resolve()}{data_source}"
     return config, source
 
 

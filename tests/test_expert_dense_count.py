@@ -770,3 +770,29 @@ def test_auxiliary_render_loss_renders_the_sampled_views():
     assert [len(window) for window in rendered_gt["cameras"]] == [2, 2]
     assert gt["cameras"] == [list(range(5)), list(range(4))]
     torch.testing.assert_close(losses["total"], torch.tensor(3.0))
+
+
+# ---------------------------------------------------------------- spconv TF32
+
+
+def test_spconv_tf32_switch_follows_the_run_config():
+    import spconv.constants
+
+    from src.runtime_precision import apply_spconv_tf32
+
+    original = spconv.constants.SPCONV_ALLOW_TF32
+    try:
+        assert apply_spconv_tf32(OmegaConf.create(
+            {"train": {"spconv_allow_tf32": True}}
+        )) is True
+        assert spconv.constants.SPCONV_ALLOW_TF32 is True
+        assert apply_spconv_tf32(OmegaConf.create(
+            {"train": {"spconv_allow_tf32": False}}
+        )) is False
+        assert spconv.constants.SPCONV_ALLOW_TF32 is False
+        # Checkpoint configs saved before the key existed trained in FP32.
+        spconv.constants.SPCONV_ALLOW_TF32 = True
+        assert apply_spconv_tf32(OmegaConf.create({"train": {"lr": 1e-3}})) is False
+        assert spconv.constants.SPCONV_ALLOW_TF32 is False
+    finally:
+        spconv.constants.SPCONV_ALLOW_TF32 = original

@@ -274,6 +274,16 @@ _CHECKPOINT_PROTECTED_PATHS = (
     "data.ego_radius",
     "data.train_excluded_scenes",
     "data.dynamic_window",
+    "data.split_manifest_path",
+    "data.split_manifest_sha256",
+    "data.window_stride_sec",
+    "data.max_sweep_gap_sec",
+    "data.sweep_hop",
+    "data.pose_missing_policy",
+    "data.panorama_projection",
+    "data.column_assignment",
+    "data.gt_ego_radius",
+    "data.max_depth_m",
 )
 
 # Pointcept/Utonia encoder widths from config/utonia_pretrained.yaml. The token
