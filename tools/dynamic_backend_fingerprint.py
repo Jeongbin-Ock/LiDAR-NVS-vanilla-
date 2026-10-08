@@ -19,8 +19,8 @@ from omegaconf import OmegaConf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src import config_loader as cl  # noqa: E402
-from src.models_new.module import dynamic_gaussian as dg  # noqa: E402
+from src.experiment_config import loader as cl  # noqa: E402
+from src.models.module import dynamic_gaussian as dg  # noqa: E402
 
 BACKENDS = {
     cl.DYNAMIC_VARIANT_V11: dg.MaxSpeedBarrierVelocityGaussianBackend,

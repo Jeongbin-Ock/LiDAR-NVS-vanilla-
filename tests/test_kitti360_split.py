@@ -7,49 +7,33 @@ import sys
 
 import numpy as np
 
-from src.kitti360.metadata import sweep_inventory
-from src.kitti360.sampling import eligible_endpoint_frames, sample_window_frames
-from src.kitti360.splits import (
+from src.dataloader.kitti360.metadata import sweep_inventory
+from src.dataloader.kitti360.sampling import eligible_endpoint_frames, sample_window_frames
+from src.dataloader.kitti360.splits import (
     retained_frame_segments, frame_range_mask, partition_frame_segments,
     read_official_3d_ranges, training_window_allowed,
 )
 
 
 class KITTI360SplitTest(unittest.TestCase):
-    def test_legacy_module_forwards_the_same_public_functions_and_constants(self):
-        from src import kitti360_split as legacy
-        from src.kitti360 import metadata, sampling, splits
-        expected = {
-            metadata: ['KITTI360_BENCHMARK_SCENES', 'KITTI360_BENCHMARK_SEQUENCE',
-                       'read_timestamps_ns', 'sweep_inventory'],
-            sampling: ['eligible_endpoint_frames', 'sample_window_frames', 'window_start_frames'],
-            splits: ['build_training_split', 'frame_range_mask', 'partition_frame_segments',
-                     'read_official_3d_ranges', 'retained_frame_segments', 'training_window_allowed'],
-        }
-        for module, names in expected.items():
-            for name in names:
-                with self.subTest(name=name):
-                    self.assertIs(getattr(legacy, name), getattr(module, name))
-
     def test_metadata_and_sampling_import_without_datasets_or_torch(self):
         code = '''
 import sys
-from src.kitti360 import metadata, sampling
+from src.dataloader.kitti360 import metadata, sampling
 assert "torch" not in sys.modules
-assert "src.dataloader" not in sys.modules
-assert "src.kitti360.splits" not in sys.modules
-import src.kitti360_split
+assert "src.dataloader.registry" not in sys.modules
+assert "src.dataloader.kitti360.splits" not in sys.modules
+from src.dataloader.kitti360 import compact_val, splits
 assert "torch" not in sys.modules
 '''
         subprocess.run([sys.executable, '-c', code], cwd=Path(__file__).resolve().parents[1],
                        check=True, capture_output=True, text=True)
 
-    def test_both_cli_module_paths_accept_the_existing_config_argument(self):
-        for module in ['src.kitti360', 'src.kitti360_split']:
-            result = subprocess.run([sys.executable, '-m', module, '--help'],
-                                    cwd=Path(__file__).resolve().parents[1],
-                                    check=True, capture_output=True, text=True)
-            self.assertIn('--config', result.stdout)
+    def test_split_preparation_cli_accepts_the_config_argument(self):
+        result = subprocess.run([sys.executable, '-m', 'src.dataloader.kitti360', '--help'],
+                                cwd=Path(__file__).resolve().parents[1],
+                                check=True, capture_output=True, text=True)
+        self.assertIn('--config', result.stdout)
 
     def test_val_interval_union_deduplicates_windows_and_benchmark_exclusion_has_priority(self):
         frames = np.arange(20)

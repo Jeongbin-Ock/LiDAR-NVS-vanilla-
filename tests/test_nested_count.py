@@ -8,9 +8,9 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
-from src.models_new.module.dynamic_gaussian import NestedCountGaussianHead
-from src.models_new.utils.render import Gaussianutil
-from src.models_new.utils.routing_logging import (
+from src.models.module.dynamic_gaussian import NestedCountGaussianHead
+from src.models.utils.render import Gaussianutil
+from src.models.utils.routing_logging import (
     routing_option_counts,
     routing_sufficient_statistics,
 )
@@ -480,7 +480,7 @@ def v15_backend_cfg(heads=4):
 
 
 def _v15_backend(**nested_overrides):
-    from src.models_new.module.dynamic_gaussian import (
+    from src.models.module.dynamic_gaussian import (
         NestedCountBarrierVelocityGaussianBackend,
     )
 
@@ -577,9 +577,9 @@ def test_saturated_gate_reaches_rasterizer_through_the_render_pipeline(monkeypat
     """
     from types import SimpleNamespace
 
-    from src.models_new import gaussian_renderer
-    from src.models_new.module.dynamic_gaussian import DynamicGausTemp
-    from src.models_new.module.m3_g2p import DynamicGausRender
+    from src.models import gaussian_renderer
+    from src.models.module.dynamic_gaussian import DynamicGausTemp
+    from src.models.module.m3_g2p import DynamicGausRender
 
     backend = _v15_backend().train()
     arguments = _v15_inputs()
@@ -672,7 +672,7 @@ def test_v15_temporal_stack_has_no_layer_scale():
 
 
 def test_v15_backend_rejects_seed_contracts_it_cannot_honour():
-    from src.models_new.module.dynamic_gaussian import (
+    from src.models.module.dynamic_gaussian import (
         NestedCountBarrierVelocityGaussianBackend,
     )
 

@@ -1,6 +1,6 @@
 """LiDAR4D / GS-LiDAR-style temporal NVS evaluation on nuScenes or KITTI-360.
 
-KITTI-360: ``eval_config=config/kitti360_inference.yaml`` selects the ten
+KITTI-360: ``eval_config=config/eval/kitti360_inference.yaml`` selects the ten
 official drive-0000 clips and their 40 held-out frames. Sensor timing, render
 geometry, and target labels come from the dataset; model config comes from the
 checkpoint. This feed-forward evaluation uses two sweeps per target.
@@ -43,8 +43,8 @@ from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 
 from src.model_wrapper import ModelWrapper
-from src.config_loader import resolve_eval_config
-from src.dataloader.nuscene import multiframe_collate_fn
+from src.experiment_config import resolve_eval_config
+from src.dataloader.nuscenes.legacy import multiframe_collate_fn
 from src.dataloader.lidar4d_test import build_lidar4d_test_dataset
 from src.eval.output_paths import resolve_lidar4d_output_dir
 from src.eval.gslidar_metrics import (
@@ -57,8 +57,8 @@ from src.eval.gaussian_viz import (
 )
 from src.eval.gaussian_stats import collect_window_stats, analyze_gaussian_sizes
 from src.eval.depth_diagnostics import depth_error_breakdown, summarize_depth_breakdowns
-from src.models_new.utils.graphics_utils import lidar4d_range_image_to_points
-from src.models_new.utils.render import visualize_depth
+from src.models.utils.graphics_utils import lidar4d_range_image_to_points
+from src.models.utils.render import visualize_depth
 
 RAYDROP_THRESHOLD = 0.5
 EVAL_MAX_DEPTH_M = 80.0

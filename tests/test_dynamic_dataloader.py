@@ -9,22 +9,21 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from src.dataloader.nuscene_dynamic_lidar4d import (
+from src.dataloader.collate import dynamic_lidar4d_multiframe_collate_fn, dynamic_transform
+from src.dataloader.nuscenes.dynamic import (
     LIDAR4D_TRAIN_SEQUENCE_SCENES,
     NuScenesDynamicLiDAR4DDataset,
-    dynamic_lidar4d_multiframe_collate_fn,
-    dynamic_transform,
     eligible_endpoint_indices,
     sample_target_indices,
 )
-from src.dataloader.nuscene import (
+from src.dataloader.nuscenes.legacy import (
     filter_train_scene_names,
     transform as legacy_transform,
 )
-from src.models_new.module.m3_g2p import DynamicGausRender
-from src.models_new.utonia.lora import build_xyzi_utonia_input
-from src.models_new.utils.loss import Loss
-from src.models_new.utils.model_utils import DataModule
+from src.models.module.m3_g2p import DynamicGausRender
+from src.models.utonia.lora import build_xyzi_utonia_input
+from src.models.utils.loss import Loss
+from src.dataloader.datamodule import DataModule
 
 
 def _frames(count: int, cadence_us: int = 50_000):
@@ -388,7 +387,7 @@ class RaggedViewLossTest(unittest.TestCase):
                 "raydrop": image.sigmoid(),
             }
 
-        with patch("src.models_new.module.m3_g2p.render", side_effect=fake_render):
+        with patch("src.models.module.m3_g2p.render", side_effect=fake_render):
             renders = renderer(
                 [gaussian, gaussian], {"cameras": cameras}, compute_points=False
             )

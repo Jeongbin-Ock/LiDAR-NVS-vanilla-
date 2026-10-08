@@ -6,17 +6,18 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from src.config_loader import compose_fresh_config, resolve_eval_config, resolve_main_config
-from src.dataloader.kitti360_lidar4d_test import (
-    CAMERA_FROM_LIDAR, EGO_FROM_IMU, KITTI360Poses,
-    KITTI360_BENCHMARK_SCENES, LiDAR4DKITTI360TestDataset, project_kitti_panorama,
+from src.experiment_config import compose_fresh_config, resolve_eval_config, resolve_main_config
+from src.dataloader.kitti360.lidar4d_test import LiDAR4DKITTI360TestDataset
+from src.dataloader.kitti360.metadata import KITTI360_BENCHMARK_SCENES
+from src.dataloader.kitti360.reader import (
+    CAMERA_FROM_LIDAR, EGO_FROM_IMU, KITTI360Poses, project_kitti_panorama,
 )
-from src.dataloader.kitti360_hdl64e import (
+from src.dataloader.kitti360.hdl64e import (
     KITTI360_HDL64E_APEX_HEIGHT_M, KITTI360_HDL64E_BLOCK_ORIGIN_Z_M, KITTI360_HDL64E_ELEVATION_DEG,
     assign_lasers, firing_slot_columns, project_hdl64e_panorama,
 )
-from src.models_new.utils.camera import Camera, StackedPanoramaCamera
-from src.models_new.utils.graphics_utils import pano_to_lidar
+from src.models.utils.camera import Camera, StackedPanoramaCamera
+from src.models.utils.graphics_utils import pano_to_lidar
 from src.eval.depth_diagnostics import depth_error_breakdown, summarize_depth_breakdowns
 from src.dataloader.lidar4d_test import build_lidar4d_test_dataset
 
@@ -150,7 +151,7 @@ class KITTI360InferenceTest(unittest.TestCase):
                 KITTI360Poses(path, stamps, 'error').at(1)
 
     def _fixture(self, root):
-        cfg = OmegaConf.load('config/kitti360_inference.yaml').data
+        cfg = OmegaConf.load('config/eval/kitti360_inference.yaml').data
         # Generic fixture retains the historical uniform benchmark. Dedicated
         # tests below exercise the new default/profile independently.
         cfg.panorama_projection = 'uniform'
@@ -307,7 +308,7 @@ class KITTI360InferenceTest(unittest.TestCase):
 
     def test_stacked_camera_renders_blocks_top_to_bottom(self):
         from unittest import mock
-        from src.models_new.module import m3_g2p
+        from src.models.module import m3_g2p
         common = dict(R=np.eye(3), T=np.zeros(3), vfov=(-24.9, 2), hfov=(-180, 180))
         blocks, kept = self._guarded_blocks(8, **common)
         stacked = StackedPanoramaCamera(blocks, np.zeros((64, 3)), kept, **common, resolution=(8, 64),
@@ -337,7 +338,7 @@ class KITTI360InferenceTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), 'needs the CUDA rasterizer')
     def test_block_render_matches_single_origin_render_when_origins_coincide(self):
-        from src.models_new.module import m3_g2p
+        from src.models.module import m3_g2p
         torch.manual_seed(0)
         count = 400
         azimuth = torch.rand(count)*2*np.pi
@@ -371,7 +372,7 @@ class KITTI360InferenceTest(unittest.TestCase):
             path = Path(temporary)/'checkpoint.ckpt'
             stored,_ = compose_fresh_config(OmegaConf.from_dotlist(['model.variant=dynamic_2dgs_attention_velocity_v14_1']))
             torch.save({'experiment_config_schema_version':1,'experiment_config':OmegaConf.to_container(stored,resolve=True)},path)
-            cli = OmegaConf.create({'eval_config':'config/kitti360_inference.yaml','test':{'ckpt_path':str(path)}})
+            cli = OmegaConf.create({'eval_config':'config/eval/kitti360_inference.yaml','test':{'ckpt_path':str(path)}})
             cfg,source = resolve_eval_config(cli)
             self.assertEqual(cfg.data.dataset_name,'kitti360_lidar4d')
             self.assertEqual(cfg.data.image_height,64)
@@ -380,13 +381,13 @@ class KITTI360InferenceTest(unittest.TestCase):
             self.assertEqual(cfg.data.column_assignment,'firing_slot')
             self.assertIsNone(cfg.data.ring_to_elevation_deg)
             calibrated,_ = resolve_eval_config(OmegaConf.create({
-                'eval_config':'config/kitti360_inference_hdl64e_calibrated.yaml','test':{'ckpt_path':str(path)}}))
+                'eval_config':'config/eval/kitti360_inference_hdl64e_calibrated.yaml','test':{'ckpt_path':str(path)}}))
             self.assertEqual(OmegaConf.to_container(calibrated.data),OmegaConf.to_container(cfg.data))
             for key in ['model','p2g','g2g','g2p','dynamic_2dgs','train']:
                 self.assertEqual(OmegaConf.to_container(cfg[key],resolve=True),OmegaConf.to_container(stored[key],resolve=True))
             self.assertIn('inference data overlay',source)
             benchmark, _ = resolve_eval_config(OmegaConf.create({
-                'eval_config': 'config/kitti360_inference_lidar4d_benchmark.yaml',
+                'eval_config': 'config/eval/kitti360_inference_lidar4d_benchmark.yaml',
                 'test': {'ckpt_path': str(path)},
             }))
             self.assertEqual((benchmark.data.image_height, benchmark.data.image_width), (66, 1030))

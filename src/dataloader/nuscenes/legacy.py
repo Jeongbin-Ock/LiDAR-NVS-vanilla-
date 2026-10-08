@@ -8,7 +8,7 @@ from nuscenes.utils.splits import create_splits_scenes
 from pyquaternion import Quaternion
 
 from . import compact_val
-from .nuscenes_frames import (
+from .frames import (
     COORDINATE_FRAME_EGO,
     ego_to_world as _ego_to_world,
     reference_to_sensor as _reference_to_sensor,
@@ -17,8 +17,8 @@ from .nuscenes_frames import (
     sensor_to_world as _shared_sensor_to_world,
     transform_points as _transform_points,
 )
-from ..models_new import utonia 
-from ..models_new.utils.camera import Camera
+from ...models import utonia
+from .camera import camera_from_nuscenes
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────
@@ -700,7 +700,7 @@ class NuScenesNVSDataset(Dataset):
 
         # ── 렌더링 supervision에 사용하는 GT Camera 객체 ───────────────────
         gt_cameras = [
-            Camera.from_nuscenes(
+            camera_from_nuscenes(
                 nusc=self.nusc,
                 lidar_token=lidar_tok,
                 timestamp_normalized=ts_norm,
@@ -942,3 +942,7 @@ def multiframe_collate_fn(batch):
             "window_indices":      all_gt_window_indices,
         },
     }
+
+
+# DataModule packs batches with the dataset class's own collate_fn.
+NuScenesNVSDataset.collate_fn = staticmethod(multiframe_collate_fn)

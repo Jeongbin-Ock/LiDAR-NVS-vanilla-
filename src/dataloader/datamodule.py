@@ -1,8 +1,6 @@
 import lightning.pytorch as pl
 from torch.utils.data import DataLoader
 
-from ...dataloader.nuscene import multiframe_collate_fn
-
 
 class DataModule(pl.LightningDataModule):
     def __init__(self, dataset, cfg):
@@ -11,8 +9,8 @@ class DataModule(pl.LightningDataModule):
         self.cfg = cfg  
 
     def _collate_fn(self):
-        """Use a dataset-specific packing contract when one is declared."""
-        return getattr(self.dataset, "collate_fn", multiframe_collate_fn)
+        """Every registered dataset declares its own batch packing."""
+        return self.dataset.collate_fn
 
     def train_dataloader(self):
         return DataLoader(

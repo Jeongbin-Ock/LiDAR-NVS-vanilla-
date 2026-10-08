@@ -33,10 +33,9 @@ p2g:
         interval: 20
         range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
 
-data:
-  mode: bbox
-  bbox_json_path: null
-  train_excluded_scenes: [scene-0757, scene-1094]
+# Default training data: config/data/nuscenes.yaml, the legacy fixed-window
+# loader with the two LiDAR4D scenes held out. data_config=<name> picks another.
+data_config: nuscenes
 
 dynamic_2dgs:
   temporal:

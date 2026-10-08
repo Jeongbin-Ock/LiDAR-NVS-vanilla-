@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
-from src.dataloader.nuscene import relative_time_coordinates
+from src.dataloader.nuscenes.legacy import relative_time_coordinates
 from src.eval.gaussian_viz import (
     SOURCE_FRAME_COLORS,
     _source_frame_velocity_layer,
@@ -21,7 +21,7 @@ from src.eval.gaussian_viz import (
     save_sequence_html,
     velocity_transport_from_output,
 )
-from src.models_new.module.dynamic_gaussian import (
+from src.models.module.dynamic_gaussian import (
     CosineRoPELayerWeightedCrossAttention,
     CosineRoPEVelocityGaussianBackend,
     DynamicGaussianBackend,
@@ -51,10 +51,10 @@ from src.models_new.module.dynamic_gaussian import (
     RMSNormRoPELayerWeightedCrossAttention,
     RMSNormRoPEVelocityGaussianBackend,
 )
-from src.models_new.module.m3_g2p import DynamicGausRender
-from src.models_new.utils.attention import Rotary3D
-from src.models_new.utils.loss import Loss
-from src.models_new.utonia.model import Point3DRoPE
+from src.models.module.m3_g2p import DynamicGausRender
+from src.models.utils.attention import Rotary3D
+from src.models.utils.loss import Loss
+from src.models.utonia.model import Point3DRoPE
 from src.model_wrapper import ModelWrapper
 
 
@@ -3425,7 +3425,7 @@ class NestedCountSeedConfigTest(unittest.TestCase):
 
     @staticmethod
     def _p2g(variant):
-        from src.config_loader import compose_fresh_config
+        from src.experiment_config import compose_fresh_config
 
         config, _source = compose_fresh_config(
             OmegaConf.from_dotlist([f"model.variant={variant}"])
@@ -3433,8 +3433,8 @@ class NestedCountSeedConfigTest(unittest.TestCase):
         return config.p2g
 
     def test_nested_tokens_resolve_to_one_token_anchor(self):
-        from src.config_loader import DYNAMIC_VARIANT_V15
-        from src.models_new.module.builders.grid_seed_config import (
+        from src.experiment_config import DYNAMIC_VARIANT_V15
+        from src.models.module.builders.grid_seed_config import (
             GridSeedConfig,
             resolve_grid_seed_config,
         )
@@ -3464,8 +3464,8 @@ class NestedCountSeedConfigTest(unittest.TestCase):
             resolve_grid_seed_config(OmegaConf.create(container))
 
     def test_other_count_modes_resolve_as_before(self):
-        from src.config_loader import DYNAMIC_VARIANT_V11_6, DYNAMIC_VARIANT_V14_1
-        from src.models_new.module.builders.grid_seed_config import (
+        from src.experiment_config import DYNAMIC_VARIANT_V11_6, DYNAMIC_VARIANT_V14_1
+        from src.models.module.builders.grid_seed_config import (
             GridSeedConfig,
             resolve_grid_seed_config,
         )

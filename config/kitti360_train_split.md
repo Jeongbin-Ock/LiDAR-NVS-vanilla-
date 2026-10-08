@@ -4,7 +4,7 @@ Measured on 2026-10-08 from `/data1/kitti360/` scan filenames and nanosecond
 timestamps. The YAML and generated JSON prepare the train/validation split and
 random-duration sampling contract. The registered `kitti360_dynamic` training
 loader consumes this manifest with a 0.5s starting-anchor grid. The runnable
-data profile is `kitti360_train.yaml`; this split-preparation YAML is for
+data profile is `data/kitti360.yaml`; this split-preparation YAML is for
 rebuilding the manifest. See [kitti360_train.md](kitti360_train.md).
 
 ## LiDAR4D overlap and exclusion
@@ -42,7 +42,7 @@ our feed-forward training candidate pool. See the
 The manifest's `train_segments` are the allowed contiguous frame ranges. A
 training window must be wholly inside one segment; checking only that its
 endpoints survived exclusion would allow it to jump across a test clip.
-`src/kitti360/splits.py:training_window_allowed` implements this rule for the
+`src/dataloader/kitti360/splits.py:training_window_allowed` implements this rule for the
 training loader. The measured held-out/train intersection is zero.
 
 ## Sweep counts and timing
@@ -131,7 +131,7 @@ target list by time, and keep fewer GT views when a short window has fewer than
 three interior sweeps. No endpoint clamping or GT duplication is allowed.
 `sweep_hop: 1` keeps the approximately 0.1045s saved sweep grid. Training uses
 the worker-seeded RNG; validation uses a fixed per-anchor RNG with `eval_seed`.
-`eligible_endpoint_frames` and `sample_window_frames` in `src/kitti360/sampling.py`
+`eligible_endpoint_frames` and `sample_window_frames` in `src/dataloader/kitti360/sampling.py`
 implement the duration and GT selection used by `KITTI360DynamicDataset`.
 
 ## Starting-anchor stride
@@ -160,7 +160,7 @@ the per-segment grids, this gives **12,770 train / 2,996 val windows**. Physical
 ## Rebuild and validation
 
 ```bash
-/data1/jeongbin/miniconda3/envs/2dgs/bin/python -m src.kitti360 \
+/data1/jeongbin/miniconda3/envs/2dgs/bin/python -m src.dataloader.kitti360 \
   --config config/kitti360_train_split.yaml
 ```
 
@@ -171,10 +171,9 @@ Seven focused CPU tests now cover split boundaries, overlapping val intervals,
 timestamp addressing, physical endpoint limits and short-window GT sampling.
 The earlier 13 inference CPU tests also passed; two renderer tests were excluded.
 
-The lightweight data utilities are organized in `src/kitti360/`: raw metadata,
-runtime sampling, split assembly and the CLI each have their own module. The
-old `src.kitti360_split` imports and CLI remain supported by a compatibility
-facade. Refactoring these modules does not require regenerating the manifest.
+The lightweight data utilities are organized in `src/dataloader/kitti360/`: raw metadata,
+runtime sampling, split assembly and the CLI each have their own module.
+Moving these modules does not require regenerating the manifest.
 
 ## Test SLAM
 

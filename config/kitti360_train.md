@@ -3,7 +3,7 @@
 Run from the repository root, in the `2dgs` environment:
 
 ```bash
-python main.py data_config=config/kitti360_train.yaml device='[6]'
+python main.py data_config=kitti360 device='[6]'
 ```
 
 This selects KITTI-360 data while composing the existing shared training config
@@ -11,7 +11,7 @@ and model variant. The current default variant is V11.4. Choose a different
 registered V11-or-later variant explicitly, for example:
 
 ```bash
-python main.py data_config=config/kitti360_train.yaml \
+python main.py data_config=kitti360 \
   model.variant=dynamic_2dgs_attention_velocity_v16 device='[6]'
 ```
 
@@ -29,7 +29,7 @@ is kept as is. A KITTI-360 run therefore never writes into a nuScenes run's
 
 ## Data and temporal contract
 
-- Dataset: `src/dataloader/kitti360_dynamic.py`, registered as `kitti360_dynamic`.
+- Dataset: `src/dataloader/kitti360/dynamic.py`, registered as `kitti360_dynamic`.
 - Raw split: 61,809 train / 14,344 val sweeps, with all ten LiDAR4D clips held
   out from both and no crossing of split or timestamp-gap boundaries.
 - Start stride: a 0.5s physical-time grid snapped to the nearest available sweep
@@ -94,7 +94,7 @@ python tools/build_kitti360_compact_val.py --csv outputs/kitti360_compact_val/va
 ## GT maps and rendering
 
 Training and inference share `KITTI360SequenceReader` in
-`src/dataloader/kitti360_lidar4d_test.py`, so calibration, native ego coordinates,
+`src/dataloader/kitti360/reader.py`, so calibration, native ego coordinates,
 physical timestamps, GT projection and camera transforms follow one code path.
 
 The default profile generates calibrated **64×2178** HDL-64E panoramas when a

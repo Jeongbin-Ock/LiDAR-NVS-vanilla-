@@ -39,8 +39,8 @@
 # - learned_count.seed_mode: token. Every slot of a token starts at the Utonia
 #   token position, and the router trunk reads the refined feature alone,
 #   Linear(432, 432) instead of Linear(432 + 9, 432).
-# - data.coordinate_frame: ego_vehicle, the fresh-run default of
-#   nuscene_train.yaml. The V11.4 run predates that key and ran in the LiDAR
+# - data.coordinate_frame: ego_vehicle, the fresh-run default of every data
+#   profile in config/data/. The V11.4 run predates that key and ran in the LiDAR
 #   sensor frame.
 model:
   variant: dynamic_2dgs_attention_velocity_v14
@@ -89,8 +89,8 @@ p2g:
         range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
 
 train:
-  # train.lr / train.weight_decay (5e-4 / 1e-4 from nuscene_train.yaml) are
-  # the downstream group's; these are the Utonia roles'.
+  # train.lr / train.weight_decay (5e-4 / 1e-4 from default.yaml) are the
+  # downstream group's; these are the Utonia roles'.
   # One learning rate for the whole model: since 2026-10-08 every Utonia role
   # follows train.lr (previously 1e-3 intensity/adapter, 5e-5 LoRA/LayerNorm).
   # Each role keeps its weight decay; earlier checkpoints resume with the rates
@@ -112,23 +112,9 @@ train:
   adam_betas: [0.9, 0.999]
   adam_eps: 1.0e-8
 
-# The random-duration loader the V11.4 dynamic-window run used (V11.6/V12.2's
-# data block): second endpoint 0.2-1.2 s after a keyframe start, up to three
-# interior novel views.
-data:
-  dataset_name: nuscenes_dynamic_lidar4d
-  mode: nvs
-  bbox_json_path: null
-  # The legacy loader's holdout key stays empty; this loader reads its holdouts
-  # from dynamic_window below.
-  train_excluded_scenes: null
-  dynamic_window:
-    endpoint_min_sec: 0.2
-    endpoint_max_sec: 1.2
-    eval_seed: 42
-    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
-    # train scenes. Hold out each complete scene to prevent overlap.
-    train_excluded_scenes: [scene-0757, scene-1094]
+# Default training data: config/data/nuscenes_dynamic.yaml, the random-duration
+# loader with the two LiDAR4D scenes held out. data_config=<name> picks another.
+data_config: nuscenes_dynamic
 
 dynamic_2dgs:
   temporal:

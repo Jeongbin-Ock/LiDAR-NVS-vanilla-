@@ -161,7 +161,7 @@ def resolve_grid_seed_config(cfg):
         raise ValueError(
             "p2g.grid_query.exp was renamed to p2g.grid_query.seed_mode "
             "(null -> range_quantile, 1 -> medoid, 2 -> token); restore "
-            "checkpoint configs through src.config_loader, which rewrites it"
+            "checkpoint configs through src.experiment_config, which rewrites it"
         )
     k_max = getattr(grid_query, "K_max", None)
     if k_max is None:

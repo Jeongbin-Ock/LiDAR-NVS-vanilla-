@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.models_new.utils.boxes import point_in_box
+from src.models.utils.boxes import point_in_box
 
 
 def velocity_transport_from_output(g2p_model, b_gs, t_target: float):

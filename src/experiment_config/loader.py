@@ -1,9 +1,10 @@
 """Compose experiment configs and restore checkpoint-local configs safely.
 
 The project intentionally keeps OmegaConf dot-list CLI overrides (``key=value``)
-instead of introducing a second configuration framework. Fresh runs compose a
-shared base with one allow-listed model-variant overlay. Checkpoint-backed runs
-prefer embedded configs and retain the historical W&B fallback.
+instead of introducing a second configuration framework. Fresh runs compose the
+dataset-agnostic config/default.yaml, one allow-listed model-variant overlay and
+one data profile from config/data/. Checkpoint-backed runs prefer embedded
+configs and retain the historical W&B fallback.
 """
 from __future__ import annotations
 
@@ -13,10 +14,11 @@ from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
-from .experiment_config.definitions import (
+from .definitions import (
     ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
     BARRIER_MATCH_DYNAMIC_VARIANTS,
     COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
+    DATA_CONFIG_DIR,
     DEFAULT_CONFIG_PATH,
     DENSE_COUNT_DYNAMIC_VARIANTS,
     DENSE_COUNT_GAUSSIANS_PER_TOKEN,
@@ -80,7 +82,7 @@ from .experiment_config.definitions import (
     _REQUIRED_ROOTS,
     _UTONIA_ENCODER_STAGE_DIMS,
 )
-from .experiment_config.helpers import (
+from .helpers import (
     _as_config,
     _as_experiment_config,
     _has_path,
@@ -91,8 +93,8 @@ from .experiment_config.helpers import (
     _require_positive,
     _variant,
 )
-from .experiment_config.migration import migrate_checkpoint_config
-from .experiment_config.validation import (
+from .migration import migrate_checkpoint_config
+from .validation import (
     _configured_count_mode,
     _configured_p2g_trunk_dim,
     _validate_3d_rope_width,
@@ -139,34 +141,57 @@ def _kitti360_exp_name(config, *, named: bool) -> str:
     return name if "kitti" in name.lower() else name + KITTI360_EXP_NAME_SUFFIX
 
 
+def resolve_data_profile(name) -> Path:
+    """``kitti360`` -> config/data/kitti360.yaml; any other value is a file path."""
+
+    text = str(name)
+    candidate = DATA_CONFIG_DIR / f"{text}.yaml"
+    if "/" not in text and not text.endswith((".yaml", ".yml")) and candidate.is_file():
+        return candidate
+    path = Path(text).expanduser().resolve()
+    if not path.is_file():
+        known = ", ".join(sorted(p.stem for p in DATA_CONFIG_DIR.glob("*.yaml")))
+        raise FileNotFoundError(f"Unknown data_config={text!r}; expected one of {known} or a profile path")
+    return path
+
+
 def compose_fresh_config(cli=None) -> tuple[DictConfig, str]:
-    """Compose base -> variant -> optional training data profile -> CLI."""
+    """Compose default.yaml -> model variant -> data profile -> CLI.
+
+    The variant overlay is model-only and names its default data profile with
+    ``data_config``; a CLI ``data_config=`` (profile name or path) overrides
+    it. The profile replaces the whole data block, and ``data.*`` CLI keys
+    still apply on top.
+    """
 
     cli = OmegaConf.create(OmegaConf.to_container(_as_config(cli), resolve=False))
-    data_profile_path = cli.pop("data_config", None)
+    cli_profile = cli.pop("data_config", None)
     named = "exp_name" in cli
     base = OmegaConf.load(DEFAULT_CONFIG_PATH)
+    if "data" in base or "data_config" in base:
+        raise ValueError(f"{DEFAULT_CONFIG_PATH} is dataset-agnostic; data belongs in {DATA_CONFIG_DIR}")
     selected = _variant(cli, default=_variant(base))
     overlay, overlay_path = _load_variant_overlay(selected)
+    if "data" in overlay:
+        raise ValueError(f"{overlay_path} is a model overlay; move its data block into {DATA_CONFIG_DIR}")
+    variant_profile = overlay.pop("data_config", None)
+    if not (cli_profile or variant_profile):
+        raise ValueError(f"No data profile: {overlay_path} names none and the CLI passed no data_config=")
+    profile_path = resolve_data_profile(cli_profile or variant_profile)
+    profile = OmegaConf.load(profile_path)
+    unknown = set(profile) - {"data", "exp_name"}
+    if unknown or not OmegaConf.is_dict(profile.get("data")):
+        raise ValueError(f"{profile_path}: a data profile holds data and can only add exp_name")
     config = OmegaConf.merge(
         OmegaConf.create(STRUCTURAL_DEFAULTS),
         base,
         overlay,
     )
-    data_source = ""
-    if data_profile_path:
-        path = Path(str(data_profile_path)).expanduser().resolve()
-        profile = OmegaConf.load(path)
-        unknown = set(profile) - {"data", "exp_name"}
-        if unknown or not OmegaConf.is_dict(profile.get("data")):
-            raise ValueError("data_config requires data and can only add exp_name")
-        # Replace the nuScenes data block completely, including its compact-val
-        # settings and variant-local scene holdouts.
-        config.data = profile.data
-        if "exp_name" in profile:
-            config.exp_name = OmegaConf.to_container(profile, resolve=False)["exp_name"]
-            named = True
-        data_source = f" data_profile={path}"
+    config.data = profile.data
+    if "exp_name" in profile:
+        config.exp_name = OmegaConf.to_container(profile, resolve=False)["exp_name"]
+        named = True
+    data_source = f" data_profile={profile_path.resolve()}"
     config = OmegaConf.merge(config, cli)
     if str(config.data.dataset_name) == "kitti360_dynamic":
         manifest = Path(str(config.data.split_manifest_path))
@@ -387,6 +412,7 @@ __all__ = [
     "ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS",
     "BARRIER_MATCH_DYNAMIC_VARIANTS",
     "COSINE_ROPE_MATCH_DYNAMIC_VARIANTS",
+    "DATA_CONFIG_DIR",
     "DEFAULT_CONFIG_PATH",
     "DENSE_COUNT_DYNAMIC_VARIANTS",
     "DENSE_COUNT_GAUSSIANS_PER_TOKEN",
@@ -443,6 +469,7 @@ __all__ = [
     "V15_FAMILY_DYNAMIC_VARIANTS",
     "VARIANT_CONFIG_PATHS",
     "compose_fresh_config",
+    "resolve_data_profile",
     "load_checkpoint_config",
     "resolve_eval_config",
     "resolve_main_config",

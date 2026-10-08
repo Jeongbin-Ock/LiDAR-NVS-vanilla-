@@ -1,7 +1,8 @@
 # LiDAR 센서 변경 시 데이터·렌더링 설정
 
 이 문서는 현재 소스와 KITTI-360 공식 데이터, LiDAR4D 전처리 및 제조사 문서를
-대조한 결과다. `nuscene_train.yaml`의 학습 기본값은 변경하지 않았다.
+대조한 결과다. 2026-10-08부터 데이터셋 설정은 `config/data/<profile>.yaml`에 있고,
+`config/default.yaml`은 데이터셋과 무관한 모델·학습 기본값만 갖는다.
 
 ## 물리 센서와 현재 비교용 config
 
@@ -45,7 +46,7 @@ Ring ID, 포인트별 firing time, factory beam calibration은 열로 제공되�
   - 9개 drive의 722개 스캔에서 최대 잔차는 3 µm(float32 한계)다.
   - δ는 +1.937°~−24.999°다.
   - V는 상단 블록(0~31) 0.198~0.209 m, 하단 블록(32~63) 0.116~0.126 m다.
-- 이 표(`src/dataloader/kitti360_hdl64e.py`)로 각 점을 가장 잘 맞는 원뿔에
+- 이 표(`src/dataloader/kitti360/hdl64e.py`)로 각 점을 가장 잘 맞는 원뿔에
   할당하면 저장 순서가 필요 없다. 저장 순서 분할은 1,102개 중 3개 스캔에서
   한 레이저를 둘로 나누지만, 원뿔 할당은 모든 스캔에서 정확하다.
 
@@ -198,7 +199,7 @@ Modulo는 360° 경계의 wrap을 위한 것이다. 현 LiDAR4D 비교 projector
 5.58%다. 이는 동일 픽셀 중복이며 ring ID가 없어 beam 간 중복과 동일 beam의
 수평 중복을 완전히 분리하는 수치는 아니다.
 
-## `nuscene_train.yaml`에서 확인·변경할 항목
+## data profile(`config/data/*.yaml`)에서 확인·변경할 항목
 
 | 항목 | 현재 nuScenes 설정/의미 | 센서·데이터셋 변경 시 처리 |
 |---|---|---|
@@ -207,7 +208,7 @@ Modulo는 360° 경계의 wrap을 위한 것이다. 현 LiDAR4D 비교 projector
 | `data.version`, `test_version`, `train_split`, `eval_split`, `test_split` | nuScenes release/split 이름 | 새 dataset의 시퀀스·구간 split 정의 |
 | `data.vfov`, `hfov` | `[-30.67,10.67]`, `[-180,180]` | 센서 FOV 및 비교 프로토콜 |
 | `data.image_height`, `image_width` | 32×1085 | 채널/투영 격자 및 수평 sampling에 맞게 선택 |
-| `data.ring_to_elevation_deg`, `p2g.ring_to_elevation_deg` | data가 p2g의 32-entry table을 참조 | 새 센서의 ring·calibration에 맞는 table; KITTI uniform projection은 null |
+| `data.ring_to_elevation_deg` | nuScenes profile의 32-entry table | 새 센서의 ring·calibration에 맞는 table; KITTI uniform projection은 null |
 | `data.coordinate_frame` | `ego_vehicle` (과거 checkpoint는 sensor frame 가능) | 물리 축 convention 유지, loader의 extrinsic/pose 방향 변환 구현 |
 | `data.window_us`, `sample_gap_us` | 1s window, 0.1s 선택 간격 | 원본 timestamp로 선택; nuScenes의 50ms sweep 상수 재사용 금지 |
 | `data.pair_mode`, `pair_kf_stride` | nuScenes keyframe pairing | KITTI에는 동일한 keyframe 정의가 없으므로 timestamp/sweep pairing으로 재설계 |
@@ -216,7 +217,7 @@ Modulo는 360° 경계의 wrap을 위한 것이다. 현 LiDAR4D 비교 projector
 | `data.train_excluded_scenes` | nuScenes scene name | KITTI 시퀀스/구간을 사용해 leakage 없는 split 정의 |
 | `data.compact_val.enable/path` | nuScenes 전용 200-window manifest | disable하거나 KITTI용 manifest 새로 작성 |
 | `data.mode`, `bbox_json_path(s)` | bbox 또는 bbox-free nvs; nuScenes tracking JSON | bbox-free는 nvs; bbox 사용 시 XML/track/frame annotation adapter 필요 |
-| `p2g.ego_radius`, `data.ego_radius` | 2.5m 입력 self-point 제외 | 차량·센서 설치 위치에 맞는 mask 검토 |
+| `data.ego_radius` | 2.5m 입력 self-point 제외 | 차량·센서 설치 위치에 맞는 mask 검토 |
 | range policy | base YAML에 공통 max-depth 항목 없음 | point cutoff, GT, loss, metrics, backprojection의 거리 정책을 함께 정의 |
 | `train.batch_size`, `grad_accum_steps`, `data.num_workers` | 현재 training throughput 설정 | 증가한 point/token 수로 메모리·시간을 측정한 뒤 조절 |
 
@@ -243,8 +244,8 @@ calibration 파일 및 pose/camera에 적용하던 추가 원점 변환을 제�
 실험 결과는 당시 좌표 기준을 기록한 채 보존한다.
 
 현재 training registry에는 `kitti360_dynamic`도 등록되어 있다.
-`src/dataloader/kitti360_dynamic.py`는 공통 `KITTI360SequenceReader`의 calibration,
-pose와 calibrated GT camera 경로를 재사용한다. `data_config=config/kitti360_train.yaml`로
+`src/dataloader/kitti360/dynamic.py`는 공통 `KITTI360SequenceReader`의 calibration,
+pose와 calibrated GT camera 경로를 재사용한다. `data_config=kitti360`로
 선택하며, 0.5s 시작 격자와 0.2~1.0s 랜덤 endpoint를 사용한다.
 자세한 실행·검증 방법은 [kitti360_train.md](kitti360_train.md)에 있다.
 

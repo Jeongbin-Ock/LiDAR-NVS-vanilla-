@@ -9,13 +9,13 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
-from src.models_new.module.dynamic_gaussian import (
+from src.models.module.dynamic_gaussian import (
     CosineGateLayer,
     NestedCountGaussianHead,
     OrdinalCountGaussianHead,
 )
-from src.models_new.module.dynamic.ordinal_count import option_log_probabilities
-from src.models_new.utils.routing_logging import routing_sufficient_statistics
+from src.models.module.dynamic.ordinal_count import option_log_probabilities
+from src.models.utils.routing_logging import routing_sufficient_statistics
 
 DIM = 24
 PARAM_DIM = 42
@@ -325,7 +325,7 @@ def test_routing_statistics_read_the_option_log_probabilities():
 
 
 def test_scale_diagnostic_counts_only_rendered_gaussians():
-    from src.models_new.utils.loss import Loss
+    from src.models.utils.loss import Loss
 
     loss = Loss.__new__(Loss)
     torch.nn.Module.__init__(loss)
@@ -376,7 +376,7 @@ def v16_backend_cfg(heads=4):
 
 
 def _v16_backend(**overrides):
-    from src.models_new.module.dynamic_gaussian import (
+    from src.models.module.dynamic_gaussian import (
         OrdinalCountBarrierVelocityGaussianBackend,
     )
 
@@ -472,7 +472,7 @@ _RENDER_KEYS = ("depth", "depth_median", "normal", "intensity_sh", "alpha", "ray
 
 
 def _camera(timestamp=0.0):
-    from src.models_new.utils.camera import Camera
+    from src.models.utils.camera import Camera
 
     height, width = 32, 512
     return Camera(
@@ -503,7 +503,7 @@ def _scene(count=500, seed=0):
 
 
 def _render(pc, blend_mask=None, keep=None):
-    from src.models_new.gaussian_renderer import render
+    from src.models.gaussian_renderer import render
 
     pc = dict(pc)
     if keep is not None:
@@ -618,7 +618,7 @@ def test_blend_mask_gradient_is_the_insertion_and_removal_difference():
 def test_reduce_tokens_train_the_keep_gate_through_masked_rasterization():
     """V15's reduce tokens sent their router nothing; V16's send the keep gate
     the slope of inserting G2/G3 and nothing to the add gate."""
-    from src.models_new.module.m3_g2p import DynamicGausRender
+    from src.models.module.m3_g2p import DynamicGausRender
 
     torch.manual_seed(9)
     head = _head().cuda().train()

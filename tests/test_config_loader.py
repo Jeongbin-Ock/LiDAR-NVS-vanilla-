@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 from omegaconf import OmegaConf
 
-from src.config_loader import (
+from src.experiment_config import (
     ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
     BARRIER_MATCH_DYNAMIC_VARIANTS,
     COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
@@ -1026,7 +1026,7 @@ class ConfigLoaderTest(unittest.TestCase):
 
     def test_v11_3_head_is_seed_conditioned_at_three_channels_per_slot(self):
         """The router trunk's geometry input survives as head input columns."""
-        from src.models_new.module.dynamic.heads import GaussianAttributeHead
+        from src.models.module.dynamic.heads import GaussianAttributeHead
 
         gs_params = OmegaConf.create(
             {"shs": 32, "opacity": 1, "scaling": 2, "rotation": 4, "offset": 3}
@@ -1063,7 +1063,7 @@ class ConfigLoaderTest(unittest.TestCase):
 
     def test_default_gaussian_head_keeps_its_feature_only_input(self):
         """Widening V11.3's head must not touch the shared V3-V11.1 shapes."""
-        from src.models_new.module.dynamic.heads import GaussianAttributeHead
+        from src.models.module.dynamic.heads import GaussianAttributeHead
 
         gs_params = OmegaConf.create(
             {"shs": 32, "opacity": 1, "scaling": 2, "rotation": 4, "offset": 3}

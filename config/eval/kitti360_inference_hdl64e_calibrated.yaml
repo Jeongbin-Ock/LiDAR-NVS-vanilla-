@@ -3,7 +3,7 @@
 # row angles are the fitted beam elevations, and the upper/lower emitter blocks
 # are rendered from their own origins on the sensor z axis (+0.2035 / +0.1209 m).
 # Columns give each firing its own slot (column_assignment: firing_slot | nearest).
-# See src/dataloader/kitti360_hdl64e.py and config/kitti360_inference.md.
+# See src/dataloader/kitti360/hdl64e.py and config/eval/kitti360_inference.md.
 mode: test
 seed: 42
 device:

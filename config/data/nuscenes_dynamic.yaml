@@ -1,0 +1,60 @@
+# nuScenes LIDAR_TOP through the random-duration loader
+# (src/dataloader/nuscenes/dynamic.py): keyframe start anchors, a random second
+# endpoint 0.2-1.2 s later and up to three interior GT sweeps; bbox-free (nvs).
+# The default data of V11.6, V12.2, V14 and later (data_config: nuscenes_dynamic).
+#   python main.py model.variant=<variant> data_config=nuscenes_dynamic
+# A data profile replaces the whole data block; data.<key>=... CLI overrides
+# still apply on top of it.
+data:
+  dataset_name: nuscenes_dynamic_lidar4d
+  dataroot: /data1/nuScenes
+  coordinate_frame: ego_vehicle  # per-sweep Utonia frame and frame-0 temporal reference
+  version: v1.0-trainval
+  test_version: v1.0-test
+  train_split: train
+  eval_split: val
+  test_split: test
+  window_us: 1000000       # 1.0s window: 0.0s ... 1.0s
+  sample_gap_us: 100000    # choose every 0.1s from 0.05s sweeps
+  gt_middle_count: 3       # loss GT = 2 endpoint inputs + 3 middle sweeps
+  pair_mode: keyframe      # "sweep" | "keyframe". keyframe: both inputs are
+                           # exact-time keyframes pair_kf_stride apart (no box
+                           # staleness); GT = 0.1s sweeps between them.
+  pair_kf_stride: 2        # keyframe gap for window endpoints (2 ~= 1.0s)
+  mode: nvs
+  bbox_json_path: null
+  # The legacy loader's holdout key stays empty; this loader reads its holdouts
+  # from dynamic_window below.
+  train_excluded_scenes: null
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.2
+    eval_seed: 42
+    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
+    # train scenes. Hold out each complete scene to prevent overlap.
+    train_excluded_scenes: [scene-0757, scene-1094]
+  num_workers: 4
+  eval_num_workers: 0
+  # Per-epoch validation over the full val split is ~5.7k heavily-overlapping
+  # windows, and the metric is dominated by geometry the velocity head cannot
+  # change. compact_val swaps in a fixed 200-window subset weighted toward
+  # motion: 180 dynamic (GT-bbox labelled, stratified over four difficulty
+  # tiers) + 20 static held back as a no-motion control. Built by
+  # tools/build_compact_val_windows.py; the manifest records the sampling
+  # contract it was built under and refuses to load against another.
+  compact_val:
+    enable: true
+    path: config/compact_val_windows.json
+  verbose: false
+  # HDL-32E panorama: one row per ring, rows ordered by this beam table.
+  vfov: [-30.67, 10.67]
+  hfov: [-180, 180]
+  image_height: 32
+  image_width: 1085
+  ring_to_elevation_deg: [
+    -30.67, -29.33, -28.00, -26.66, -25.33, -24.00, -22.67, -21.33,
+    -20.00, -18.67, -17.33, -16.00, -14.67, -13.33, -12.00, -10.67,
+     -9.33,  -8.00,  -6.66,  -5.33,  -4.00,  -2.67,  -1.33,   0.00,
+      1.33,   2.67,   4.00,   5.33,   6.67,   8.00,   9.33,  10.67,
+  ]
+  ego_radius: 2.5          # drop returns within 2.5 m of the sensor (the ego vehicle)

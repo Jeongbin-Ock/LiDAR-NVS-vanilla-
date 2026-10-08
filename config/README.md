@@ -1,17 +1,38 @@
 # Experiment configuration
 
-The Python implementation is split by responsibility. `src/config_loader.py`
-keeps composition, checkpoint restore, and the historical import API.
-`src/experiment_config/definitions.py` owns variant constants and schema key
-sets, `helpers.py` owns shared OmegaConf operations, and `validation.py` owns
-static config validation. Dependencies flow from definitions through helpers to
-validation; none of those modules imports `config_loader`.
+The Python implementation is the `src/experiment_config` package, split by
+responsibility. `loader.py` keeps composition and checkpoint restore, and the
+package re-exports its public API (`from src.experiment_config import
+compose_fresh_config`). `definitions.py` owns variant constants and schema key
+sets, `helpers.py` owns shared OmegaConf operations, `validation.py` owns static
+config validation, and `migration.py` upgrades older checkpoint configs.
+Dependencies flow from definitions through helpers to validation; none of those
+modules imports `loader`.
 
 Fresh runs are composed in this order:
 
-1. `nuscene_train.yaml` shared base
-2. one allow-listed file under `variants/`
-3. OmegaConf CLI overrides
+1. `default.yaml`: dataset-agnostic model, loss, optimizer and logging defaults
+2. one allow-listed model overlay under `variants/` (model-only; no `data:`)
+3. one data profile under `data/`, which replaces the whole `data` block
+4. OmegaConf CLI overrides
+
+Each overlay names its default profile with `data_config:` (V11-V13:
+`nuscenes`, the legacy fixed-window loader; V11.6, V12.2, V14 and later:
+`nuscenes_dynamic`, the random-duration loader). A CLI `data_config=<name>` or
+`data_config=<path>` picks another profile, e.g. `data_config=kitti360`.
+`default.yaml` and the overlays are rejected if they carry a `data` block.
+Checkpoint resumes ignore all of these files and restore the embedded config.
+
+| Profile | Dataset / loader | Used by default for |
+| --- | --- | --- |
+| `data/nuscenes.yaml` | nuScenes, `nuscenes` (legacy keyframe windows, bbox mode) | V11-V13 |
+| `data/nuscenes_dynamic.yaml` | nuScenes, `nuscenes_dynamic_lidar4d` (random-duration) | V11.6, V12.2, V14-V16 |
+| `data/kitti360.yaml` | KITTI-360, `kitti360_dynamic` | opt-in (`data_config=kitti360`) |
+
+Inference overlays for `test_lidar4d_nvs.py eval_config=...` live in `eval/`.
+The JSON manifests (`compact_val_windows.json`, `kitti360_compact_val_windows.json`,
+`kitti360_train_split.json`) stay at this level because checkpoints record
+their paths.
 
 The selector uses the existing dot-list syntax:
 
@@ -386,7 +407,7 @@ V11.3's exactly. Neither the hinge nor the offset bound is a parameter, so what
 keeps the two checkpoints apart is the embedded config.
 
 The V11.5 overlay also pins `p2g.head_offset_bound` to 0.4 m and the data
-contract: the inherited `dataset_name: nuscenes` (legacy `nuscene.py`),
+contract: the inherited `dataset_name: nuscenes` (legacy `nuscenes/legacy.py`),
 `data.mode: bbox`, `data.bbox_json_path: null`, and train-only whole-scene
 holdouts `data.train_excluded_scenes: [scene-0757, scene-1094]`. Both equal what
 V11.4's overlay composes to now, so a fresh V11.4 and V11.5 differ only in
@@ -400,7 +421,7 @@ Gaussians and peaks at 31.2 GiB, the same as V11.3.
 **V11.6** is V11.5 with a fixed count of **three** range-quantile Gaussians per
 occupied token, at raw-point ranks `floor(N/6)`, `floor(N/2)` and
 `floor(5N/6)` (the adaptive router's K=3 candidate row), trained on the
-random-duration `nuscenes_dynamic_lidar4d` loader instead of `nuscene.py`. The
+random-duration `nuscenes_dynamic_lidar4d` loader instead of `nuscenes/legacy.py`. The
 temporal stack, linear hinge, correspondence, offset head, 0.4 m offset bound,
 velocity regularizer and loss weights are V11.5's. It reuses
 `SeedConditionedBarrierVelocityGaussianBackend`, so its parameter names and
@@ -434,16 +455,14 @@ not the speed used as a fixed hyperparameter after construction. The learned
 `attention_temperature_stats` logs `barrier_v_0`, the current learned value as
 `barrier_speed_mps`, and the initialization as `barrier_speed_initial_mps`.
 
-V12 uses the legacy `src/dataloader/nuscene.py` contract, as every V11-V13
-overlay except V11.6 and V12.2 does. Its overlay inherits
-`data.dataset_name: nuscenes` and the fixed keyframe/window settings from
-`nuscene_train.yaml`, while setting `data.mode: bbox` and
-`data.bbox_json_path: null`. V11, V11.1-V11.5, V12, V12.1, V13, V13.1, V13.2,
-V13.3 and V13.4 additionally set
-`data.train_excluded_scenes: [scene-0757, scene-1094]`; `nuscene.py` removes
-those complete scenes only when constructing the train split. V11.6 and V12.2
-hold out the same two scenes under `data.dynamic_window`, where their loader
-reads them. Validation and test scenes remain unchanged. The key is
+V12 uses the legacy `src/dataloader/nuscenes/legacy.py` contract, as every V11-V13
+overlay except V11.6 and V12.2 does: its overlay names `data_config: nuscenes`,
+the profile with `data.dataset_name: nuscenes`, the fixed keyframe/window
+settings, `data.mode: bbox`, `data.bbox_json_path: null` and
+`data.train_excluded_scenes: [scene-0757, scene-1094]`. The legacy loader
+removes those complete scenes only when constructing the train split. V11.6,
+V12.2 and V14 onward (`data_config: nuscenes_dynamic`) hold out the same two
+scenes under `data.dynamic_window`, where their loader reads them. Validation and test scenes remain unchanged. The key is
 checkpoint-protected sampling state, so a resume cannot silently put either
 held-out scene back.
 
@@ -464,7 +483,7 @@ difference from V11.4; add an explicit upper-bounded transform or a prior around
 `log(30)` in a separate variant if runaway control is required.
 
 **V12.1** keeps V12's learned `v_0`, adaptive-K router,
-initializer-conditioned offset head, losses, and `nuscene.py` data contract.
+initializer-conditioned offset head, losses, and `nuscenes/legacy.py` data contract.
 Its barrier learns both the reachable radius and the penalty strength:
 
 ```
@@ -528,7 +547,7 @@ and no prior toward 30 m/s. `attention_temperature_stats` logs
 Unlike V12, V12.2 trains on the random-duration `nuscenes_dynamic_lidar4d`
 loader with V11.6's data block (see "Random-duration windows" below).
 
-**V13** keeps V12.1's fixed-window `nuscene.py` data contract, complete-scene
+**V13** keeps V12.1's fixed-window `nuscenes/legacy.py` data contract, complete-scene
 train holdouts, embedded-init offset head, split velocity regularizer,
 adaptive-K router, and 0.4 m Gaussian offset bound. It replaces the complete
 cross-attention score contract:
@@ -617,7 +636,7 @@ in its V payload for the coordinate expectation, while every head is packed
 into the same 36-to-40-channel varlen FlashAttention call once per layer.
 Consequently the Q/K RMS gains give a finite content-logit bound, but geometry
 enters only through 3D RoPE rather than an additive distance term. V13.3 uses
-V13.2's `nuscene.py` data contract and train-only `scene-0757`/`scene-1094`
+V13.2's `nuscenes/legacy.py` data contract and train-only `scene-0757`/`scene-1094`
 holdouts, and sets `p2g.head_offset_bound=0.4`. All other model and loss values
 remain those of V11.4.
 
@@ -637,7 +656,7 @@ attention kernel: Q/K are transformed per head first, then all twelve heads use
 the same packed varlen FlashAttention call. V13.4 therefore differs from V13.3
 only in `temporal.position_encoding=rope_except_head0`; adaptive K, time
 conditioning, layer mixture, motion head, regularizers, losses,
-`head_offset_bound=0.4`, and the `nuscene.py` scene-holdout contract are
+`head_offset_bound=0.4`, and the `nuscenes/legacy.py` scene-holdout contract are
 identical. It has no distance bias, barrier, or separate temperature.
 
 **V14** is V11.4's dynamic model -- linear 30 m/s barrier on match head 0,
@@ -831,7 +850,7 @@ The fixed time reference only conditions network features; it is not the
 sample-dependent endpoint duration and is not used to reinterpret renderer
 units.
 
-`src/config_loader.py` owns composition for both training and evaluation. New
+`src/experiment_config/loader.py` owns composition for both training and evaluation. New
 checkpoints embed the resolved config, so every checkpoint carries immutable
 configuration provenance. Historical checkpoints fall back to
 `<checkpoint-dir>/wandb/latest-run/files/config.yaml`; that path is a mutable
@@ -1136,17 +1155,17 @@ Gaussians a checkpoint's tokens produce.
 
 ## Random-duration windows (`data.dataset_name=nuscenes_dynamic_lidar4d`)
 
-`src/dataloader/nuscene_dynamic_lidar4d.py` is the barrier family's
-alternative to the legacy bbox-compatible `nuscene.py`. V11.6, V12.2, V14, V14.1
+`src/dataloader/nuscenes/dynamic.py` is the barrier family's
+alternative to the legacy bbox-compatible `nuscenes/legacy.py`. V11.6, V12.2, V14, V14.1
 and the V15 family are the only overlays that ship with it; the other barrier-family
-variants (V11-V11.5, V12, V12.1) train on `nuscene.py` with the scene holdouts
+variants (V11-V11.5, V12, V12.1) train on `nuscenes/legacy.py` with the scene holdouts
 and can opt into this loader from the CLI, as V11-V11.4 briefly did. The loader retains the old flat index's keyframe start sweep and 0.5-second sliding
 stride, but samples the actual second endpoint uniformly from the available
 0.1-second-grid sweeps whose measured timestamp is between 0.2 and 1.2 seconds
-after that start. Selecting it replaces the data block; its holdouts live under
-`dynamic_window`, so the legacy `data.train_excluded_scenes` has to be cleared.
-`pair_mode: keyframe`, `sample_gap_us: 100000` and `gt_middle_count: 3` are
-inherited from `nuscene_train.yaml`:
+after that start. It is the `data/nuscenes_dynamic.yaml` profile; its holdouts
+live under `dynamic_window`, so the legacy `data.train_excluded_scenes` is
+cleared. It keeps the legacy profile's `pair_mode: keyframe`,
+`sample_gap_us: 100000` and `gt_middle_count: 3`. Its distinctive keys:
 
 ```yaml
 data:
@@ -1279,7 +1298,7 @@ an unintended architecture.
 
 ## KITTI-360 training
 
-Use `python main.py data_config=config/kitti360_train.yaml device='[6]'` from
+Use `python main.py data_config=kitti360 device='[6]'` from
 the repository root. The registered `kitti360_dynamic` loader reuses the
 inference loader's calibrated GT/camera path and the nuScenes dynamic XYZI
 collation. Model/loss/optimizer settings come from the selected variant.
@@ -1303,7 +1322,7 @@ protected on resume. See
 
 ## KITTI-360 inference
 
-`config/kitti360_inference.yaml` is a data/rendering overlay for
+`config/eval/kitti360_inference.yaml` is a data/rendering overlay for
 `test_lidar4d_nvs.py`, selected with `eval_config=...`. Model and optimizer
 structure still come from the checkpoint. This explicit inference path permits
 another dataset's panorama geometry while retaining all training/resume guards
@@ -1312,7 +1331,7 @@ in the overlay. Ordinary evaluation without `eval_config` retains the existing
 checkpoint-bound behavior.
 
 ```bash
-python test_lidar4d_nvs.py eval_config=config/kitti360_inference.yaml \
+python test_lidar4d_nvs.py eval_config=config/eval/kitti360_inference.yaml \
     test.ckpt_path=/absolute/path/to/checkpoint.ckpt device='[1]'
 ```
 
@@ -1322,7 +1341,7 @@ With `out_dir: null`, results default to the checkpoint's own directory:
 Use distinct child paths when retaining multiple input-offset evaluations.
 
 The dataset dispatcher is `src/dataloader/lidar4d_test.py`; KITTI loading is
-`src/dataloader/kitti360_lidar4d_test.py`. The loader uses the ten official
+`src/dataloader/kitti360/lidar4d_test.py`. The loader uses the ten official
 LiDAR4D/GS-LiDAR clips in drive 0000 and their 40 held-out target frame IDs.
 It supplies two non-held-out input sweeps nearest the configured offsets,
 with actual scan timestamps for conditioning and motion transport. The

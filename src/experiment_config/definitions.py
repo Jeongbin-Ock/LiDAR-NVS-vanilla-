@@ -4,7 +4,10 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "nuscene_train.yaml"
+# Dataset-agnostic model/training defaults; data comes from one profile in
+# DATA_CONFIG_DIR, named by the variant overlay or the CLI (data_config=).
+DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "default.yaml"
+DATA_CONFIG_DIR = REPO_ROOT / "config" / "data"
 
 DYNAMIC_VARIANT_V11 = "dynamic_2dgs_attention_velocity_v11"
 DYNAMIC_VARIANT_V11_1 = "dynamic_2dgs_attention_velocity_v11_1"

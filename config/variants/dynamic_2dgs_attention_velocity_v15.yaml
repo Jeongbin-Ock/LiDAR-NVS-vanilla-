@@ -98,18 +98,9 @@ train:
   adam_betas: [0.9, 0.999]
   adam_eps: 1.0e-8
 
-data:
-  dataset_name: nuscenes_dynamic_lidar4d
-  mode: nvs
-  bbox_json_path: null
-  train_excluded_scenes: null
-  dynamic_window:
-    endpoint_min_sec: 0.2
-    endpoint_max_sec: 1.2
-    eval_seed: 42
-    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
-    # train scenes. Hold out each complete scene to prevent overlap.
-    train_excluded_scenes: [scene-0757, scene-1094]
+# Default training data: config/data/nuscenes_dynamic.yaml, the random-duration
+# loader with the two LiDAR4D scenes held out. data_config=<name> picks another.
+data_config: nuscenes_dynamic
 
 dynamic_2dgs:
   temporal:

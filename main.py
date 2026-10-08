@@ -25,9 +25,9 @@ from lightning.pytorch.plugins.environments import SLURMEnvironment
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.strategies import DDPStrategy
 from src.model_wrapper import ModelWrapper
-from src.models_new.utils.model_utils import DataModule
+from src.dataloader.datamodule import DataModule
 from src.dataloader import dataset_dict
-from src.config_loader import resolve_main_config
+from src.experiment_config import resolve_main_config
 from src.runtime_precision import apply_spconv_tf32
 
 warnings.filterwarnings(

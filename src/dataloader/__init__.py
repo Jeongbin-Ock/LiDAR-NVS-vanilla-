@@ -1,11 +1,15 @@
-from .nuscene import NuScenesNVSDataset
-from .nuscene_dynamic_lidar4d import NuScenesDynamicLiDAR4DDataset
-from .kitti360_dynamic import KITTI360DynamicDataset
-#from once import ONCEDataset 
+"""Datasets, batch packing and the Lightning DataModule.
+
+Shared code sits at this level (``collate``, ``datamodule``, ``lidar4d_test``,
+``registry``); each dataset has its own package (``nuscenes/``, ``kitti360/``).
+``dataset_dict`` is loaded on first use, so importing a light submodule such as
+``src.dataloader.kitti360.splits`` does not import every dataset.
+"""
 
 
-dataset_dict = {'nuscenes': NuScenesNVSDataset,
-                'nuscenes_dynamic_lidar4d': NuScenesDynamicLiDAR4DDataset,
-                'kitti360_dynamic': KITTI360DynamicDataset,
-                #'once': ONCEDataset
-                }
+def __getattr__(name):
+    if name == "dataset_dict":
+        from .registry import dataset_dict
+
+        return dataset_dict
+    raise AttributeError(name)

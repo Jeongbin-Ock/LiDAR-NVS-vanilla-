@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
-from src.models_new.utonia.adapters import (
+from src.models.utonia.adapters import (
     NonlinearAdapter,
     ParallelAdapterMLP,
     PostActivationStemAdapter,
@@ -36,12 +36,12 @@ from src.models_new.utonia.adapters import (
     set_active_adaptation_mode,
     utonia_parameter_roles,
 )
-from src.models_new.utonia.lora import (
+from src.models.utonia.lora import (
     LoRALinear,
     LoRASubMConv3d,
     resolve_utonia_lora_settings,
 )
-from src.models_new.utonia.model import (
+from src.models.utonia.model import (
     MLP,
     Block,
     Embedding,

@@ -1,5 +1,5 @@
 # Inference data/rendering overlay. Architecture is restored from test.ckpt_path.
-# python test_lidar4d_nvs.py eval_config=config/kitti360_inference.yaml \
+# python test_lidar4d_nvs.py eval_config=config/eval/kitti360_inference.yaml \
 #   test.ckpt_path=/absolute/path/to/epoch=29.ckpt device=[1]
 mode: test
 seed: 42

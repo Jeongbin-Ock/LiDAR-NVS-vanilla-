@@ -3,16 +3,16 @@ import unittest
 
 import torch
 
-from src.models_new.module.builders.common import (
+from src.models.module.builders.common import (
     GridSeedConfig,
     _aggregate_points_to_cells,
     aggregate_points_to_cells_with_membership,
     aggregate_points_to_cells_with_seeds,
 )
-from src.models_new.module.builders.grid_tokens import OccupiedGridTokenBuilder
-from src.models_new.module.gaussian_assembly import gradient_scale_identity
-from src.models_new.module.grid_query_head import GridSlotHead
-from src.models_new.utils.loss import Loss
+from src.models.module.builders.grid_tokens import OccupiedGridTokenBuilder
+from src.models.module.gaussian_assembly import gradient_scale_identity
+from src.models.module.grid_query_head import GridSlotHead
+from src.models.utils.loss import Loss
 
 
 def _cfg(**overrides):

@@ -7,10 +7,10 @@ import unittest
 from omegaconf import OmegaConf
 import torch
 
-from src.config_loader import compose_fresh_config
-from src.dataloader.kitti360_dynamic import KITTI360DynamicDataset
+from src.experiment_config import compose_fresh_config
+from src.dataloader.kitti360.dynamic import KITTI360DynamicDataset
 from src.eval.group_metrics import GroupMetricAccumulator
-from src.kitti360 import compact_val
+from src.dataloader.kitti360 import compact_val
 from tests import test_kitti360_training as training_tests
 
 
@@ -45,7 +45,7 @@ class CompactManifestTest(unittest.TestCase):
                 compact_val.load_manifest(path, self.contract)
 
     def test_committed_manifest_matches_the_kitti_profile_contract(self):
-        cfg, _ = compose_fresh_config({"data_config": "config/kitti360_train.yaml"})
+        cfg, _ = compose_fresh_config({"data_config": "kitti360"})
         self.assertTrue(cfg.data.compact_val.enable)
         manifest = compact_val.load_manifest(cfg.data.compact_val.path,
                                              compact_val.dataset_contract(cfg.data, "val"))
@@ -57,7 +57,7 @@ class CompactManifestTest(unittest.TestCase):
         for (drive_a, _, end_a), (drive_b, start_b, _) in zip(spans, spans[1:]):
             self.assertTrue(drive_a != drive_b or end_a < start_b)
         with self.assertRaisesRegex(ValueError, "requires data.compact_val.path"):
-            compose_fresh_config({"data_config": "config/kitti360_train.yaml", "data": {"compact_val": {"path": ""}}})
+            compose_fresh_config({"data_config": "kitti360", "data": {"compact_val": {"path": ""}}})
 
 
 class CompactDatasetTest(unittest.TestCase):

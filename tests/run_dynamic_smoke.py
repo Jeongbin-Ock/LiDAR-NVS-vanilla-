@@ -15,9 +15,9 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
-from src.config_loader import DYNAMIC_VARIANT, compose_fresh_config
+from src.experiment_config import DYNAMIC_VARIANT, compose_fresh_config
 from src.dataloader import dataset_dict
-from src.dataloader.nuscene import multiframe_collate_fn
+from src.dataloader.nuscenes.legacy import multiframe_collate_fn
 from src.model_wrapper import ModelWrapper
 from src.runtime_precision import apply_spconv_tf32
 

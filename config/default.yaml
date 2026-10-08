@@ -1,0 +1,87 @@
+# Dataset-agnostic defaults for every fresh run: model (P2G / G2G / G2P), loss,
+# metrics, optimizer and schedule, logging. Composition (src/experiment_config):
+#   default.yaml -> config/variants/<model.variant>.yaml -> config/data/<data_config>.yaml -> CLI
+# Data never lives here: each variant names its default profile with
+# `data_config:`, and `data_config=<name or path>` on the CLI overrides it.
+device: [2, 3]
+seed: 42
+
+model:
+  # Fresh runs default to the current Dynamic 2DGS baseline.
+  variant: dynamic_2dgs_attention_velocity_v11_4
+
+project_name: 2dgs-utonia
+exp_name: ${model.variant}-bs-${train.batch_size}
+mode: train
+allow_legacy_wandb_fallback: false
+
+
+loss:
+  w_chamfer: 0.02 #0.02
+  w_depth: 0.5          # depth supervision = 0.5 * mean-depth L1
+  w_depth_median: 0.5   #                   + 0.5 * median-depth L1
+  w_intensity: 0.2
+  w_raydrop: 0.5
+  scale_max_m: 2.5       # loss_scale 진단(기록 전용, total에는 반영하지 않음)의 softplus scale threshold
+
+metrics:
+  interval: 50           # train valid/raydrop + val/test *_valid 진단 metric 계산 주기
+
+train:
+  lr: 5e-4
+  warmup_iters: 500           # linear warmup over this many optimizer steps
+  weight_decay: 1e-4
+  grad_clip: 1.0
+  max_epochs: 40
+  batch_size: 1
+  val_check_interval: 1.0
+  max_steps: 1000000
+  ckpt_path: null   # train from scratch (scheduler + grad clipping stability fix)
+  grad_accum_steps: 4
+  # Utonia's sparse convolutions (spconv) on TF32 Tensor Cores, like every
+  # torch matmul under main.py's "high" precision. An absent key is false, so
+  # checkpoints saved before 2026-10-02 resume with FP32 sparse convolutions.
+  spconv_allow_tf32: true
+test:
+  batch_size: 1
+  ckpt_path: null
+
+logger:
+  enable: true
+  name: wandb
+  dir: logs/${exp_name}
+  system_metrics: false  # W&B System 탭의 CPU/GPU/RAM 시계열을 기록하지 않음
+  wandb_run_id: null  # 기존 W&B run id를 넣으면 새 run 대신 그 run에 이어서 기록 (resume="must")
+
+
+p2g:
+  # Backbone
+  freeze_utonia: true   # pretrained base/norm frozen; active LoRA만 trainable
+  utonia_ckpt: null   # optional abs path override; null -> checkpoints/utonia/utonia.pth (config dump: config/utonia_pretrained.yaml)
+  utonia_feature_stage: 3  # encoder stage index: 3 -> 0.4m/432D, 4 -> 0.8m/576D (default/final)
+  # Checkpoint의 functional XYZ 입력([xyz, zero_rgb, zero_normal])을 XYZI로
+  # 바꾸고 Utonia의 모든 Linear/SubMConv3d에 LoRA를 설치한다. 실제 forward가
+  # 지나는 stage까지만 trainable로 두어 DDP unused parameter를 피한다. 출력은
+  # 바로 temporal attention으로 간다 (LoRA는 필수). V14 계열은
+  # p2g.utonia_adaptation(mode: hybrid)으로 LoRA 대상을 attention/CPE/pooling으로
+  # 줄이고 stem/FFN adapter와 LN affine을 학습한다 (config/README.md의 V14).
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  head_offset_bound: 0.4    # gaussian pos = seed_pos + bound*tanh(offset), per-axis meters
+
+  gs_params:               # source of truth for the gaussian head size (= sum)
+    opacity: 1
+    scaling: 2
+    rotation: 4
+    shs: 32                # 16 intensity SH + 16 raydrop SH
+    offset: 3              # position-offset head: 3 enables bounded xyz offset
+
+g2g: {}                   # DynamicGausTemp takes no config; block kept so cfg.g2g resolves
+g2p:
+  neg_fov: true
+  sh_degree: 3
+  scale_factor: 1.0

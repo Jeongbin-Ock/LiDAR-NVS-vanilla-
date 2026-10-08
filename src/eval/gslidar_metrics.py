@@ -29,8 +29,8 @@ try:
 except ImportError:  # pragma: no cover
     _lpips = None
 
-from ..models_new.utils.chamfer.chamfer3D.dist_chamfer_3D import chamfer_3DDist
-from ..models_new.utils.graphics_utils import lidar4d_range_image_to_points
+from ..models.utils.chamfer.chamfer3D.dist_chamfer_3D import chamfer_3DDist
+from ..models.utils.graphics_utils import lidar4d_range_image_to_points
 
 
 # ---------------------------------------------------------------------------

@@ -9,14 +9,14 @@ import numpy as np
 from omegaconf import OmegaConf
 import torch
 
-from src.config_loader import compose_fresh_config, resolve_main_config
+from src.experiment_config import compose_fresh_config, resolve_main_config
 from src.dataloader import dataset_dict
-from src.dataloader.kitti360_dynamic import KITTI360DynamicDataset
-from src.dataloader.kitti360_hdl64e import (
+from src.dataloader.kitti360.dynamic import KITTI360DynamicDataset
+from src.dataloader.kitti360.hdl64e import (
     KITTI360_HDL64E_APEX_HEIGHT_M, KITTI360_HDL64E_ELEVATION_DEG, project_hdl64e_panorama,
 )
-from src.dataloader.kitti360_lidar4d_test import EGO_FROM_IMU
-from src.models_new.utils.camera import StackedPanoramaCamera
+from src.dataloader.kitti360.reader import EGO_FROM_IMU
+from src.models.utils.camera import StackedPanoramaCamera
 
 
 class KITTI360TrainingTest(unittest.TestCase):
@@ -24,7 +24,7 @@ class KITTI360TrainingTest(unittest.TestCase):
         for variant in ['dynamic_2dgs_attention_velocity_v11_4', 'dynamic_2dgs_attention_velocity_v14_1',
                         'dynamic_2dgs_attention_velocity_v16']:
             base, _ = compose_fresh_config({'model': {'variant': variant}})
-            cfg, source = compose_fresh_config({'model': {'variant': variant}, 'data_config': 'config/kitti360_train.yaml'})
+            cfg, source = compose_fresh_config({'model': {'variant': variant}, 'data_config': 'kitti360'})
             for key in ['model', 'p2g', 'dynamic_2dgs', 'loss', 'train']:
                 self.assertEqual(OmegaConf.to_container(cfg[key], resolve=True), OmegaConf.to_container(base[key], resolve=True))
             self.assertEqual(cfg.data.dataset_name, 'kitti360_dynamic')
@@ -38,7 +38,7 @@ class KITTI360TrainingTest(unittest.TestCase):
         self.assertIs(dataset_dict['kitti360_dynamic'], KITTI360DynamicDataset)
 
     def test_kitti_runs_are_named_with_a_kitti_suffix(self):
-        profile = {'data_config': 'config/kitti360_train.yaml'}
+        profile = {'data_config': 'kitti360'}
         for cli, expected in [
             ({'model': {'variant': 'dynamic_2dgs_attention_velocity_v15_3'}}, 'v15.3_kitti'),
             ({}, 'v11.4_kitti'),
@@ -54,7 +54,7 @@ class KITTI360TrainingTest(unittest.TestCase):
         self.assertEqual(nuscenes.exp_name, 'v15.3')
 
     def test_checkpoint_locks_manifest_projection_and_sampling(self):
-        cfg, _ = compose_fresh_config({'data_config': 'config/kitti360_train.yaml'})
+        cfg, _ = compose_fresh_config({'data_config': 'kitti360'})
         with TemporaryDirectory() as directory:
             checkpoint = Path(directory) / 'model.ckpt'
             torch.save({'experiment_config': OmegaConf.to_container(cfg, resolve=True)}, checkpoint)
@@ -66,11 +66,11 @@ class KITTI360TrainingTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'structural'):
                     resolve_main_config(OmegaConf.merge(base_cli, {'data': change}))
             with self.assertRaisesRegex(ValueError, 'fresh runs'):
-                resolve_main_config(OmegaConf.merge(base_cli, {'data_config': 'config/kitti360_train.yaml'}))
+                resolve_main_config(OmegaConf.merge(base_cli, {'data_config': 'kitti360'}))
 
     @staticmethod
     def fixture(root):
-        cfg = OmegaConf.load('config/kitti360_train.yaml').data
+        cfg = OmegaConf.load('config/data/kitti360.yaml').data
         cfg.dataroot, cfg.verbose = str(root), False
         seq = '2013_05_28_drive_0000_sync'
         scans = root / 'data_3d_raw' / seq / 'velodyne_points'
@@ -168,8 +168,8 @@ class KITTI360TrainingTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), 'needs the CUDA rasterizer')
     def test_calibrated_training_gt_renders_and_backpropagates_with_ragged_views(self):
-        from src.models_new.module.m3_g2p import DynamicGausRender
-        from src.models_new.utils.loss import Loss
+        from src.models.module.m3_g2p import DynamicGausRender
+        from src.models.utils.loss import Loss
         with TemporaryDirectory() as directory:
             cfg, points = self.fixture(Path(directory))
             val = KITTI360DynamicDataset(cfg, split='val')

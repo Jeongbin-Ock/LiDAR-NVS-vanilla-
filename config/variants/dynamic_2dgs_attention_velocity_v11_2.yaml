@@ -68,14 +68,9 @@ p2g:
         interval: 20
         range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
 
-data:
-  # The legacy src/dataloader/nuscene.py loader: ``dataset_name: nuscenes`` and
-  # the fixed keyframe window are inherited from nuscene_train.yaml.
-  mode: bbox
-  bbox_json_path: null
-  # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
-  # train scenes. Hold out each complete scene to prevent overlap.
-  train_excluded_scenes: [scene-0757, scene-1094]
+# Default training data: config/data/nuscenes.yaml, the legacy fixed-window
+# loader with the two LiDAR4D scenes held out. data_config=<name> picks another.
+data_config: nuscenes
 
 dynamic_2dgs:
   temporal:

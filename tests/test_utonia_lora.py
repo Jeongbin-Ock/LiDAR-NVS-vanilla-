@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import spconv.pytorch as spconv
 
-from src.models_new.utonia.lora import (
+from src.models.utonia.lora import (
     LoRALinear,
     LoRASubMConv3d,
     adapt_utonia_embedding_to_xyzi,

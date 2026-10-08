@@ -11,7 +11,7 @@
 #    trunk head therefore reads 3 * 3 = 9 seed-delta channels, and its
 #    parameter shapes differ from V11.3/V11.5's.
 #
-# 2. Data. The endpoint pair is drawn by src/dataloader/nuscene_dynamic_lidar4d.py
+# 2. Data. The endpoint pair is drawn by src/dataloader/nuscenes/dynamic.py
 #    (second endpoint 0.2-1.2 s after a keyframe start, up to three interior
 #    novel views), exactly the contract the V11.4 dynamic-loader run was
 #    launched with from the CLI. The complete train scenes scene-0757 and
@@ -51,20 +51,9 @@ p2g:
     K_max: 3
     seed_mode: range_quantile
 
-data:
-  dataset_name: nuscenes_dynamic_lidar4d
-  mode: nvs
-  bbox_json_path: null
-  # The legacy loader's holdout key stays empty; this loader reads its holdouts
-  # from dynamic_window below.
-  train_excluded_scenes: null
-  dynamic_window:
-    endpoint_min_sec: 0.2
-    endpoint_max_sec: 1.2
-    eval_seed: 42
-    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
-    # train scenes. Hold out each complete scene to prevent overlap.
-    train_excluded_scenes: [scene-0757, scene-1094]
+# Default training data: config/data/nuscenes_dynamic.yaml, the random-duration
+# loader with the two LiDAR4D scenes held out. data_config=<name> picks another.
+data_config: nuscenes_dynamic
 
 dynamic_2dgs:
   temporal:

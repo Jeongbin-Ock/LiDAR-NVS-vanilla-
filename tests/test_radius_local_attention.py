@@ -2,7 +2,7 @@
 
 Everything above the CUDA section at the end runs on the CPU fallback path,
 with tiny blocks (dim 72, two 36-wide heads: the production head width).
-Importing ``src.models_new.module`` still loads a CUDA extension, so one GPU
+Importing ``src.models.module`` still loads a CUDA extension, so one GPU
 must be visible even for the CPU tests.
 
 Random clouds are drawn until no pair distance lies within 1e-4 m of the
@@ -18,8 +18,8 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
-from src.models_new.module.dynamic import local_attention
-from src.models_new.module.dynamic.local_attention import (
+from src.models.module.dynamic import local_attention
+from src.models.module.dynamic.local_attention import (
     MAX_QUERY_CHUNK_SIZE,
     RadiusLocalAttentionBlock,
 )

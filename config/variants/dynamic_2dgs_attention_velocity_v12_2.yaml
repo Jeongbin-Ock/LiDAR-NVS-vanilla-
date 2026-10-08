@@ -18,7 +18,7 @@
 # Unchanged from V12 (and V11.4): shared per-layer QK RMSNorm gains, the
 # adaptive K={1,2,3} router, the v_init-conditioned offset head and the split
 # velocity prior. Differences from the V12 overlay besides the speeds:
-# - Data: src/dataloader/nuscene_dynamic_lidar4d.py, the V11.6 contract.
+# - Data: src/dataloader/nuscenes/dynamic.py, the V11.6 contract.
 # - p2g.head_offset_bound is pinned to the shared 0.4 m default; V12's run
 #   predates that default and trained at 0.8 m.
 model:
@@ -50,22 +50,9 @@ p2g:
         interval: 20
         range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
 
-# The random-duration loader with V11.6's sampling contract: second endpoint
-# 0.2-1.2 s after a keyframe start, up to three interior novel views.
-data:
-  dataset_name: nuscenes_dynamic_lidar4d
-  mode: nvs
-  bbox_json_path: null
-  # The legacy loader's holdout key stays empty; this loader reads its holdouts
-  # from dynamic_window below.
-  train_excluded_scenes: null
-  dynamic_window:
-    endpoint_min_sec: 0.2
-    endpoint_max_sec: 1.2
-    eval_seed: 42
-    # LiDAR4D test sequences seq_1600_1650 / seq_3180_3230 live inside these
-    # train scenes. Hold out each complete scene to prevent overlap.
-    train_excluded_scenes: [scene-0757, scene-1094]
+# Default training data: config/data/nuscenes_dynamic.yaml, the random-duration
+# loader with the two LiDAR4D scenes held out. data_config=<name> picks another.
+data_config: nuscenes_dynamic
 
 dynamic_2dgs:
   temporal:

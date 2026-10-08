@@ -1,5 +1,5 @@
 # Fresh training data profile. Architecture/loss/optimizer use the chosen variant.
-# python main.py data_config=config/kitti360_train.yaml device=[1]
+# python main.py data_config=kitti360 device=[1]
 # No exp_name here: KITTI-360 runs are named <variant label>_kitti (v15.3_kitti),
 # and a CLI exp_name gains the _kitti suffix unless it already mentions kitti.
 data:

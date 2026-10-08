@@ -14,7 +14,7 @@
 #        V11.5   -1 * relu(||dp|| / (v_max * |dt|) - 1)
 #
 # The overlay also pins p2g.head_offset_bound to 0.4 m per axis and the legacy
-# src/dataloader/nuscene.py loader with the complete train scenes scene-0757
+# src/dataloader/nuscenes/legacy.py loader with the complete train scenes scene-0757
 # and scene-1094 held out. Both match V11.4's current overlay, but V11.4
 # checkpoints trained before they became its contract embed a 0.8 m bound and
 # no scene holdouts.
@@ -53,13 +53,9 @@ p2g:
     K_max: 2
     seed_mode: range_quantile
 
-# ``dataset_name: nuscenes`` is inherited from nuscene_train.yaml and selects
-# src/dataloader/nuscene.py, the loader V11.4 was originally trained with.
-data:
-  mode: bbox
-  bbox_json_path: null
-  # Hold out the complete nuScenes train scenes containing LiDAR4D test clips.
-  train_excluded_scenes: [scene-0757, scene-1094]
+# Default training data: config/data/nuscenes.yaml, the legacy fixed-window
+# loader with the two LiDAR4D scenes held out. data_config=<name> picks another.
+data_config: nuscenes
 
 dynamic_2dgs:
   temporal:

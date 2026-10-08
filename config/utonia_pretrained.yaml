@@ -1,7 +1,7 @@
 # Pretrained Utonia (Pointcept/Utonia) architecture config
 # Embedded in utonia.pth as ckpt['config']; the model is built via
 #   PointTransformerV3(**ckpt['config'])  (m1_p2g loads it; ptv3_backbone in
-#   nuscene_train.yaml is NOT used for the frozen Utonia encoder).
+#   default.yaml is NOT used for the frozen Utonia encoder).
 in_channels: 9
 order:
 - z

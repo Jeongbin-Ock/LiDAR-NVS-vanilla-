@@ -11,13 +11,12 @@ from omegaconf import OmegaConf
 import torch
 from torch.utils.data import Dataset
 
-from ..kitti360 import compact_val
-from ..kitti360.metadata import KITTI360_BENCHMARK_SCENES
-from ..kitti360.sampling import sample_window_frames, window_start_frames
-from .kitti360_lidar4d_test import (
-    KITTI360SequenceReader, LiDAR4DKITTI360TestDataset, _transform_points,
-)
-from .nuscene_dynamic_lidar4d import dynamic_lidar4d_multiframe_collate_fn
+from ..collate import dynamic_lidar4d_multiframe_collate_fn
+from . import compact_val
+from .lidar4d_test import LiDAR4DKITTI360TestDataset
+from .metadata import KITTI360_BENCHMARK_SCENES
+from .reader import KITTI360SequenceReader, _transform_points
+from .sampling import sample_window_frames, window_start_frames
 
 
 class KITTI360DynamicDataset(Dataset):

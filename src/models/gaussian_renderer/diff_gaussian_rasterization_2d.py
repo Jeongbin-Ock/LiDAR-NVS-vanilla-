@@ -65,7 +65,7 @@ extension_build_dir = (
     repository_root
     / ".cache"
     / "torch_extensions"
-    / "diff_gaussian_rasterization"
+    / "diff_gaussian_rasterization_2d"
 )
 extension_build_dir.mkdir(parents=True, exist_ok=True)
 

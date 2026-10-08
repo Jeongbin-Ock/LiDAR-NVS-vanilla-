@@ -115,7 +115,7 @@ input/fitting difference must accompany comparisons to their reported numbers.
 ## Config and coordinates
 
 ```bash
-python test_lidar4d_nvs.py eval_config=config/kitti360_inference.yaml \
+python test_lidar4d_nvs.py eval_config=config/eval/kitti360_inference.yaml \
     test.ckpt_path=/absolute/path/to/epoch=29.ckpt device='[1]'
 ```
 
@@ -180,7 +180,7 @@ through the return.
 The scans are stored laser by laser, from the top laser down. Each sweep starts
 facing +x, so a new laser begins wherever the scan order re-crosses +x. That
 yields 64 lasers in 1,099 of 1,102 checked scans. Per-laser line fits on 722
-scans from all nine drives give the table in `src/dataloader/kitti360_hdl64e.py`:
+scans from all nine drives give the table in `src/dataloader/kitti360/hdl64e.py`:
 
 - δ runs from +1.937° to -24.999°.
 - `V` is 0.198-0.209 m for lasers 0-31 (upper block) and 0.116-0.126 m for

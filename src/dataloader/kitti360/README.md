@@ -14,16 +14,17 @@ selection. It does not import the dataset registry, PyTorch, Utonia or CUDA.
 Canonical preparation command, from the repository root:
 
 ```bash
-python -m src.kitti360 --config config/kitti360_train_split.yaml
+python -m src.dataloader.kitti360 --config config/kitti360_train_split.yaml
 ```
 
-`src/kitti360_split.py` is a compatibility facade. It re-exports the same public
-function objects and retains `python -m src.kitti360_split`. Existing analysis
-scripts can continue importing it; new runtime code imports only `metadata`
-and `sampling` so it does not load split construction.
+Runtime code imports only `metadata` and `sampling`, so it does not load split
+construction. `src/dataloader/__init__.py` loads the dataset registry lazily,
+so these torch-free modules stay importable without PyTorch.
 
-GT projection, camera construction and raw point loading stay in
-`src/dataloader/kitti360_lidar4d_test.py`; training samples and batch preparation
-stay in `src/dataloader/kitti360_dynamic.py`. The compact-val manifest
+Calibration, poses, raw point loading and GT cameras live in `reader.py`
+(shared by training and inference) with the HDL-64E laser model in
+`hdl64e.py`; the LiDAR4D benchmark windows are `lidar4d_test.py` and the
+training dataset is `dynamic.py`. Batch packing is the shared
+`src/dataloader/collate.py`. The compact-val manifest
 `config/kitti360_compact_val_windows.json` is built by
 `tools/build_kitti360_compact_val.py`; see `config/kitti360_train.md`.

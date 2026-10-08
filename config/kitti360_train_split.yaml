@@ -1,5 +1,5 @@
 # Data split preparation only; not a runnable main.py training configuration.
-# Rebuild: python -m src.kitti360 --config config/kitti360_train_split.yaml
+# Rebuild: python -m src.dataloader.kitti360 --config config/kitti360_train_split.yaml
 dataroot: /data1/kitti360
 manifest_path: config/kitti360_train_split.json
 # Train/Val raw pool. Official 3D validation intervals are held out below.
@@ -20,7 +20,7 @@ max_sweep_gap_sec: 0.2
 # For measuring overlap with the current inference overlay, not training sampling.
 eval_input_offsets_sec: [-0.5, 0.5]
 # Starting-anchor time grid, snapped to the nearest saved sweep within each run.
-# The runtime data profile in kitti360_train.yaml uses the same default.
+# The runtime data profile config/data/kitti360.yaml uses the same default.
 window_stride_sec: 0.5
 validation:
   # Project inclusive accumulated-cloud frame ranges onto actual raw sweeps.

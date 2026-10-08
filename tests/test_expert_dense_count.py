@@ -9,14 +9,14 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
-from src.models_new.module.dynamic_gaussian import (
+from src.models.module.dynamic_gaussian import (
     DenseCountBarrierVelocityGaussianBackend,
     DenseCountGaussianHead,
     NestedCountGaussianHead,
     OptionExpertBarrierVelocityGaussianBackend,
     OptionExpertGaussianHead,
 )
-from src.models_new.utils.render import Gaussianutil
+from src.models.utils.render import Gaussianutil
 
 DIM = 24
 PARAM_DIM = 42
@@ -650,9 +650,9 @@ def test_reducing_tokens_reach_the_router_through_the_render_pipeline(monkeypatc
     Gaussian has opacity exactly one, so each token's reduce gate receives
     exactly 1 -- in V15 the same tokens would send nothing.
     """
-    from src.models_new import gaussian_renderer
-    from src.models_new.module.dynamic_gaussian import DynamicGausTemp
-    from src.models_new.module.m3_g2p import DynamicGausRender
+    from src.models import gaussian_renderer
+    from src.models.module.dynamic_gaussian import DynamicGausTemp
+    from src.models.module.m3_g2p import DynamicGausRender
 
     backend = _expert_backend().train()
     arguments = _inputs()

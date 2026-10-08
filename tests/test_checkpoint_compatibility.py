@@ -17,7 +17,7 @@ import unittest
 import torch
 from omegaconf import OmegaConf
 
-from src.config_loader import (
+from src.experiment_config import (
     DYNAMIC_VARIANTS,
     ROUTED_COUNT_BLOCKS,
     compose_fresh_config,
@@ -219,11 +219,11 @@ def _digest(lines) -> str:
 
 def _load_dynamic_module_without_renderer():
     """Import the backend package without initializing the CUDA renderer."""
-    package_name = "src.models_new._checkpoint_compat_module"
+    package_name = "src.models._checkpoint_compat_module"
     if package_name not in sys.modules:
         package = types.ModuleType(package_name)
         package.__path__ = [
-            str(pathlib.Path(__file__).parents[1] / "src/models_new/module")
+            str(pathlib.Path(__file__).parents[1] / "src/models/module")
         ]
         package.__package__ = package_name
         sys.modules[package_name] = package
@@ -641,7 +641,7 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
         for name, module_name in _SEMANTIC_MODULE_BY_EXPORT.items():
             with self.subTest(name=name):
                 semantic_module = importlib.import_module(
-                    "src.models_new._checkpoint_compat_module.dynamic."
+                    "src.models._checkpoint_compat_module.dynamic."
                     + module_name
                 )
                 self.assertIs(

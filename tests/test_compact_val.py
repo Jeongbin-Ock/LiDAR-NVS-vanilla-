@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.dataloader import compact_val
+from src.dataloader.nuscenes import compact_val
 
 
 class _StubDataset:
@@ -123,7 +123,7 @@ class ShippedManifestTest(unittest.TestCase):
     def test_shipped_manifest_matches_the_default_sampling_contract(self):
         from omegaconf import OmegaConf
 
-        from src.config_loader import compose_fresh_config
+        from src.experiment_config import compose_fresh_config
 
         path = Path(__file__).resolve().parents[1] / "config" / "compact_val_windows.json"
         manifest = compact_val.load_manifest(str(path))

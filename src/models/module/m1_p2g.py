@@ -166,7 +166,7 @@ class Point2Gaus(nn.Module):
         self.trunk_dim = self.utonia_feature_dim
         self.offset_bound = float(getattr(cfg, "head_offset_bound", 0.8))
 
-        from src.config_loader import (
+        from src.experiment_config import (
             DYNAMIC_VARIANT_V11,
             DYNAMIC_VARIANT_V11_1,
             DYNAMIC_VARIANT_V11_2,

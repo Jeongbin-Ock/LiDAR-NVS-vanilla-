@@ -29,7 +29,7 @@ import numpy as np
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.splits import create_splits_scenes
 
-from .nuscene import (
+from .legacy import (
     NuScenesNVSDataset,
     _cfg_get,
     _resolve_bbox_json_path,
@@ -38,7 +38,7 @@ from .nuscene import (
     MAX_WIN_US,
     MIN_GAP_US,
 )
-from .nuscenes_frames import (
+from .frames import (
     COORDINATE_FRAME_EGO,
     ego_to_world,
     resolve_coordinate_frame,

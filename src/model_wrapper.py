@@ -4,26 +4,26 @@ import math
 from pathlib import Path
 from omegaconf import OmegaConf
 
-from src.models_new.module import (
+from src.models.module import (
     Point2Gaus,
     DynamicGausTemp,
     DynamicGausRender,
 )
 from lightning.pytorch import LightningModule
-from src.models_new.utils.loss import (
+from src.models.utils.loss import (
     Loss,
     distributed_token_mean,
     ramped_weight_at_step,
 )
-from src.models_new.utils.routing_logging import (
+from src.models.utils.routing_logging import (
     distributed_sum_statistics,
     range_bin_labels,
     routing_option_counts,
     routing_sufficient_statistics,
 )
-from src.config_loader import DYNAMIC_VARIANTS, ROUTED_COUNT_BLOCKS
+from src.experiment_config import DYNAMIC_VARIANTS, ROUTED_COUNT_BLOCKS
 from src.eval.group_metrics import GroupMetricAccumulator
-from src.kitti360.compact_val import COMPACT_VAL_GROUPS
+from src.dataloader.kitti360.compact_val import COMPACT_VAL_GROUPS
 
 WANDB_BASE_LOSS_KEYS = {
     "loss_depth",
