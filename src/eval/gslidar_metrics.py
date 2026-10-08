@@ -163,7 +163,7 @@ def _fscore(dist1, dist2, threshold: float = 0.05):
     return f, precision, recall
 
 
-def _range_to_points(depth_1hw, row_to_theta, vfov, hfov, near, far):
+def _range_to_points(depth_1hw, row_to_theta, vfov, hfov, near, far, row_origin=None):
     return lidar4d_range_image_to_points(
         depth_1hw,
         vfov,
@@ -171,28 +171,32 @@ def _range_to_points(depth_1hw, row_to_theta, vfov, hfov, near, far):
         row_to_theta=row_to_theta,
         min_range=near,
         max_range=far,
+        row_origin=row_origin,
     ).contiguous()
 
 
 def point_metrics(pred_depth, gt_depth, row_to_theta, backends: MetricBackends,
                   vfov, hfov=(-180.0, 180.0), scale: float = 1.0,
                   near: float = 0.0, far: float = 80.0,
-                  fscore_threshold: float = 0.05) -> dict:
+                  fscore_threshold: float = 0.05, row_origin=None) -> dict:
     """LiDAR4D point metrics for ``[1,H,W]`` range images in metres.
 
     ``pred_depth`` should already be hard-masked by predicted raydrop. We apply
     the LiDAR4D/GS-LiDAR 80 m support symmetrically and do not add a CD-only
     near crop, hence the default ``near=0``. Both point sets use symmetric
-    squared Chamfer distance.
+    squared Chamfer distance. ``row_origin`` ([H,3], camera frame) is set for
+    panoramas whose rows cast rays from different origins.
     """
     pred_depth = pred_depth / scale
     gt_depth = gt_depth / scale
     if not torch.is_tensor(row_to_theta):
         row_to_theta = torch.as_tensor(row_to_theta)
     row_to_theta = row_to_theta.to(pred_depth.device, dtype=pred_depth.dtype)
+    if row_origin is not None:
+        row_origin = torch.as_tensor(row_origin).to(pred_depth.device, dtype=pred_depth.dtype) / scale
 
-    pred_lidar = _range_to_points(pred_depth, row_to_theta, vfov, hfov, near, far)
-    gt_lidar = _range_to_points(gt_depth, row_to_theta, vfov, hfov, near, far)
+    pred_lidar = _range_to_points(pred_depth, row_to_theta, vfov, hfov, near, far, row_origin)
+    gt_lidar = _range_to_points(gt_depth, row_to_theta, vfov, hfov, near, far, row_origin)
     if pred_lidar.shape[0] == 0 or gt_lidar.shape[0] == 0:
         return {"cd": float("nan"), "fscore": float("nan"),
                 "precision": float("nan"), "recall": float("nan"),

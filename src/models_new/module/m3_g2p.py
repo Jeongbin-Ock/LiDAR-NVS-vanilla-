@@ -90,6 +90,30 @@ class DynamicGausRender(nn.Module):
         # Dynamic 2DGS transports only position.
         return b_gs["rotation"]
 
+    def _render_view(self, camera, pc, t):
+        """Render one panorama; stacked cameras render each row block, top first."""
+        blocks = getattr(camera, "sub_cameras", None)
+        if not blocks:
+            blocks, kept_rows = [camera], None
+        else:
+            kept_rows = camera.kept_rows
+        packages = [
+            render(
+                viewpoint_camera=block,
+                pc=pc,
+                cfg=self.cfg,
+                bg_color=self.background.to(pc["position"].device),
+                input_timestamp=t,
+                is_training=self.training,
+            )
+            for block in blocks
+        ]
+        if kept_rows is None:
+            return packages[0]
+        return {key: torch.cat([package[key][..., first:last, :]
+                                for package, (first, last) in zip(packages, kept_rows)], dim=-2)
+                for key in packages[0]}
+
     def forward(
         self,
         gaussians,
@@ -141,20 +165,9 @@ class DynamicGausRender(nn.Module):
                     pc["opacity_gate"] = b_gs["opacity_gate"]
                 if "blend_mask" in b_gs:
                     pc["blend_mask"] = b_gs["blend_mask"]
-                if "opacity_gate" in b_gs:
-                    pc["opacity_gate"] = b_gs["opacity_gate"]
-                if "blend_mask" in b_gs:
-                    pc["blend_mask"] = b_gs["blend_mask"]
 
                 # 랜더링
-                render_pkg = render(
-                    viewpoint_camera=gt_cam,
-                    pc=pc,
-                    cfg=self.cfg,
-                    bg_color=self.background.to(means3D.device),
-                    input_timestamp=t,
-                    is_training=self.training,
-                )
+                render_pkg = self._render_view(gt_cam, pc, t)
 
                 gt_depth = gt_cam.pts_depth.to(device=means3D.device, dtype=means3D.dtype)
                 gt_intensity_sh = gt_cam.pts_intensity.to(device=means3D.device, dtype=means3D.dtype)
@@ -171,6 +184,7 @@ class DynamicGausRender(nn.Module):
                         gt_cam.hfov,
                         row_to_theta=gt_cam.row_to_theta,
                         raydrop=render_pkg["raydrop"],
+                        row_origin=getattr(gt_cam, "row_origin", None),
                     )
 
                 # 픽셀 기반 맵 모으기
@@ -197,6 +211,7 @@ class DynamicGausRender(nn.Module):
                             gt_cam.vfov,
                             gt_cam.hfov,
                             row_to_theta=gt_cam.row_to_theta,
+                            row_origin=getattr(gt_cam, "row_origin", None),
                         )
                     )
 

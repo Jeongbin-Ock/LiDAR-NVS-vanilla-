@@ -1270,3 +1270,52 @@ concatenates a second explicit position encoding into either prediction head.
 Add new variants to the loader allow-list instead of accepting arbitrary config
 paths.  This keeps a misspelled or path-traversing selector from silently loading
 an unintended architecture.
+
+## KITTI-360 inference
+
+`config/kitti360_inference.yaml` is a data/rendering overlay for
+`test_lidar4d_nvs.py`, selected with `eval_config=...`. Model and optimizer
+structure still come from the checkpoint. This explicit inference path permits
+another dataset's panorama geometry while retaining all training/resume guards
+and the checkpoint's `data.coordinate_frame`. It rejects model/training roots
+in the overlay. Ordinary evaluation without `eval_config` retains the existing
+checkpoint-bound behavior.
+
+```bash
+python test_lidar4d_nvs.py eval_config=config/kitti360_inference.yaml \
+    test.ckpt_path=/absolute/path/to/checkpoint.ckpt device='[1]'
+```
+
+With `out_dir: null`, results default to the checkpoint's own directory:
+`logs/<model>/lidar4d_kitti360_eval/` or
+`logs/<model>/lidar4d_nuscenes_eval/`. An explicit CLI `out_dir` still wins.
+Use distinct child paths when retaining multiple input-offset evaluations.
+
+The dataset dispatcher is `src/dataloader/lidar4d_test.py`; KITTI loading is
+`src/dataloader/kitti360_lidar4d_test.py`. The loader uses the ten official
+LiDAR4D/GS-LiDAR clips in drive 0000 and their 40 held-out target frame IDs.
+It supplies two non-held-out input sweeps nearest the configured offsets,
+with actual scan timestamps for conditioning and motion transport. The
+default GT (`panorama_projection: hdl64e_kitti360_calibrated`, 64×2178) has
+one row per HDL-64E laser at the unit's fitted angle. Its upper and lower
+emitter blocks render from their own origins. Returns at or beyond 80m are
+dropped. `kitti360_inference_lidar4d_benchmark.yaml`
+(`panorama_projection: uniform`) retains the official uniform 66×1030 grid
+seen from the sensor origin. No nuScenes ring table is used for KITTI cameras.
+
+KITTI XYZI intensity is already normalized. IMU forward/right/down axes are
+converted to forward/left/up for ego-frame checkpoints. The default overlay
+interpolates missing poses. The benchmark overlay keeps `previous`, which
+matches the official LiDAR4D/GS-LiDAR preprocessing. `error` is the remaining
+option. Dynamic GT boxes are
+exact-frame visualization metadata; no GT boxes enter the model input.
+
+KITTI retains its native GPS/IMU origin. Only the physical FRD-to-FLU axis
+conversion is applied; local inputs, relative poses and cameras all use that
+native ego frame. The temporary nuScenes reference-origin translation and its
+reference calibration file were removed on 2026-10-06.
+
+Details, measured sweep rates, annotation coverage, and clip splits:
+[`kitti360_inference.md`](kitti360_inference.md).
+Sensor specifications, panorama construction, and configuration changes for a
+different training dataset: [`sensor_data_contract.md`](sensor_data_contract.md).

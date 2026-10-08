@@ -1,0 +1,46 @@
+# Inference data/rendering overlay. Architecture is restored from test.ckpt_path.
+# python test_lidar4d_nvs.py eval_config=config/kitti360_inference.yaml \
+#   test.ckpt_path=/absolute/path/to/epoch=29.ckpt device=[1]
+mode: test
+seed: 42
+device: [1]
+# null -> <checkpoint folder>/lidar4d_kitti360_eval; CLI out_dir still overrides.
+out_dir: null
+depth_statistic: median
+data:
+  dataset_name: kitti360_lidar4d
+  dataroot: /data1/kitti360
+  version: KITTI-360
+  test_split: test
+  # Native KITTI GPS/IMU origin, with forward/left/up axes.
+  coordinate_frame: ego_vehicle
+  mode: nvs
+  bbox_json_path: null
+  train_excluded_scenes: null
+  # One row per HDL-64E laser with the unit's fitted beam angles; the upper and
+  # lower emitter blocks render from their own origins (kitti360_hdl64e.py).
+  # Official uniform 66x1030 grid: kitti360_inference_lidar4d_benchmark.yaml.
+  panorama_projection: hdl64e_kitti360_calibrated
+  column_assignment: firing_slot  # or nearest (plain azimuth rounding)
+  image_height: 64
+  image_width: 2178
+  vfov: [-24.9, 2.0]  # renderer culling only for the calibrated projection
+  hfov: [-180.0, 180.0]
+  ring_to_elevation_deg: null  # no ring column; lasers come from the cone fit
+  ego_radius: 2.5     # model input crop
+  gt_ego_radius: 2.5  # same crop on GT returns (GS-LiDAR style); 0 keeps them (LiDAR4D)
+  max_depth_m: 80.0
+  sequence: 2013_05_28_drive_0000_sync
+  benchmark_scenes: [1538, 1728, 1908, 3353, 2350, 4950, 8120, 10200, 10750, 11400]
+  # LiDAR4D/GS-LiDAR carry the previous pose; interpolation is closer for inputs.
+  # Needs direct poses on both sides (raises otherwise); all 40 targets qualify.
+  pose_missing_policy: interpolate  # time-weighted translation + SLERP between direct poses
+  compact_val:
+    enable: false
+  verbose: true
+test:
+  batch_size: 1
+  ckpt_path: null
+  input_offsets_sec: [-0.5, 0.5]  # nearest available sweep on each side
+  velocity_source: total
+  shuffle_orders: false

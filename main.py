@@ -46,9 +46,14 @@ def print_run_summary(cfg):
             f"[{float(dynamic_window.endpoint_min_sec):g},"
             f"{float(dynamic_window.endpoint_max_sec):g}]"
             f", novel_views={int(cfg.data.gt_middle_count)}"
-            ", train_excluded_scenes="
-            f"{list(dynamic_window.train_excluded_scenes)}"
         )
+        if hasattr(dynamic_window, "train_excluded_scenes"):
+            dynamic_sampling += f", train_excluded_scenes={list(dynamic_window.train_excluded_scenes)}"
+        if str(cfg.data.dataset_name) == "kitti360_dynamic":
+            dynamic_sampling += (
+                f", start_stride_sec={float(cfg.data.window_stride_sec):g}"
+                f", split_manifest={cfg.data.split_manifest_path}"
+            )
     print(
         "Run: "
         f"mode={cfg.mode}, "

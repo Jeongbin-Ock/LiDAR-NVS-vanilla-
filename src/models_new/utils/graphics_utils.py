@@ -89,7 +89,8 @@ def _pano_theta_phi(range_image, vfov, hfov, row_to_theta=None):
     return theta, phi
 
 
-def pano_to_lidar(range_image, vfov, hfov, row_to_theta=None):
+def pano_to_lidar(range_image, vfov, hfov, row_to_theta=None, row_origin=None):
+    """Back-project positive ranges; ``row_origin`` ([H,3]) offsets each row's rays."""
     mask = range_image > 0
 
     theta, phi = _pano_theta_phi(range_image, vfov, hfov, row_to_theta)
@@ -102,6 +103,12 @@ def pano_to_lidar(range_image, vfov, hfov, row_to_theta=None):
     directions = F.normalize(directions, dim=0)
 
     points_xyz = (directions * range_image)[:, mask[0]].permute(1, 0)
+    if row_origin is not None:
+        panorama_height, panorama_width = range_image.shape[-2:]
+        origin = torch.as_tensor(
+            row_origin, device=range_image.device, dtype=range_image.dtype
+        ).reshape(panorama_height, 1, 3).expand(panorama_height, panorama_width, 3)
+        points_xyz = points_xyz + origin[mask[0]]
 
     return points_xyz
 
@@ -120,6 +127,7 @@ def lidar4d_range_image_to_points(
     raydrop_threshold=LIDAR4D_RAYDROP_THRESHOLD,
     min_range=0.0,
     max_range=LIDAR4D_CD_MAX_RANGE_M,
+    row_origin=None,
 ):
     """Build the point set used by this repo's LiDAR4D-style CD protocol.
 
@@ -159,4 +167,5 @@ def lidar4d_range_image_to_points(
         vfov,
         hfov,
         row_to_theta=row_to_theta,
+        row_origin=row_origin,
     )

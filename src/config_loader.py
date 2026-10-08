@@ -323,6 +323,8 @@ def _resolve_with_checkpoint(cli, checkpoint_key: str) -> tuple[DictConfig, str]
     checkpoint = OmegaConf.select(cli, checkpoint_key, default=None)
     if not checkpoint:
         return compose_fresh_config(cli)
+    if OmegaConf.select(cli, "data_config") is not None:
+        raise ValueError("data_config is for fresh runs; checkpoint runs restore their protected data config")
     allow_legacy = bool(
         OmegaConf.select(cli, "allow_legacy_wandb_fallback", default=False)
     )
@@ -343,13 +345,50 @@ def resolve_main_config(cli=None) -> tuple[DictConfig, str]:
 
 
 def resolve_eval_config(cli=None) -> tuple[DictConfig, str]:
-    return _resolve_with_checkpoint(cli, "test.ckpt_path")
+    """Restore model weights/config, optionally applying an inference data file.
+
+    ``eval_config=...yaml`` is an explicit dataset/rendering overlay. Training
+    and ordinary checkpoint resumes retain their existing structural guards.
+    Model roots and the checkpoint's local coordinate convention stay locked.
+    """
+    cli = _as_config(cli)
+    overlay_path = OmegaConf.select(cli, "eval_config", default=None)
+    if not overlay_path:
+        return _resolve_with_checkpoint(cli, "test.ckpt_path")
+    cli = OmegaConf.create(OmegaConf.to_container(cli, resolve=False))
+    del cli["eval_config"]
+    path = Path(str(overlay_path)).expanduser().resolve()
+    overlay = OmegaConf.merge(OmegaConf.load(path), cli)
+    allowed = {
+        "mode", "data", "test", "device", "seed", "out_dir", "limit",
+        "depth_statistic", "allow_legacy_wandb_fallback",
+    }
+    unknown = set(overlay) - allowed
+    if unknown:
+        raise ValueError("Inference overlay cannot change model/training roots: "
+                         + ", ".join(sorted(unknown)))
+    if str(overlay.get("mode", "test")) != "test":
+        raise ValueError("eval_config is inference-only and requires mode=test")
+    checkpoint = OmegaConf.select(overlay, "test.ckpt_path", default=None)
+    if not checkpoint:
+        raise ValueError("eval_config requires test.ckpt_path")
+    stored, source = load_checkpoint_config(
+        checkpoint,
+        allow_legacy_wandb_fallback=bool(overlay.get("allow_legacy_wandb_fallback", False)),
+    )
+    config = OmegaConf.merge(stored, overlay, {"mode": "test"})
+    if config.data.coordinate_frame != stored.data.coordinate_frame:
+        raise ValueError("Inference must preserve checkpoint data.coordinate_frame")
+    validate_experiment_config(config)
+    return config, f"{source}; inference data overlay: {path}"
 
 __all__ = [
     "ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS",
     "BARRIER_MATCH_DYNAMIC_VARIANTS",
     "COSINE_ROPE_MATCH_DYNAMIC_VARIANTS",
     "DEFAULT_CONFIG_PATH",
+    "DENSE_COUNT_DYNAMIC_VARIANTS",
+    "DENSE_COUNT_GAUSSIANS_PER_TOKEN",
     "DYNAMIC_VARIANT",
     "DYNAMIC_VARIANT_V11",
     "DYNAMIC_VARIANT_V11_1",

@@ -173,6 +173,9 @@ class Camera(nn.Module):
             device="cpu",
         )[0]
 
+    # Ray origin of every row in this camera's frame; None means the camera centre.
+    row_origin = None
+
     @staticmethod
     def _build_row_to_theta(image_height, vfov, ring_to_elevation_deg=None):
         if ring_to_elevation_deg is not None:
@@ -301,4 +304,47 @@ class Camera(nn.Module):
             pts_intensity=torch.from_numpy(pts_intensity_np).float(),
             viewmatrix=ref_to_sensor,
             ring_to_elevation_deg=ring_to_elevation_deg,
+        )
+
+
+class StackedPanoramaCamera(Camera):
+    """A LiDAR panorama whose row blocks cast rays from different origins.
+
+    A spinning LiDAR's emitter blocks sit at different heights, so one ray
+    origin cannot serve every row. Each block is an ordinary Camera whose
+    viewmatrix places the origin at that block's emitters. The renderer draws
+    the blocks separately and stacks rows ``kept_rows`` of each, top to
+    bottom, into this camera's image.
+
+    Render each block with the full row table and keep only its rows. The
+    rasterizer clamps a Gaussian centre outside a camera's row table to the
+    edge row, and both its tile rectangle and its screen-space low-pass filter
+    use that clamped centre. A block camera cut at the block boundary would
+    therefore paint spurious coverage along that boundary.
+
+    This camera's own frame is centred on the sensor. ``row_origin`` gives
+    each row's ray origin in that frame, for back-projecting range images.
+    """
+
+    def __init__(self, sub_cameras, row_origin, kept_rows=None, **camera_kwargs):
+        super().__init__(**camera_kwargs)
+        self.sub_cameras = list(sub_cameras)
+        if kept_rows is None:
+            kept_rows = [(0, int(camera.image_height)) for camera in self.sub_cameras]
+        self.kept_rows = [(int(first), int(last)) for first, last in kept_rows]
+        if len(self.kept_rows) != len(self.sub_cameras) or any(
+            not 0 <= first < last <= int(camera.image_height)
+            for (first, last), camera in zip(self.kept_rows, self.sub_cameras)
+        ):
+            raise ValueError("kept_rows needs one valid row range per sub-camera")
+        if sum(last - first for first, last in self.kept_rows) != int(self.image_height):
+            raise ValueError("Kept sub-camera rows must add up to the panorama height")
+        if any(int(camera.image_width) != int(self.image_width) for camera in self.sub_cameras):
+            raise ValueError("Sub-cameras must share the panorama width")
+        stacked = torch.cat([camera.row_to_theta[first:last]
+                             for camera, (first, last) in zip(self.sub_cameras, self.kept_rows)])
+        if not torch.allclose(stacked, self.row_to_theta):
+            raise ValueError("Sub-camera row angles must stack into the panorama's rows")
+        self.row_origin = torch.as_tensor(row_origin, dtype=torch.float32).reshape(
+            int(self.image_height), 3
         )

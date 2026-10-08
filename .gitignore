@@ -59,6 +59,7 @@ CLAUDE.md
 # Local-only experiments and validation helpers
 scripts/
 tests/*
+!tests/test_kitti360_inference.py
 !tests/test_grid_query_head.py
 !tests/test_anchor_modes.py
 !tests/test_config_loader.py

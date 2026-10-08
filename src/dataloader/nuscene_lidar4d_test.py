@@ -149,9 +149,9 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
         start_tokens = self._resolve_start_tokens([ts for _, ts in sequences])
 
         # nuScenes official train/val split membership of each sequence's scene.
-        # IMPORTANT: 2 of the 5 LiDAR4D Table S6 seqs are in the nuScenes *train*
-        # split -> for a feed-forward model trained on `train`, those are SEEN
-        # data (leakage). Only the `val` seqs are a clean held-out comparison.
+        # Two sequences are in the official train split. Their exposure to the
+        # model depends on the training loader's exclusions (V15.3 excludes
+        # both whole scenes); official split membership alone is not leakage.
         splits = create_splits_scenes()
         train_set, val_set = set(splits["train"]), set(splits["val"])
 
@@ -176,6 +176,34 @@ class LiDAR4DNuScenesTestDataset(NuScenesNVSDataset):
                 self.index.append((s_idx, anchor))
                 self.index_meta.append({"seq_name": name, "target_s": int(T),
                                         "scene": sname, "nuscenes_split": nsplit})
+
+        dynamic_cfg = _cfg_get(cfg, "dynamic_window", None)
+        excluded = list(_cfg_get(dynamic_cfg, "train_excluded_scenes",
+                                 _cfg_get(cfg, "train_excluded_scenes", ())) or ())
+        for (scene_idx, anchor), meta in zip(self.index, self.index_meta):
+            window = self._sample_frames(scene_idx, anchor)
+            target = window[self._target_window_idx]
+            meta.update({
+                "input_lidar_tokens": [window[0][0], window[-1][0]],
+                "target_lidar_token": target[0],
+                "actual_input_offsets_sec": [(int(frame[2]) - int(target[2])) / 1e6
+                                              for frame in [window[0], window[-1]]],
+                "model_training_scene_excluded": meta["scene"] in excluded,
+            })
+        spans = [m["actual_input_offsets_sec"][1] - m["actual_input_offsets_sec"][0]
+                 for m in self.index_meta]
+        self.protocol = {
+            "name": "LiDAR4D Table S6 nuScenes fixed target seconds",
+            "num_sequences": len(self.scene_frames), "num_windows": len(self.index),
+            "target_seconds": list(target_seconds),
+            "input_offsets_sec": list(self.input_offsets_sec),
+            "timing": "actual nuScenes LIDAR_TOP sweep timestamps",
+            "actual_input_span_mean_sec": float(np.mean(spans)),
+            "actual_input_span_min_sec": min(spans), "actual_input_span_max_sec": max(spans),
+            "height": int(cfg.image_height), "width": int(cfg.image_width),
+            "vertical_mapping": "provided hardware ring IDs and configured ring elevations",
+            "model_training_scene_exclusions": excluded,
+        }
 
         # Phase-align off-grid frames to the predicted tracking (see method doc).
         if self.bbox_data is not None:

@@ -1,5 +1,9 @@
-"""LiDAR4D / GS-LiDAR-style temporal NVS evaluation on the 5 Table S6 nuScenes
-sequences (v1.0-trainval).
+"""LiDAR4D / GS-LiDAR-style temporal NVS evaluation on nuScenes or KITTI-360.
+
+KITTI-360: ``eval_config=config/kitti360_inference.yaml`` selects the ten
+official drive-0000 clips and their 40 held-out frames. Sensor timing, render
+geometry, and target labels come from the dataset; model config comes from the
+checkpoint. This feed-forward evaluation uses two sweeps per target.
 
 Protocol (1-second temporal novel-view synthesis):
   per sequence, for each target second T in {1,2,3,4}:
@@ -17,7 +21,7 @@ Usage:
   python test_lidar4d_nvs.py test.ckpt_path=/path/to/epoch=XX.ckpt \
       [data.mode=bbox] [out_dir=outputs/lidar4d_eval] [device='[4]'] \
       [test.velocity_source=total|init|match|zero] \
-      [test.input_offsets_sec='[-0.5,0.5]']
+      [test.input_offsets_sec='[-0.5,0.5]'] [test.shuffle_orders=false|true]
 
   test.input_offsets_sec overrides the two input offsets relative to target T
   (default [-0.5, 0.5], the protocol above). E.g. '[-0.1,0.2]' feeds the model
@@ -41,7 +45,8 @@ from torchvision.utils import make_grid, save_image
 from src.model_wrapper import ModelWrapper
 from src.config_loader import resolve_eval_config
 from src.dataloader.nuscene import multiframe_collate_fn
-from src.dataloader.nuscene_lidar4d_test import LiDAR4DNuScenesTestDataset
+from src.dataloader.lidar4d_test import build_lidar4d_test_dataset
+from src.eval.output_paths import resolve_lidar4d_output_dir
 from src.eval.gslidar_metrics import (
     MetricBackends, depth_errors, intensity_errors, raydrop_errors, point_metrics,
 )
@@ -51,6 +56,7 @@ from src.eval.gaussian_viz import (
     velocity_transport_from_output,
 )
 from src.eval.gaussian_stats import collect_window_stats, analyze_gaussian_sizes
+from src.eval.depth_diagnostics import depth_error_breakdown, summarize_depth_breakdowns
 from src.models_new.utils.graphics_utils import lidar4d_range_image_to_points
 from src.models_new.utils.render import visualize_depth
 
@@ -122,6 +128,7 @@ def prediction_points_ref(depth, raydrop, camera):
         raydrop=raydrop,
         raydrop_threshold=RAYDROP_THRESHOLD,
         max_range=EVAL_MAX_DEPTH_M,
+        row_origin=getattr(camera, "row_origin", None),
     )
     c2w = camera.c2w.to(device=points_camera.device, dtype=points_camera.dtype)
     return points_camera @ c2w[:3, :3].T + c2w[:3, 3]
@@ -232,7 +239,8 @@ def main(cfg, config_source="unspecified"):
 
     device = f"cuda:{int(cfg.device[0])}" if len(cfg.device) else "cuda:0"
     torch.cuda.set_device(device)
-    out_dir = Path(str(cfg.get("out_dir", os.path.join(cfg.logger.dir, "lidar4d_eval"))))
+    out_dir = resolve_lidar4d_output_dir(cfg)
+    cfg.out_dir = str(out_dir)
     viz_dir = out_dir / "viz"
     viz_dir.mkdir(parents=True, exist_ok=True)
     effective_config_path = out_dir / "effective_config.yaml"
@@ -283,6 +291,15 @@ def main(cfg, config_source="unspecified"):
             if velocity_source != "total" else ""
         )
     )
+    # Utonia shuffles its serialization-order permutation with torch.randperm
+    # in every forward (train and eval alike), so a fixed seed is still needed
+    # for a repeatable eval. Pinning it off makes the encoder deterministic;
+    # test.shuffle_orders=true restores the checkpoint's own setting.
+    shuffle_orders = bool(OmegaConf.select(cfg, "test.shuffle_orders", default=False))
+    pinned = [m for m in model.modules() if hasattr(m, "shuffle_orders")]
+    for module in pinned:
+        module.shuffle_orders = shuffle_orders
+    print(f"[setup] utonia shuffle_orders={shuffle_orders} on {len(pinned)} modules")
     backends = MetricBackends(lpips_net="alex")
 
     input_offsets_sec = OmegaConf.select(cfg, "test.input_offsets_sec", default=None)
@@ -292,9 +309,9 @@ def main(cfg, config_source="unspecified"):
     )
     print(f"[setup] input_offsets_sec={input_offsets_sec} "
           f"(input = T{input_offsets_sec[0]:+g}s / T{input_offsets_sec[1]:+g}s)")
-    dataset = LiDAR4DNuScenesTestDataset(
-        cfg.data, split=cfg.data.test_split, input_offsets_sec=input_offsets_sec
-    )
+    dataset = build_lidar4d_test_dataset(cfg.data, input_offsets_sec=input_offsets_sec)
+    dataset_name = dataset.dataset_name
+    print(f"[setup] dataset={dataset_name} windows={len(dataset)}")
     target_cam = dataset.target_cam_index
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0,
                         collate_fn=multiframe_collate_fn)
@@ -314,7 +331,9 @@ def main(cfg, config_source="unspecified"):
             break
         meta = dataset.index_meta[i]
         seq_name, target_s = meta["seq_name"], meta["target_s"]
-        scene, nuscenes_split = meta["scene"], meta["nuscenes_split"]
+        scene, dataset_split = meta["scene"], meta["dataset_split"]
+        target_label = (f"f{meta['target_frame_id']:010d}" if "target_frame_id" in meta
+                        else f"T{target_s}s")
         batch = to_device(batch, device)
         _input, gt = batch["input"], batch["gt"]
 
@@ -348,10 +367,8 @@ def main(cfg, config_source="unspecified"):
         pred_pts = prediction_points_ref(depth, raydrop, gt_cam).detach().cpu().numpy()
 
         wm = {
-            "seq_name": seq_name,
-            "target_s": target_s,
-            "scene": scene,
-            "nuscenes_split": nuscenes_split,
+            **meta,
+            "dataset": dataset_name,
             # GS-LiDAR-style capped range-image metric: no-return stays zero
             # until depth_errors maps it to epsilon, while positive Pred/GT
             # returns above 80 m saturate at 80 m.
@@ -366,10 +383,16 @@ def main(cfg, config_source="unspecified"):
             "points": point_metrics(
                 depth_keep, gt_depth, row_to_theta, backends,
                 vfov=vfov, far=EVAL_MAX_DEPTH_M,
+                row_origin=getattr(gt_cam, "row_origin", None),
+            ),
+            "depth_diagnostics": depth_error_breakdown(
+                depth_keep, gt_depth, max_depth=EVAL_MAX_DEPTH_M,
             ),
         }
+        if getattr(gt_cam, "projection_stats", None):
+            wm["gt_projection"] = gt_cam.projection_stats
         window_metrics.append(wm)
-        save_viz(viz_dir / f"{seq_name}_T{target_s}s.png",
+        save_viz(viz_dir / f"{seq_name}_{target_label}.png",
                  depth_keep, gt_depth, intensity_keep, gt_intensity,
                  raydrop, gt_raydrop)
 
@@ -395,7 +418,7 @@ def main(cfg, config_source="unspecified"):
         )
         center_frame = {
             "label": (
-                f"T={target_s}s | target={render_t:.6f}s | "
+                f"{target_label} | target={render_t:.6f}s | "
                 f"source→target Δt=[{delta_label}]s"
             ),
             "source_frame_centers": transport[
@@ -420,7 +443,7 @@ def main(cfg, config_source="unspecified"):
             gt_boxes_ref=gt_boxes_ref,
         )
         seq_surfel[seq_name].append({
-            "label": f"T={target_s}s", "static": surf["static"],
+            "label": target_label, "static": surf["static"],
             "dynamic": surf["dynamic"], "dynamic_in_box": surf["dynamic_in_box"],
             "gt_boxes": surf["gt_boxes"],
             "input_points": in_pts, "gt_points": gt_pts,
@@ -431,9 +454,9 @@ def main(cfg, config_source="unspecified"):
             model.g2p_model, target_gaussians, render_t
         )
         size_records.append(st)
-        size_by_split[nuscenes_split].append(st)
+        size_by_split[dataset_split].append(st)
 
-        print(f"[{i+1:02d}/{len(dataset)}] {seq_name} T={target_s}s | "
+        print(f"[{i+1:02d}/{len(dataset)}] {seq_name} {target_label} t={target_s:.6f}s | "
               f"depth RMSE={wm['depth']['rmse']:.3f} PSNR={wm['depth']['psnr']:.2f} | "
               f"int RMSE={wm['intensity']['rmse']:.3f} | "
               f"CD={wm['points']['cd']:.4f} F={wm['points']['fscore']:.3f} "
@@ -441,7 +464,7 @@ def main(cfg, config_source="unspecified"):
 
     # ── per-sequence 3D Gaussian HTML (buttons 1..4 = target seconds) ───────
     for seq_name, frames in seq_gauss.items():
-        sp = next((w["nuscenes_split"] for w in window_metrics
+        sp = next((w["dataset_split"] for w in window_metrics
                    if w["seq_name"] == seq_name), "")
         save_sequence_html(gauss_dir / f"{seq_name}.html",
                            title=(
@@ -472,7 +495,7 @@ def main(cfg, config_source="unspecified"):
     per_split = {}
     by_split = defaultdict(list)
     for wm in window_metrics:
-        by_split[wm["nuscenes_split"]].append(wm)
+        by_split[wm["dataset_split"]].append(wm)
     for sp, wms in by_split.items():
         per_split[sp] = summarize(wms)
         per_split[sp]["sequences"] = sorted({w["seq_name"] for w in wms})
@@ -480,21 +503,33 @@ def main(cfg, config_source="unspecified"):
 
     payload = {
         "config": {"ckpt": cfg.test.ckpt_path, "mode": cfg.data.mode,
+                   "dataset": dataset_name,
                    "version": cfg.data.version, "scale_factor": 1.0,
                    "seed": seed,
                    "source": config_source,
                    "effective_config": str(effective_config_path),
                    "depth_statistic": depth_statistic,
                    "max_depth_m": EVAL_MAX_DEPTH_M,
-                   "gt_range_policy": "clamp_positive_returns",
+                   "gt_range_policy": ("clamp_positive_returns" if dataset_name == "nuscenes"
+                                       else "project_returns_below_max_depth"),
                    "velocity_source": velocity_source,
                    "input_offsets_sec": list(input_offsets_sec),
-                   "vfov": list(vfov), "target_seconds": [1, 2, 3, 4]},
+                   "shuffle_orders": shuffle_orders,
+                   "vfov": list(vfov),
+                   "image_height": int(cfg.data.image_height),
+                   "image_width": int(cfg.data.image_width),
+                   "protocol": getattr(dataset, "protocol", {"target_seconds": [1, 2, 3, 4]}),
+                   "target_seconds": [1, 2, 3, 4] if dataset_name == "nuscenes" else None},
         "overall": overall,
-        "per_nuscenes_split": per_split,
+        "depth_diagnostics": summarize_depth_breakdowns(
+            [row["depth_diagnostics"] for row in window_metrics]
+        ),
+        "per_dataset_split": per_split,
         "per_sequence": per_seq,
         "windows": window_metrics,
     }
+    if dataset_name == "nuscenes":
+        payload["per_nuscenes_split"] = per_split  # retain existing result consumers
     with open(out_dir / "metrics.json", "w") as f:
         json.dump(payload, f, indent=2)
 
@@ -509,13 +544,14 @@ def main(cfg, config_source="unspecified"):
                 f"  point : CD={pt['cd']:.4f} F-score@0.05={pt['fscore']:.3f} "
                 f"P={pt['precision']:.3f} R={pt['recall']:.3f}")
 
-    seq_split = {wm["seq_name"]: wm["nuscenes_split"] for wm in window_metrics}
+    seq_split = {wm["seq_name"]: wm["dataset_split"] for wm in window_metrics}
     print("\n" + "=" * 70)
     print("PER-SEQUENCE")
     for name in sorted(per_seq):
         print(f"[{name}  ({seq_split[name]})]\n{fmt(per_seq[name])}")
     print("-" * 70)
-    print("PER nuScenes SPLIT  (val = clean held-out; train = SEEN during training)")
+    print("PER nuScenes OFFICIAL SPLIT  (training exposure depends on scene exclusions)"
+          if dataset_name == "nuscenes" else "PER KITTI-360 SCENE CATEGORY")
     for sp in sorted(per_split):
         print(f"<{sp}>  seqs={per_split[sp]['sequences']}  "
               f"n={per_split[sp]['num_windows']}\n{fmt(per_split[sp])}")
