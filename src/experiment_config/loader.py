@@ -127,18 +127,27 @@ def _load_variant_overlay(variant: str) -> tuple[DictConfig, Path]:
     return overlay, path
 
 
-KITTI360_EXP_NAME_SUFFIX = "_kitti"
+# One suffix per KITTI-360 GT mode (data.panorama_projection): the calibrated
+# HDL-64E rows (data_config=kitti360) and the LiDAR4D uniform grid
+# (data_config=kitti360_lidar4d).
+KITTI360_EXP_NAME_SUFFIXES = {
+    "hdl64e_kitti360_calibrated": "_kitti",
+    "uniform": "_kitti_lidar4d",
+}
 
 
 def _kitti360_exp_name(config, *, named: bool) -> str:
-    """A KITTI-360 run's W&B name and logs/ folder always carry ``_kitti``.
+    """A KITTI-360 run's W&B name and logs/ folder always carry its GT mode.
 
-    An unnamed run takes the variant's short label (``v15.3_kitti``). A given
+    An unnamed run takes the variant's short label plus the mode suffix
+    (``v15.3_kitti`` calibrated, ``v15.3_kitti_lidar4d`` LiDAR4D grid). A given
     name gains the suffix unless it already mentions kitti, so a KITTI-360 run
-    never writes into a nuScenes run's ``logs/<exp_name>`` checkpoints.
+    never writes into a nuScenes run's ``logs/<exp_name>`` checkpoints and the
+    two GT modes never share one by default.
     """
+    suffix = KITTI360_EXP_NAME_SUFFIXES[str(config.data.panorama_projection)]
     name = str(config.exp_name) if named else _variant_label(_variant(config)).lower()
-    return name if "kitti" in name.lower() else name + KITTI360_EXP_NAME_SUFFIX
+    return name if "kitti" in name.lower() else name + suffix
 
 
 def resolve_data_profile(name) -> Path:

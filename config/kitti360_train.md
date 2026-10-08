@@ -20,11 +20,39 @@ Model, loss, optimizer and adaptation settings come from the selected variant
 and ordinary CLI overrides. The data profile replaces the entire nuScenes
 data block, including its compact-val settings and scene exclusions.
 
-A KITTI-360 run's W&B name and `logs/` folder end in `_kitti`. Without
-`exp_name` the run is named after the variant label, e.g. `v16_kitti`; a given
-`exp_name=v15.3` becomes `v15.3_kitti`, and a name that already mentions kitti
-is kept as is. A KITTI-360 run therefore never writes into a nuScenes run's
-`logs/<exp_name>` checkpoints. The resolved full experiment is saved to
+## Two GT modes
+
+Both profiles share every data setting except the GT panorama grid. The
+shared settings are the split manifest, sampling, poses, the 2.5 m input and
+GT crops, the 80 m range and compact validation.
+
+| `data_config` | GT panorama | Renders per view | GT keeps in-range returns | V15.3 step (bs=1) | Run name |
+| --- | --- | ---: | ---: | ---: | --- |
+| `kitti360` | calibrated 64×2178, one row per laser, per-emitter-block origins | 2 | ~99% | 2.31 s | `v15.3_kitti` |
+| `kitti360_lidar4d` | LiDAR4D/GS-LiDAR uniform 66×1030 from the sensor origin | 1 | ~42% | 1.61 s | `v15.3_kitti_lidar4d` |
+
+- **`kitti360_lidar4d` matches the benchmark grid.** Training sees exactly the
+  rows, columns and empty pixels that LiDAR4D/GS-LiDAR evaluation scores.
+- **Its rows do not line up with the lasers.** The 66 uniform rows do not
+  follow the 64 lasers: 8 rows hold no laser centre and 5 hold two. On the 40
+  benchmark targets, row fill ranges from 0.00 to 0.92, and the bottom two
+  rows are always empty. Each pixel keeps its nearest return.
+- **Evaluate it with the benchmark overlay and the same GT crop:**
+  `eval_config=config/eval/kitti360_inference_lidar4d_benchmark.yaml data.gt_ego_radius=2.5`.
+- **Checkpoints lock the mode.** The projection and image size are
+  checkpoint-protected, so one run cannot switch modes.
+
+The step times are single-GPU means over the same six val windows,
+4.3 views on average. The gain is in rendering and the Chamfer loss; the
+temporal attention cost does not depend on the GT grid.
+
+A KITTI-360 run's W&B name and `logs/` folder end in its mode suffix: `_kitti`
+(calibrated) or `_kitti_lidar4d`. Without `exp_name` the run is named after the
+variant label, e.g. `v16_kitti`. A given `exp_name=v15.3` becomes `v15.3_kitti`
+or `v15.3_kitti_lidar4d`, and a name that already mentions kitti is kept as
+is. A KITTI-360 run therefore never writes into a nuScenes run's
+`logs/<exp_name>` checkpoints, and the two modes do not share a folder by
+default. The resolved full experiment is saved to
 `logs/<exp_name>/effective_config.yaml`.
 
 ## Data and temporal contract
@@ -97,7 +125,9 @@ Training and inference share `KITTI360SequenceReader` in
 `src/dataloader/kitti360/reader.py`, so calibration, native ego coordinates,
 physical timestamps, GT projection and camera transforms follow one code path.
 
-The default profile generates calibrated **64×2178** HDL-64E panoramas when a
+The `kitti360_lidar4d` profile projects each sweep onto the uniform 66×1030 grid
+from the sensor origin: one ordinary camera per view and nearest return per pixel.
+The default `kitti360` profile generates calibrated **64×2178** HDL-64E panoramas when a
 sweep is loaded; no separate range-image preprocessing job is needed. GT depth
 is range from the matching emitter-block origin, intensity stays in its native
 0–1 range, and raydrop is `1 - (depth > 0)`. Both GT and inputs use the 2.5m

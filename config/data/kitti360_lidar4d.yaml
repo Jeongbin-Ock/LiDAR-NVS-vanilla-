@@ -1,0 +1,59 @@
+# KITTI-360 training, LiDAR4D GT mode: the uniform 66x1030 benchmark grid,
+# rendered once from the LiDAR sensor origin, so training sees the same rows,
+# columns and empty pixels the LiDAR4D/GS-LiDAR evaluation scores. The nearest
+# return wins each pixel, so the GT keeps ~42% of in-range returns; 66 uniform
+# rows do not line up with the 64 lasers (8 rows hold no laser centre, 5 hold
+# two), and that row pattern is part of what the model learns to reproduce.
+# Measured on V15.3 at bs=1: 1.61 s per step against 2.31 s for the calibrated
+# mode (data_config=kitti360), which this profile otherwise matches exactly:
+# split manifest, sampling, poses, crops and compact validation.
+#   python main.py data_config=kitti360_lidar4d model.variant=<variant> ...
+# Runs are named <variant label>_kitti_lidar4d (v15.3_kitti_lidar4d).
+# Evaluate with eval_config=config/eval/kitti360_inference_lidar4d_benchmark.yaml
+# data.gt_ego_radius=2.5 to apply the same 2.5 m GT crop.
+data:
+  dataset_name: kitti360_dynamic
+  dataroot: /data1/kitti360
+  version: KITTI-360
+  train_split: train
+  eval_split: val
+  test_split: test
+  coordinate_frame: ego_vehicle
+  mode: nvs
+  bbox_json_path: null
+  train_excluded_scenes: null
+  split_manifest_path: config/kitti360_train_split.json
+  # Fresh config composition binds this to the manifest's SHA-256.
+  split_manifest_sha256: null
+  window_stride_sec: 0.5
+  max_sweep_gap_sec: 0.2
+  sweep_hop: 1
+  gt_middle_count: 3
+  dynamic_window:
+    endpoint_min_sec: 0.2
+    endpoint_max_sec: 1.0
+    eval_seed: 42
+  pose_missing_policy: interpolate
+  # Uniform rows over vfov and uniform columns over the full turn, all seen
+  # from the sensor origin: the official LiDAR4D / GS-LiDAR 66x1030 grid.
+  panorama_projection: uniform
+  image_height: 66
+  image_width: 1030
+  vfov: [-24.9, 2.0]  # the 66 rows split this range evenly
+  hfov: [-180.0, 180.0]
+  ring_to_elevation_deg: null
+  # Returns within 2.5 m of the sensor are dropped from the inputs and the GT
+  # (GS-LiDAR's convention; LiDAR4D's own GT keeps them).
+  ego_radius: 2.5
+  gt_ego_radius: 2.5
+  max_depth_m: 80.0
+  num_workers: 4
+  eval_num_workers: 0
+  # 200 of the 2,996 val anchors: 120 dynamic (4 difficulty tiers), 60 static
+  # (ego moving, no annotated mover), 20 stopped ego. Each keeps its eval_seed
+  # random endpoint/middle-GT draw. Per-group means log as val_<group>/<key>.
+  # Rebuild: python tools/build_kitti360_compact_val.py. false = full val.
+  compact_val:
+    enable: true
+    path: config/kitti360_compact_val_windows.json
+  verbose: true

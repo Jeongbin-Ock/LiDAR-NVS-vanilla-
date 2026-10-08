@@ -1,7 +1,10 @@
-# Fresh training data profile. Architecture/loss/optimizer use the chosen variant.
-# python main.py data_config=kitti360 device=[1]
-# No exp_name here: KITTI-360 runs are named <variant label>_kitti (v15.3_kitti),
-# and a CLI exp_name gains the _kitti suffix unless it already mentions kitti.
+# KITTI-360 training, calibrated GT mode (the default KITTI-360 profile):
+# 64x2178 panoramas, one row per HDL-64E laser at its fitted angle, each emitter
+# block rendered from its own origin. Keeps ~99% of in-range returns.
+# The other mode, data_config=kitti360_lidar4d, uses the LiDAR4D benchmark grid.
+#   python main.py data_config=kitti360 model.variant=<variant> ...
+# Runs are named <variant label>_kitti (v15.3_kitti); a CLI exp_name gains the
+# suffix unless it already mentions kitti.
 data:
   dataset_name: kitti360_dynamic
   dataroot: /data1/kitti360

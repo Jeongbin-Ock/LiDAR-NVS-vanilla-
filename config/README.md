@@ -27,7 +27,8 @@ Checkpoint resumes ignore all of these files and restore the embedded config.
 | --- | --- | --- |
 | `data/nuscenes.yaml` | nuScenes, `nuscenes` (legacy keyframe windows, bbox mode) | V11-V13 |
 | `data/nuscenes_dynamic.yaml` | nuScenes, `nuscenes_dynamic_lidar4d` (random-duration) | V11.6, V12.2, V14-V16 |
-| `data/kitti360.yaml` | KITTI-360, `kitti360_dynamic` | opt-in (`data_config=kitti360`) |
+| `data/kitti360.yaml` | KITTI-360, `kitti360_dynamic`, calibrated 64×2178 GT | opt-in (`data_config=kitti360`) |
+| `data/kitti360_lidar4d.yaml` | KITTI-360, `kitti360_dynamic`, LiDAR4D uniform 66×1030 GT | opt-in (`data_config=kitti360_lidar4d`) |
 
 Inference overlays for `test_lidar4d_nvs.py eval_config=...` live in `eval/`.
 The JSON manifests (`compact_val_windows.json`, `kitti360_compact_val_windows.json`,
@@ -1302,8 +1303,16 @@ Use `python main.py data_config=kitti360 device='[6]'` from
 the repository root. The registered `kitti360_dynamic` loader reuses the
 inference loader's calibrated GT/camera path and the nuScenes dynamic XYZI
 collation. Model/loss/optimizer settings come from the selected variant.
-The run's W&B name and `logs/` folder end in `_kitti`: `v15.3_kitti` by default,
-and a CLI `exp_name` without "kitti" gains the suffix.
+
+There are two GT modes, and they differ only in the GT panorama:
+
+- `data_config=kitti360`: calibrated 64×2178 rows, one per laser. Runs are
+  named `v15.3_kitti`.
+- `data_config=kitti360_lidar4d`: the LiDAR4D/GS-LiDAR uniform 66×1030 grid
+  from the sensor origin. It is 1.43× faster per V15.3 step, and its GT keeps
+  ~42% of in-range returns. Runs are named `v15.3_kitti_lidar4d`.
+
+A CLI `exp_name` without "kitti" gains the mode suffix.
 
 The training pool and complete LiDAR4D clip exclusions are in
 [`kitti360_train_split.md`](kitti360_train_split.md), with rebuild settings in

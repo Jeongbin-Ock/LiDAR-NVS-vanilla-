@@ -15,7 +15,7 @@ from src.dataloader.kitti360.dynamic import KITTI360DynamicDataset
 from src.dataloader.kitti360.hdl64e import (
     KITTI360_HDL64E_APEX_HEIGHT_M, KITTI360_HDL64E_ELEVATION_DEG, project_hdl64e_panorama,
 )
-from src.dataloader.kitti360.reader import EGO_FROM_IMU
+from src.dataloader.kitti360.reader import EGO_FROM_IMU, project_kitti_panorama
 from src.models.utils.camera import StackedPanoramaCamera
 
 
@@ -50,8 +50,28 @@ class KITTI360TrainingTest(unittest.TestCase):
             resolved = OmegaConf.to_container(cfg, resolve=True)
             self.assertEqual(resolved['exp_name'], expected)
             self.assertEqual(resolved['logger']['dir'], f'logs/{expected}')
+        for cli, expected in [
+            ({'model': {'variant': 'dynamic_2dgs_attention_velocity_v15_3'}}, 'v15.3_kitti_lidar4d'),
+            ({'model': {'variant': 'dynamic_2dgs_attention_velocity_v15_3'}, 'exp_name': 'v15.3'}, 'v15.3_kitti_lidar4d'),
+            ({'exp_name': 'v15.3_kitti_lr2'}, 'v15.3_kitti_lr2'),
+        ]:
+            cfg, _ = compose_fresh_config({**cli, 'data_config': 'kitti360_lidar4d'})
+            self.assertEqual(OmegaConf.to_container(cfg, resolve=True)['logger']['dir'], f'logs/{expected}')
         nuscenes, _ = compose_fresh_config({'exp_name': 'v15.3'})
         self.assertEqual(nuscenes.exp_name, 'v15.3')
+
+    def test_lidar4d_profile_changes_only_the_gt_grid(self):
+        variant = {'model': {'variant': 'dynamic_2dgs_attention_velocity_v15_3'}}
+        calibrated, _ = compose_fresh_config({**variant, 'data_config': 'kitti360'})
+        lidar4d, _ = compose_fresh_config({**variant, 'data_config': 'kitti360_lidar4d'})
+        a, b = (OmegaConf.to_container(c.data, resolve=True) for c in (calibrated, lidar4d))
+        changed = {key for key in a.keys() | b.keys() if a.get(key) != b.get(key)}
+        self.assertEqual(changed, {'panorama_projection', 'column_assignment', 'image_height', 'image_width'})
+        self.assertEqual((b['panorama_projection'], b['image_height'], b['image_width']), ('uniform', 66, 1030))
+        self.assertEqual((b['ego_radius'], b['gt_ego_radius']), (2.5, 2.5))
+        for root in ('model', 'p2g', 'dynamic_2dgs', 'loss', 'train'):
+            self.assertEqual(OmegaConf.to_container(calibrated[root], resolve=True),
+                             OmegaConf.to_container(lidar4d[root], resolve=True))
 
     def test_checkpoint_locks_manifest_projection_and_sampling(self):
         cfg, _ = compose_fresh_config({'data_config': 'kitti360'})
@@ -149,6 +169,20 @@ class KITTI360TrainingTest(unittest.TestCase):
             self.assertEqual(batch['input']['ptv3_input']['offset'].shape, (4,))
             self.assertEqual([len(views) for views in batch['gt']['cameras']],
                              [len(long_item['gt']['cameras']), len(short_item['gt']['cameras'])])
+
+    def test_lidar4d_grid_renders_one_sensor_origin_camera_per_view(self):
+        with TemporaryDirectory() as directory:
+            cfg, points = self.fixture(Path(directory))
+            profile = OmegaConf.load('config/data/kitti360_lidar4d.yaml').data
+            for key in ('panorama_projection', 'image_height', 'image_width', 'vfov'):
+                cfg[key] = profile[key]
+            item = KITTI360DynamicDataset(cfg, split='val')[0]
+            expected, _ = project_kitti_panorama(points, 66, 1030, cfg.vfov, cfg.max_depth_m)
+            for camera in item['gt']['cameras']:
+                self.assertNotIsInstance(camera, StackedPanoramaCamera)
+                self.assertIsNone(camera.row_origin)
+                self.assertEqual(tuple(camera.pts_depth.shape), (1, 66, 1030))
+                np.testing.assert_array_equal(camera.pts_depth.numpy(), expected)
 
     def test_manifest_tampering_and_benchmark_leakage_fail_before_loading_points(self):
         with TemporaryDirectory() as directory:
