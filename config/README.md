@@ -1287,8 +1287,12 @@ The training pool and complete LiDAR4D clip exclusions are in
 intervals onto sweeps, leaving 61,809 train / 14,344 val sweeps after benchmark
 exclusions. Random endpoint durations are 0.2–1.0s with up to three interior GT
 views. The selected start stride is a 0.5s time grid, snapped to saved sweeps.
-After pose eligibility, there are 12,770 train / 2,996 val windows. The split
-manifest hash and sensor/time settings are protected on resume. See
+After pose eligibility, there are 12,770 train / 2,996 val windows. Per-epoch
+validation uses a 200-anchor compact set
+(`kitti360_compact_val_windows.json`: 120 dynamic / 60 static / 20 stopped-ego).
+Each anchor keeps its random-duration draw, and the per-group means are logged
+as `val_<group>/<key>`. The split manifest hash and sensor/time settings are
+protected on resume. See
 [`kitti360_train.md`](kitti360_train.md) for configuration, GT maps and checks.
 
 ## KITTI-360 inference

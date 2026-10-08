@@ -63,6 +63,7 @@ tests/*
 !tests/test_kitti360_inference.py
 !tests/test_kitti360_split.py
 !tests/test_kitti360_training.py
+!tests/test_kitti360_compact_val.py
 !tests/test_grid_query_head.py
 !tests/test_anchor_modes.py
 !tests/test_config_loader.py

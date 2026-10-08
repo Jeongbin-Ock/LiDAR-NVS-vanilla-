@@ -9,6 +9,7 @@ selection. It does not import the dataset registry, PyTorch, Utonia or CUDA.
 | `sampling.py` | Physical-time start grid, eligible endpoints, random endpoint and middle GT selection | `KITTI360DynamicDataset` during indexing and access |
 | `splits.py` | Official train/val interval parsing, exclusions, contiguous segments and provenance manifest assembly | Split preparation and interval tests |
 | `__main__.py` | Config parsing and writing the assembled JSON | Preparation CLI |
+| `compact_val.py` | Compact-val window keys, sampling contract, group labels | `KITTI360DynamicDataset` (val), `ModelWrapper` group logging, `tools/build_kitti360_compact_val.py` |
 
 Canonical preparation command, from the repository root:
 
@@ -23,5 +24,6 @@ and `sampling` so it does not load split construction.
 
 GT projection, camera construction and raw point loading stay in
 `src/dataloader/kitti360_lidar4d_test.py`; training samples and batch preparation
-stay in `src/dataloader/kitti360_dynamic.py`. Compact-val analysis currently lives
-in `tmp/kitti_review/`; its CSV and dry-run selection are not runtime manifests.
+stay in `src/dataloader/kitti360_dynamic.py`. The compact-val manifest
+`config/kitti360_compact_val_windows.json` is built by
+`tools/build_kitti360_compact_val.py`; see `config/kitti360_train.md`.

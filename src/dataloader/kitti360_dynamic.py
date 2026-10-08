@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 import torch
 from torch.utils.data import Dataset
 
+from ..kitti360 import compact_val
 from ..kitti360.metadata import KITTI360_BENCHMARK_SCENES
 from ..kitti360.sampling import sample_window_frames, window_start_frames
 from .kitti360_lidar4d_test import (
@@ -20,14 +21,20 @@ from .nuscene_dynamic_lidar4d import dynamic_lidar4d_multiframe_collate_fn
 
 
 class KITTI360DynamicDataset(Dataset):
-    """Sample two inputs and up to three middle GT sweeps from one split run."""
+    """Sample two inputs and up to three middle GT sweeps from one split run.
+
+    ``window_subset`` is a KITTI-360 compact-val manifest path (val only). It
+    keeps the manifest's anchors and their full-val random draws, and every
+    item then carries its group in ``item["meta"]["window_group"]``.
+    """
 
     collate_fn = staticmethod(dynamic_lidar4d_multiframe_collate_fn)
 
     def __init__(self, cfg, split="train", window_subset=None):
         self.cfg, self.split = cfg, str(split)
-        if window_subset:
-            raise ValueError("KITTI360 uses its own split manifest; nuScenes compact_val is unsupported")
+        self.window_labels = None
+        if window_subset and self.split != "val":
+            raise ValueError("A KITTI360 compact-val manifest selects val windows only")
         if str(cfg.mode) != "nvs":
             raise ValueError("KITTI360 dynamic training requires bbox-free data.mode=nvs")
         self._benchmark = None
@@ -108,6 +115,14 @@ class KITTI360DynamicDataset(Dataset):
             print(f"[kitti360-{self.split}] {len(self.index)} starts, stride={self.stride_sec:g}s, "
                   f"endpoints=[{self.minimum:g},{self.maximum:g}]s, middle_gt<={self.middle_count}; "
                   f"{self.pose_unavailable_sweeps} sweeps outside direct/bracketing pose bounds")
+        if window_subset:
+            manifest = compact_val.load_manifest(window_subset, compact_val.dataset_contract(cfg, self.split))
+            keys = [compact_val.window_key(sequence, start) for sequence, _, start in self.index]
+            positions, self.window_labels = compact_val.select_windows(keys, manifest)
+            self.index = [self.index[position] for position in positions]
+            if bool(getattr(cfg, "verbose", False)):
+                counts = {group: self.window_labels.count(group) for group in compact_val.COMPACT_VAL_GROUPS}
+                print(f"[kitti360-{self.split}] compact val {window_subset}: {len(self.index)} windows {counts}")
 
     def __len__(self):
         return len(self._benchmark) if self._benchmark is not None else len(self.index)
@@ -153,7 +168,7 @@ class KITTI360DynamicDataset(Dataset):
         endpoint_local = endpoint_ego if reader.coordinate_frame == "ego_vehicle" else endpoint_sensor
         pose = torch.from_numpy(np.stack([world_to_ref @ world_local[slot] for slot in selected]).astype(np.float32))
         lidar_pose = torch.from_numpy(np.stack([world_to_ref @ world_sensor[slot] for slot in selected]).astype(np.float32))
-        return {
+        item = {
             "input": {
                 "lidar_points_local": torch.cat(endpoint_local),
                 "lidar_points_ego": torch.cat(endpoint_ego),
@@ -165,3 +180,6 @@ class KITTI360DynamicDataset(Dataset):
             },
             "gt": {"cameras": cameras},
         }
+        if self.window_labels is not None:
+            item["meta"] = {"window_group": self.window_labels[index]}
+        return item

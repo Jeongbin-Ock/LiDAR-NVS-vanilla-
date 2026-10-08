@@ -37,6 +37,11 @@ data:
   max_depth_m: 80.0
   num_workers: 4
   eval_num_workers: 0
+  # 200 of the 2,996 val anchors: 120 dynamic (4 difficulty tiers), 60 static
+  # (ego moving, no annotated mover), 20 stopped ego. Each keeps its eval_seed
+  # random endpoint/middle-GT draw. Per-group means log as val_<group>/<key>.
+  # Rebuild: python tools/build_kitti360_compact_val.py. false = full val.
   compact_val:
-    enable: false
+    enable: true
+    path: config/kitti360_compact_val_windows.json
   verbose: true

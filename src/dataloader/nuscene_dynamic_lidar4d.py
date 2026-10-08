@@ -575,7 +575,7 @@ def dynamic_lidar4d_multiframe_collate_fn(batch):
         "offset": torch.cumsum(sampled_counts, dim=0),
     }
 
-    return {
+    packed = {
         "input": {
             "lidar_points_local": lidar_points_local,
             "lidar_points_ego": lidar_points_ego,
@@ -591,6 +591,11 @@ def dynamic_lidar4d_multiframe_collate_fn(batch):
         },
         "gt": {"cameras": gt_cameras},
     }
+    # Per-window metadata such as a compact-val group, one list entry per item.
+    if any("meta" in item for item in batch):
+        keys = sorted({key for item in batch for key in item.get("meta", {})})
+        packed["meta"] = {key: [item.get("meta", {}).get(key) for item in batch] for key in keys}
+    return packed
 
 
 # DataModule resolves this attribute from the selected dataset class.

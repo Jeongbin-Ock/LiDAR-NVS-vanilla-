@@ -46,6 +46,51 @@ is kept as is. A KITTI-360 run therefore never writes into a nuScenes run's
 - `test` uses the existing 40 held-out LiDAR4D target windows and endpoint
   protocol. The dedicated `test_lidar4d_nvs.py` evaluator remains available.
 
+## Compact validation
+
+Per-epoch validation runs on 200 of the 2,996 val anchors
+(`config/kitti360_compact_val_windows.json`, `data.compact_val`). Set
+`data.compact_val.enable=false` for full val. The groups are:
+
+| Group | Windows | Pool | Meaning |
+|---|---:|---:|---|
+| `dynamic` | 120 | 617 | Ego moving; a GT-annotated object moving >= 1 m/s, observable (<= 80 m, >= 10 returns) in the start sweep. Four difficulty quartiles x 30. |
+| `static` | 60 | 2,102 | Ego moving; no observable annotated object moves >= 0.2 m/s. Ego speed <5 / 5–10 / >=10 m/s, each 5 turning + 15 straight. |
+| `stopped` | 20 | 172 | Ego below 0.5 m/s. KITTI-360 has no optimized poses or dynamic boxes there, so these windows carry no motion labels. |
+
+The other 105 anchors are excluded. Their motion is borderline, or their span
+touches an interpolated pose bridging > 2 m.
+
+- **Labels describe the anchor, not the drawn window.** Each label is computed
+  over the anchor's longest window, start + 1.0 s. Validation keeps each
+  anchor's full-val draw: a random endpoint 0.2–1.0 s after the start and
+  random middle GT views, stable for a given `eval_seed`.
+- **Durations stay unbiased.** Selected windows average 0.565 s, against
+  0.578 s for all val. The 95% range for random 200-anchor subsets is
+  0.546–0.61 s.
+- **Spans never overlap.** No two chosen spans share a frame. The 200
+  windows cover all nine drives.
+- **Difficulty** mixes percentile ranks of peak speed (0.35), log moving
+  returns (0.30), mover count (0.20) and proximity (0.15). It uses speed
+  rather than displacement, because displacement grows with window length.
+
+W&B logs the usual `val/<key>` over all 200 windows. It also logs
+`val_dynamic/<key>`, `val_static/<key>` and `val_stopped/<key>`, plus each
+group's `num_windows`. The group values are means over every rank's windows,
+reduced once per epoch, and are also written to
+`logs/<exp_name>/eval_val/aggregate_summary.json`. Group metrics need one
+window per val batch (`test.batch_size=1`, the default).
+
+The manifest records the settings that decide which anchors exist: the split
+manifest hash, stride, gap limit, sweep hop, endpoint range and pose policy.
+The dataset refuses a manifest built under other settings. Changing
+`eval_seed` or `gt_middle_count` only changes the draw. Rebuild in about 35 s
+on CPU:
+
+```bash
+python tools/build_kitti360_compact_val.py --csv outputs/kitti360_compact_val/val_anchors.csv
+```
+
 ## GT maps and rendering
 
 Training and inference share `KITTI360SequenceReader` in

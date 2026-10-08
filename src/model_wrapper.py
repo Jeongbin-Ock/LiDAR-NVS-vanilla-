@@ -22,6 +22,8 @@ from src.models_new.utils.routing_logging import (
     routing_sufficient_statistics,
 )
 from src.config_loader import DYNAMIC_VARIANTS, ROUTED_COUNT_BLOCKS
+from src.eval.group_metrics import GroupMetricAccumulator
+from src.kitti360.compact_val import COMPACT_VAL_GROUPS
 
 WANDB_BASE_LOSS_KEYS = {
     "loss_depth",
@@ -116,6 +118,8 @@ class ModelWrapper(LightningModule):
         self.g2p_model = DynamicGausRender(self.g2p_cfg)
         self.loss = loss_module
         self._eval_pair_summaries: dict[str, list[dict]] = {}
+        # Validation metrics per compact-val window group (val_<group>/<key>).
+        self._val_group_metrics: GroupMetricAccumulator | None = None
         self._metric_interval = int(self._cfg_get("metrics.interval", 50))
         if self._metric_interval <= 0:
             raise ValueError("metrics.interval must be positive")
@@ -258,6 +262,9 @@ class ModelWrapper(LightningModule):
 
         if prefix != "train":
             self._record_eval_summary(loss_dict, batch_idx=batch_idx, prefix=prefix)
+        groups = batch.get("meta", {}).get("window_group")
+        if prefix == "val" and groups and self._val_group_metrics is not None:
+            self._val_group_metrics.add(loss_dict, groups, self._batch_size(_input))
 
         return loss_dict["total"]
 
@@ -565,9 +572,28 @@ class ModelWrapper(LightningModule):
 
     def on_validation_epoch_start(self) -> None:
         self._eval_pair_summaries["val"] = []
+        self._val_group_metrics = GroupMetricAccumulator(
+            COMPACT_VAL_GROUPS, self._wandb_loss_keys,
+        )
 
     def on_validation_epoch_end(self) -> None:
-        self._write_eval_aggregate(prefix="val")
+        group_aggregate = self._log_val_group_metrics()
+        self._write_eval_aggregate(prefix="val", group_aggregate=group_aggregate)
+
+    def _log_val_group_metrics(self) -> dict:
+        """Log ``val_<group>/<key>`` means over all ranks; one collective per epoch."""
+        if self._val_group_metrics is None:
+            return {}
+        accumulator, self._val_group_metrics = self._val_group_metrics, None
+        aggregate = accumulator.reduce(self.device)
+        if accumulator.mixed_batches and self._is_rank_zero():
+            print(f"[val] {accumulator.mixed_batches} batches mixed window groups and were left "
+                  "out of val_<group>/ metrics; use test.batch_size=1", flush=True)
+        for group, metrics in aggregate.items():
+            for key, value in metrics.items():
+                self.log(f"val_{group}/{key}", value, on_step=False, on_epoch=True,
+                         sync_dist=False)  # already summed over ranks
+        return aggregate
 
     def on_test_epoch_start(self) -> None:
         self._eval_pair_summaries["test"] = []
@@ -703,7 +729,7 @@ class ModelWrapper(LightningModule):
                 summary[key] = float(value.detach().mean().cpu())
         self._eval_pair_summaries.setdefault(prefix, []).append(summary)
 
-    def _write_eval_aggregate(self, *, prefix: str) -> None:
+    def _write_eval_aggregate(self, *, prefix: str, group_aggregate: dict | None = None) -> None:
         if not self._is_rank_zero():
             return
         summaries = self._eval_pair_summaries.get(prefix, [])
@@ -731,6 +757,9 @@ class ModelWrapper(LightningModule):
             "aggregate": aggregate,
             "batches": summaries,
         }
+        if group_aggregate:
+            # Means over every rank's windows; "aggregate" above is rank 0's.
+            payload["group_aggregate"] = group_aggregate
         with open(out_dir / "aggregate_summary.json", "w") as f:
             json.dump(payload, f, indent=2)
 

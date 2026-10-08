@@ -806,7 +806,9 @@ def _validate_kitti360_training(config, variant: str) -> None:
     if str(OmegaConf.select(config, "data.mode")) != "nvs":
         raise ValueError("kitti360_dynamic requires data.mode=nvs")
     if bool(OmegaConf.select(config, "data.compact_val.enable", default=False)):
-        raise ValueError("kitti360_dynamic does not use the nuScenes compact_val manifest")
+        # The dataset checks the manifest's sampling contract when val loads.
+        if not str(OmegaConf.select(config, "data.compact_val.path", default="") or "").strip():
+            raise ValueError("kitti360_dynamic data.compact_val.enable=true requires data.compact_val.path")
     _require_choice(config, "data.pose_missing_policy", ("interpolate",))
     _require_choice(config, "data.panorama_projection", ("uniform", "hdl64e_kitti360_calibrated"))
     _require_positive(config, "data.window_stride_sec", "data.max_sweep_gap_sec", "data.max_depth_m")
