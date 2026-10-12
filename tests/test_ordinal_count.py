@@ -1,4 +1,7 @@
-"""V16's ordinal nested count: bounded gates, blend masks, masked rasterization."""
+"""V16's ordinal nested count: bounded gates, blend masks, masked rasterization.
+
+V16.1 is the same head with a random-prefix auxiliary render.
+"""
 from __future__ import annotations
 
 import math
@@ -230,6 +233,66 @@ def test_training_renders_every_slot_with_the_nested_blend_masks():
     assert auxiliary is None and "blend_mask" in routed
 
 
+def test_random_prefix_auxiliary_is_uniform_and_independent_of_the_router():
+    torch.manual_seed(11)
+    head = _head(auxiliary_render="random_prefix").train()
+    tokens = 6000
+    # Pin both gates at the bound: the router samples add ~91% of the time,
+    # yet the auxiliary prefixes stay uniform over {1, 3, 5}.
+    _fixed_router(head, torch.full((tokens, 2), SCALE))
+    feature = torch.randn(tokens, DIM)
+    anchor = torch.randn(tokens, 3)
+    routed, auxiliary, routing = head(feature, anchor)
+    # The routed set is V16's: every token's G1..G5 under blend masks.
+    assert routed["token_index"].numel() == 5 * tokens
+    assert "blend_mask" in routed
+    assert (routing["option"] == ADD).float().mean() > 0.85
+    counts = routing["auxiliary_count"]
+    assert counts.shape == (tokens,) and counts.dtype == torch.long
+    assert set(counts.unique().tolist()) == {1, 3, 5}
+    frequency = torch.bincount(counts, minlength=6)[[1, 3, 5]].float() / tokens
+    # The binomial standard error at p = 1/3, n = 6000 is 0.0061.
+    assert torch.all((frequency - 1.0 / 3.0).abs() < 0.03)
+    # Each token renders exactly its prefix G1..Gk, token-major and unmasked.
+    assert "blend_mask" not in auxiliary and "opacity_gate" not in auxiliary
+    assert torch.equal(
+        torch.bincount(auxiliary["token_index"], minlength=tokens), counts
+    )
+    assert torch.equal(
+        auxiliary["slot_index"],
+        torch.cat([torch.arange(int(k)) for k in counts]),
+    )
+    # They are the routed set's decoded Gaussians, slot for slot.
+    rows = auxiliary["token_index"] * 5 + auxiliary["slot_index"]
+    assert torch.equal(auxiliary["position"], routed["position"][rows])
+    for name in auxiliary["raw"]:
+        assert torch.equal(auxiliary["raw"][name], routed["raw"][name][rows])
+    # V16's dense render reports no per-token count, and evaluation has no
+    # auxiliary set at all.
+    _, _, dense_routing = _head().train()(feature[:8], anchor[:8])
+    assert "auxiliary_count" not in dense_routing
+    evaluation = _head(auxiliary_render="random_prefix").eval()
+    _, auxiliary, routing = evaluation(feature[:8], anchor[:8])
+    assert auxiliary is None and "auxiliary_count" not in routing
+
+
+def test_random_prefix_auxiliary_trains_the_decoder_but_not_the_router():
+    torch.manual_seed(12)
+    head = _head(auxiliary_render="random_prefix").train()
+    _routed, auxiliary, _routing = head(torch.randn(64, DIM), torch.randn(64, 3))
+    loss = auxiliary["position"].square().sum() + sum(
+        value.square().sum() for value in auxiliary["raw"].values()
+    )
+    loss.backward()
+    for module in (head.router, head.router_norm):
+        assert all(
+            parameter.grad is None or not parameter.grad.any()
+            for parameter in module.parameters()
+        )
+    assert head.decoder[-1].weight.grad is not None
+    assert head.decoder[-1].weight.grad.any()
+
+
 def test_sampled_gates_are_bernoulli_with_a_straight_through_sigmoid():
     head = _head(tau=0.5)
     gate_logits = torch.tensor([-2.0, -0.5, 0.0, 1.0, 2.5]).repeat(40000, 1)
@@ -458,6 +521,28 @@ def test_v16_backend_renders_only_the_most_probable_prefix_in_evaluation():
     assert sum(item["position"].shape[0] for item in output["batch_gaussians"]) == int(
         expected.sum()
     )
+
+
+def test_v16_1_backend_renders_random_prefixes_as_the_auxiliary_set():
+    torch.manual_seed(9)
+    backend = _v16_backend(auxiliary_render="random_prefix").train()
+    output = backend(*_v16_inputs())
+    # The routed set is V16's: every token's five Gaussians, 9 tokens a window.
+    assert [item["position"].shape[0] for item in output["batch_gaussians"]] == [45, 45]
+    auxiliary = output["auxiliary_batch_gaussians"]
+    tokens = 0
+    for item in auxiliary:
+        assert "blend_mask" not in item and "opacity_gate" not in item
+        token = item["source_token_index"]
+        for index in token.unique().tolist():
+            rows = token == index
+            k = int(rows.sum())
+            assert k in (1, 3, 5)
+            # A token renders G1..Gk and carries its own k.
+            assert torch.equal(item["gaussian_slot_index"][rows], torch.arange(k))
+            assert torch.equal(item["selected_k"][rows], torch.full((k,), k))
+            tokens += 1
+    assert tokens == 18
 
 
 # --------------------------------------------------------------------------

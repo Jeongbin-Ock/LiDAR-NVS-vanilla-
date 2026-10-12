@@ -26,7 +26,7 @@ Checkpoint resumes ignore all of these files and restore the embedded config.
 | Profile | Dataset / loader | Used by default for |
 | --- | --- | --- |
 | `data/nuscenes.yaml` | nuScenes, `nuscenes` (legacy keyframe windows, bbox mode) | V11-V13 |
-| `data/nuscenes_dynamic.yaml` | nuScenes, `nuscenes_dynamic_lidar4d` (random-duration) | V11.6, V12.2, V14-V16 |
+| `data/nuscenes_dynamic.yaml` | nuScenes, `nuscenes_dynamic_lidar4d` (random-duration) | V11.6, V12.2, V14-V16.1 |
 | `data/kitti360.yaml` | KITTI-360, `kitti360_dynamic`, calibrated 64×2178 GT | opt-in (`data_config=kitti360`) |
 | `data/kitti360_lidar4d.yaml` | KITTI-360, `kitti360_dynamic`, LiDAR4D uniform 66×1030 GT | opt-in (`data_config=kitti360_lidar4d`) |
 
@@ -60,6 +60,7 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v15_1
 python main.py model.variant=dynamic_2dgs_attention_velocity_v15_2
 python main.py model.variant=dynamic_2dgs_attention_velocity_v15_3
 python main.py model.variant=dynamic_2dgs_attention_velocity_v16
+python main.py model.variant=dynamic_2dgs_attention_velocity_v16_1
 ```
 
 A fresh run defaults to `dynamic_2dgs_attention_velocity_v11_4`. Every listed
@@ -83,7 +84,8 @@ that anchor and lets a router pick one, three or five (`nested_gumbel`); V15.2
 gives each of those three options its own expert (`expert_gumbel`), V15.3
 has no router and renders five Gaussians per token (`legacy`, `K_max: 5`), and
 V16 picks V15's prefixes with two bounded ordinal gates trained through masked
-rasterization (`nested_ordinal`).
+rasterization (`nested_ordinal`); V16.1 is V16 whose second training render is
+a uniformly random prefix per token.
 `p2g.grid_query` chooses between these, sets the fixed count and selects where
 seeds start (`seed_mode`) -- see "Gaussians per token" below.
 
@@ -702,11 +704,11 @@ Utonia at `train.lr` / `train.weight_decay`:
 | `utonia_layer_norm` | `train.lr` (5e-4) | 0 |
 | `downstream` (temporal, router, Gaussian and motion heads) | `train.lr` (5e-4) | 1e-4 |
 
-Since 2026-10-08 every hybrid overlay (V14 through V16) sets each Utonia role's
-`lr` to `${train.lr}`, so the whole model trains at one learning rate. Each role
-keeps its own weight decay. Before that date, `w_I` and the adapters trained at
-1e-3 and LoRA and LayerNorm at 5e-5. Checkpoints embed their resolved rates, so
-earlier runs resume unchanged.
+Since 2026-10-08 every hybrid overlay (V14 through V16.1) sets each Utonia
+role's `lr` to `${train.lr}`, so the whole model trains at one learning rate.
+Each role keeps its own weight decay. Before that date, `w_I` and the adapters
+trained at 1e-3 and LoRA and LayerNorm at 5e-5. Checkpoints embed their
+resolved rates, so earlier runs resume unchanged.
 
 Roles come from module types, so the 1-D `w_I` is a weight rather than a bias
 and a new adapter deep inside a pretrained block still trains at the adapter
@@ -820,9 +822,9 @@ validated rather than when the kernel launches.
 V15 keeps V14.1's temporal stack, loader and coordinate frame; its overlay
 differs from V14.1's in exactly the five changes above.
 
-**V15.1, V15.2, V15.3 and V16** keep every V15 key above -- stem, optimizer
-groups, temporal stack without LayerScale, local attention, loader -- and change
-only how the Gaussian head turns a token into Gaussians:
+**V15.1, V15.2, V15.3, V16 and V16.1** keep every V15 key above -- stem,
+optimizer groups, temporal stack without LayerScale, local attention, loader --
+and change only how the Gaussian head turns a token into Gaussians:
 
 | Variant | Count contract | Rendered per token | Training renders |
 | --- | --- | --- | --- |
@@ -831,6 +833,7 @@ only how the Gaussian head turns a token into Gaussians:
 | V15.2 | `expert_gumbel` | router: expert E1 / E3 / E5 on one shared trunk | routed set + every token's E5, mean of the two losses |
 | V15.3 | `legacy`, `K_max: 5`, `seed_mode: token` | all five decoded Gaussians, no router | one render |
 | V16 | `nested_ordinal` | V15's prefixes, chosen by a keep gate and an add gate (cosine logits, \|u\| <= 3) | every token's G1..G5 with blend masks (masked rasterization) + every token's G1..G5 unmasked at 2 views, mean of the two losses |
+| V16.1 | `nested_ordinal` | as V16 | V16's masked routed set + every token's G1..Gk unmasked at 2 views, k drawn uniformly from {1, 3, 5} per token and step, mean of the two losses |
 
 V15.2's head is `LN(f) -> Linear(432, 576) -> SiLU` shared, then three linear
 experts `576 -> 1x42`, `576 -> 3x42`, `576 -> 5x42` (the second layer predicts
@@ -1068,9 +1071,9 @@ rendered rows count from `gaussian_slot_index` 0 within its expert, so the
 velocity prior still counts every token once. `expert_gumbel` is rejected for
 every variant but V15.2, and V15.2 rejects every other count mode.
 
-**Ordinal nested count (`count_mode: nested_ordinal`).** V16 only. The token
-anchor, V15's G1..G5 decoder and the nested choices reduce {G1}, keep {G1..G3}
-and add {G1..G5} are the nested count's; the block lives under
+**Ordinal nested count (`count_mode: nested_ordinal`).** V16 and V16.1. The
+token anchor, V15's G1..G5 decoder and the nested choices reduce {G1}, keep
+{G1..G3} and add {G1..G5} are the nested count's; the block lives under
 `p2g.grid_query.ordinal_count`, with the nested keys plus `router_scale`:
 
 ```yaml
@@ -1084,7 +1087,8 @@ p2g:
       decoder_hidden: 576
       router_hidden: [256, 128]
       router_scale: 3.0             # fixed cosine scale of both gates, positive
-      auxiliary_render: dense_add   # dense_add | none; V16 requires dense_add
+      auxiliary_render: dense_add   # dense_add | random_prefix | none;
+                                    # V16: dense_add, V16.1: random_prefix
       auxiliary_views: 2            # optional; null/absent = every target view
       logging:                      # optional, as for nested_count
         enable: true
@@ -1115,13 +1119,18 @@ mask does: `dL/dmask` is the first-order change of the loss from inserting it
 (at mask 1, from removing it). So every token's gates learn from both sides,
 whichever option it sampled; a reduce token sends its keep gate the slope of
 inserting G2/G3 (with G4/G5 when the add gate was sampled open) and nothing to
-the add gate. `dense_add` also renders every token's G1..G5 unmasked at
+the add gate. The second render is unmasked and router-free, at
 `auxiliary_views` target views, so the Gaussians a token did not render keep
-training; the optimized loss is the mean of the two renders' losses (`aux_*` /
+training: `dense_add` (V16) renders every token's G1..G5; `random_prefix`
+(V16.1) renders every token's G1..Gk with k drawn uniformly from {1, 3, 5} per
+token and step, independently of the gates, so G1 alone, G1..G3 and G1..G5
+each get a third of the auxiliary renders whatever the router prefers. The
+optimized loss is the mean of the two renders' losses (`aux_*` /
 `routed_total` are logged as in V15). Evaluation renders each token's chosen
 prefix without masks, which for 0/1 masks is exactly the training render of the
 same choice. There is no Gaussian-count cost. `nested_ordinal` is rejected for
-every variant but V16, and V16 rejects every other count mode.
+every variant but V16 and V16.1, both reject every other count mode, and each
+pins its own `auxiliary_render`.
 
 **V15.3's fixed five.** V15.3 has no router. Its count is the ordinary
 fixed-count contract pinned to `count_mode: legacy`, `K_max: 5`,

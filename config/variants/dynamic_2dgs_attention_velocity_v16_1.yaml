@@ -1,0 +1,171 @@
+# Bbox-free Dynamic 2DGS V16.1.
+#
+# V16 with a different second training render; every other key is V16's
+# (config/variants/dynamic_2dgs_attention_velocity_v16.yaml): V15's stack and
+# G1..G5 decoder around the token anchor, the two bounded ordinal gates
+# (router_scale 3, keep = G2/G3, add = G4/G5 given G2/G3) and masked
+# rasterization of the routed set.
+#
+# V16's second render is every token's G1..G5 (dense_add): the five-Gaussian
+# set trains on every step whatever the router picks, while G1 alone and
+# G1..G3 train only when the router samples them. V16.1 instead renders, for
+# every token, a prefix of G1..G5 whose length is drawn uniformly from
+# {1, 3, 5} on each step, independently of the gates (auxiliary_render:
+# random_prefix). G1 alone, G1..G3 and G1..G5 each get a third of the
+# auxiliary renders whatever the router prefers, and Gaussians a token did not
+# render still train. The render uses 2 target views per window
+# (auxiliary_views: 2); training optimizes the mean of the routed and the
+# random-prefix render losses, and evaluation renders the chosen prefix only.
+#
+# There is no Gaussian-count cost.
+model:
+  variant: dynamic_2dgs_attention_velocity_v16_1
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  utonia_adaptation:
+    mode: hybrid
+    lora_targets: [attention, cpe, pooling]
+    train_layer_norm: true
+    stem:
+      train_intensity_column: true
+      adapter_position: post_activation
+      adapter_hidden: 16
+      adapter_activation: gelu
+      adapter_scale: 1.0
+    ffn_adapter:
+      widths: [8, 16, 32, 64]
+      activation: relu
+      scale: 0.1
+      dropout: 0.0
+  grid_query:
+    count_mode: nested_ordinal
+    ordinal_count:
+      option_counts: [1, 3, 5]
+      seed_mode: token
+      # Temperature of the gates' straight-through sigmoid((u + noise) / tau).
+      tau: 1.0
+      decoder_hidden: 576
+      router_hidden: [256, 128]
+      # Fixed cosine scale of both gates: |u| <= 3, so q stays in [0.047, 0.953].
+      router_scale: 3.0
+      # Each token renders a prefix of G1..G5 whose length is drawn uniformly
+      # from {1, 3, 5} every step, independently of the router.
+      auxiliary_render: random_prefix
+      # The random-prefix render uses 2 of each window's target views, drawn
+      # uniformly from all of them (inputs and novel sweeps) every step.
+      auxiliary_views: 2
+      logging:
+        enable: true
+        interval: 20
+        range_edges_m: [0, 10, 20, 30, 40, 60, 80, 110]
+
+train:
+  # One learning rate for the whole model: since 2026-10-08 every Utonia role
+  # follows train.lr (previously 1e-3 intensity/adapter, 5e-5 LoRA/LayerNorm).
+  # Each role keeps its weight decay; earlier checkpoints resume with the rates
+  # embedded in their config.
+  utonia_param_groups:
+    intensity:
+      lr: ${train.lr}
+      weight_decay: 1.0e-4
+    adapter:
+      lr: ${train.lr}
+      weight_decay: 1.0e-4
+      bias_weight_decay: 0.0
+    lora:
+      lr: ${train.lr}
+      weight_decay: 1.0e-4
+    layer_norm:
+      lr: ${train.lr}
+      weight_decay: 0.0
+  # Names relative to Point2Gaus. These parameters train at train.lr with no
+  # weight decay, in a last `downstream_no_decay` group.
+  downstream_no_decay: [dynamic_backend.temporal.v_raw]
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+
+# Default training data: config/data/nuscenes_dynamic.yaml, the random-duration
+# loader with the two LiDAR4D scenes held out. data_config=<name> picks another.
+data_config: nuscenes_dynamic
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 12
+    mlp_ratio: 4
+
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # V14.1's linear hinge at the learned global speed:
+    #   bias_ij = -relu(d_ij / (softplus(v_raw) * |dt|) - 1).
+    # This 30 m/s value initializes v_raw; after construction the active speed
+    # comes from the parameter, not from the config value.
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+
+    # Heads 1-11 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band.
+    rope_base: 100.0
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    # No LayerScale: every layer adds out_proj(attended) to the residual stream
+    # as is. layer_scale_init would have nothing to initialize, so it is absent.
+    layer_scale: false
+
+  # One pre-LN block after the temporal stack: x + Attn(LN(x)), then
+  # + FFN(LN(.)) with a SiLU FFN whose last layer starts at zero. Every token
+  # attends to all tokens of both sweeps within radius_m at their reference-frame
+  # positions (itself included), without QK RMSNorm or LayerScale. 3D RoPE at
+  # base 10^1.2 and 2*pi/0.4 rad/m gives six wavelengths per axis from 0.4 m (the
+  # voxel) to 4.0 m; the longest half-wavelength, 2 m, exceeds the 0.8 m radius.
+  # query_chunk_size is how many queries (one FlashAttention2 varlen sequence
+  # each) go into one call; FlashAttention2 takes at most 65535.
+  local_attention:
+    radius_m: 0.8
+    num_heads: 12
+    mlp_ratio: 4
+    rope_base: 15.848931924611133      # 10^1.2
+    rope_position_scale: 15.707963267948966  # 2*pi/0.4 -> wavelengths 0.4-4.0 m
+    implementation: flash_varlen
+    query_chunk_size: 4096
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+loss:
+  w_chamfer: 0.02

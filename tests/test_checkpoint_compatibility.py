@@ -91,6 +91,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v16": (
         "OrdinalCountBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v16_1": (
+        "OrdinalCountBarrierVelocityGaussianBackend"
+    ),
 }
 
 
@@ -208,6 +211,11 @@ _PRE_REFACTOR_MANIFEST = {
     # V16 is V15 with the router's last layer swapped for two bias-free cosine
     # gates: router.4 holds one (2, 128) weight instead of (3, 128) + bias.
     "dynamic_2dgs_attention_velocity_v16": (
+        "db3159b8dc10ce6df033", "8404a6a2e2418a971004"
+    ),
+    # V16.1 changes only V16's second training render, which owns no
+    # parameter, so its checkpoint and optimizer schemas are exactly V16's.
+    "dynamic_2dgs_attention_velocity_v16_1": (
         "db3159b8dc10ce6df033", "8404a6a2e2418a971004"
     ),
 }
@@ -600,6 +608,19 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
         )
         self.assertEqual(backend.local_attention.radius_m, 0.8)
         self.assertIsNone(backend.temporal.cross_layer_scale)
+
+    def test_v16_1_is_v16_with_a_random_prefix_auxiliary_render(self):
+        v16 = _build_backend("dynamic_2dgs_attention_velocity_v16")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v16_1")
+        self.assertIs(type(backend), type(v16))
+        self.assertEqual(
+            [(name, tuple(value.shape)) for name, value in backend.state_dict().items()],
+            [(name, tuple(value.shape)) for name, value in v16.state_dict().items()],
+        )
+        self.assertEqual(v16.gaussian_head.auxiliary_render, "dense_add")
+        self.assertEqual(
+            backend.gaussian_head.auxiliary_render, "random_prefix"
+        )
 
     def test_single_seed_slot_preserves_the_legacy_geometry_transform(self):
         """The new explicit slot axis must preserve legacy (N, 3) inputs."""

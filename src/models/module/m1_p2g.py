@@ -189,6 +189,7 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V15_2,
             DYNAMIC_VARIANT_V15_3,
             DYNAMIC_VARIANT_V16,
+            DYNAMIC_VARIANT_V16_1,
         )
         from .dynamic_gaussian import (
             CosineRoPEVelocityGaussianBackend,
@@ -273,6 +274,7 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V15_2: OptionExpertBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V15_3: DenseCountBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V16: OrdinalCountBarrierVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V16_1: OrdinalCountBarrierVelocityGaussianBackend,
         }.get(self.dynamic_variant)
         if backend_cls is None:
             raise ValueError(

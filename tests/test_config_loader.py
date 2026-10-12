@@ -39,6 +39,7 @@ from src.experiment_config import (
     DYNAMIC_VARIANT_V15_2,
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V16,
+    DYNAMIC_VARIANT_V16_1,
     DYNAMIC_VARIANTS,
     DENSE_COUNT_DYNAMIC_VARIANTS,
     EXPERT_AUXILIARY_RENDER_BY_VARIANT,
@@ -1805,7 +1806,7 @@ class V15ConfigTest(unittest.TestCase):
         self.assertEqual(V15_FAMILY_DYNAMIC_VARIANTS, (
             DYNAMIC_VARIANT_V15, DYNAMIC_VARIANT_V15_1,
             DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3,
-            DYNAMIC_VARIANT_V16,
+            DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1,
         ))
         for group in (
             LOCAL_ATTENTION_DYNAMIC_VARIANTS,
@@ -2494,13 +2495,21 @@ class V16ConfigTest(unittest.TestCase):
             DENSE_COUNT_DYNAMIC_VARIANTS,
         ):
             self.assertNotIn(DYNAMIC_VARIANT_V16, group)
-        self.assertEqual(ORDINAL_COUNT_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V16,))
+        self.assertEqual(
+            ORDINAL_COUNT_DYNAMIC_VARIANTS,
+            (DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1),
+        )
         self.assertEqual(ORDINAL_COUNT_MODE, "nested_ordinal")
         self.assertEqual(ORDINAL_COUNT_OPTION_COUNTS, (1, 3, 5))
-        self.assertEqual(ORDINAL_AUXILIARY_RENDERS, ("dense_add", "none"))
+        self.assertEqual(
+            ORDINAL_AUXILIARY_RENDERS, ("dense_add", "random_prefix", "none")
+        )
         self.assertEqual(
             ORDINAL_AUXILIARY_RENDER_BY_VARIANT,
-            {DYNAMIC_VARIANT_V16: "dense_add"},
+            {
+                DYNAMIC_VARIANT_V16: "dense_add",
+                DYNAMIC_VARIANT_V16_1: "random_prefix",
+            },
         )
 
     def test_v16_is_v15_with_the_ordinal_count(self):
@@ -2574,13 +2583,14 @@ class V16ConfigTest(unittest.TestCase):
                     ValueError, f"ordinal_count is missing keys: {key}"
                 ):
                     validate_experiment_config(OmegaConf.create(container))
-        # The ordinal count is V16's alone, and its scale only its own key.
+        # The ordinal count is V16's and V16.1's alone, and its scale only its
+        # own key.
         for variant in DYNAMIC_VARIANTS:
-            if variant == DYNAMIC_VARIANT_V16:
+            if variant in ORDINAL_COUNT_DYNAMIC_VARIANTS:
                 continue
             with self.subTest(variant=variant):
                 self._rejected(
-                    "only available to V16",
+                    "only available to V16, V16.1",
                     "p2g.grid_query.count_mode=nested_ordinal",
                     variant=variant,
                 )
@@ -2609,6 +2619,98 @@ class V16ConfigTest(unittest.TestCase):
                         resolve_main_config(OmegaConf.from_dotlist([
                             f"train.ckpt_path={checkpoint}", override,
                         ]))
+
+
+
+class V16_1ConfigTest(unittest.TestCase):
+    """V16.1: V16 whose second render is a uniformly random prefix per token."""
+
+    BLOCK = "p2g.grid_query.ordinal_count."
+
+    @staticmethod
+    def _compose(*overrides, variant=DYNAMIC_VARIANT_V16_1):
+        return compose_fresh_config(OmegaConf.from_dotlist([
+            f"model.variant={variant}", *overrides,
+        ]))
+
+    def _rejected(self, message, *overrides, variant=DYNAMIC_VARIANT_V16_1):
+        with self.assertRaisesRegex(ValueError, message):
+            self._compose(*overrides, variant=variant)
+
+    def test_registration(self):
+        self.assertIn(DYNAMIC_VARIANT_V16_1, DYNAMIC_VARIANTS)
+        self.assertTrue(VARIANT_CONFIG_PATHS[DYNAMIC_VARIANT_V16_1].is_file())
+        for group in (
+            BARRIER_MATCH_DYNAMIC_VARIANTS,
+            HYBRID_UTONIA_DYNAMIC_VARIANTS,
+            V15_FAMILY_DYNAMIC_VARIANTS,
+            LOCAL_ATTENTION_DYNAMIC_VARIANTS,
+            NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS,
+            POST_ACTIVATION_STEM_DYNAMIC_VARIANTS,
+            ORDINAL_COUNT_DYNAMIC_VARIANTS,
+        ):
+            self.assertIn(DYNAMIC_VARIANT_V16_1, group)
+        for group in (
+            ROUTER_CAPABLE_DYNAMIC_VARIANTS,
+            NESTED_COUNT_DYNAMIC_VARIANTS,
+            EXPERT_COUNT_DYNAMIC_VARIANTS,
+            DENSE_COUNT_DYNAMIC_VARIANTS,
+        ):
+            self.assertNotIn(DYNAMIC_VARIANT_V16_1, group)
+
+    def test_v16_1_is_v16_with_the_random_prefix_render(self):
+        v16, _ = self._compose(variant=DYNAMIC_VARIANT_V16)
+        v16_1, _ = self._compose()
+        a = V15SiblingConfigTest._leaves(OmegaConf.to_container(v16, resolve=True))
+        b = V15SiblingConfigTest._leaves(OmegaConf.to_container(v16_1, resolve=True))
+        changed = {
+            key for key in set(a) | set(b)
+            if a.get(key, "<absent>") != b.get(key, "<absent>")
+        }
+        self.assertEqual(changed, {
+            "model.variant", "exp_name", "logger.dir",
+            self.BLOCK + "auxiliary_render",
+        })
+        self.assertEqual(b[self.BLOCK + "auxiliary_render"], "random_prefix")
+        self.assertEqual(b[self.BLOCK + "auxiliary_views"], 2)
+
+    def test_each_ordinal_variant_pins_its_auxiliary_render(self):
+        render = self.BLOCK + "auxiliary_render"
+        self._rejected(
+            "auxiliary_render='random_prefix', got 'dense_add'",
+            render + "=dense_add",
+        )
+        self._rejected(
+            "auxiliary_render='dense_add', got 'random_prefix'",
+            render + "=random_prefix", variant=DYNAMIC_VARIANT_V16,
+        )
+        self._rejected("renders no auxiliary set", render + "=none")
+        self._rejected("auxiliary_render must be one of", render + "=dense_keep")
+        # The random prefix is the ordinal block's render only.
+        self._rejected(
+            "auxiliary_render must be one of",
+            "p2g.grid_query.nested_count.auxiliary_render=random_prefix",
+            variant=DYNAMIC_VARIANT_V15,
+        )
+
+    def test_checkpoints_protect_the_random_prefix_render(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "v16_1.ckpt"
+            stored, _ = self._compose()
+            torch.save({
+                "experiment_config": OmegaConf.to_container(stored, resolve=True)
+            }, checkpoint)
+            config, _source = load_checkpoint_config(checkpoint)
+            self.assertEqual(config.model.variant, DYNAMIC_VARIANT_V16_1)
+            self.assertEqual(
+                config.p2g.grid_query.ordinal_count.auxiliary_render,
+                "random_prefix",
+            )
+            with self.assertRaisesRegex(ValueError, "changed roots"):
+                resolve_main_config(OmegaConf.from_dotlist([
+                    f"train.ckpt_path={checkpoint}",
+                    self.BLOCK + "auxiliary_render=dense_add",
+                ]))
 
 
 if __name__ == "__main__":

@@ -224,7 +224,8 @@ class ModelWrapper(LightningModule):
         p2g_out = self.p2g_model(_input)
         # Keep detached diagnostics outside the renderer/temporal model input.
         routing_stats = p2g_out.pop("routing_stats", None)
-        # Only V15, V15.2 and V16 emit this second Gaussian set, in training only.
+        # Only V15, V15.2, V16 and V16.1 emit this second Gaussian set, in
+        # training only.
         auxiliary_gaussians = p2g_out.pop("auxiliary_batch_gaussians", None)
         out = self.g2g_model(
             p2g_out,
@@ -280,12 +281,13 @@ class ModelWrapper(LightningModule):
         script see; V16's training renders it as every G1..G5 under blend
         masks. During training the backend also emits a router-free set (V15:
         every token's keep prefix G1..G3; V15.2: every token's E5; V16: every
-        token's G1..G5), so the decoder is supervised on every token at every
-        step. Both sets share one forward pass, velocity and target views; the
-        optimized render loss is ``0.5 * (routed + router-free)``, and the
-        velocity prior is added once afterwards, exactly as for a single
-        render. The router-free set is rendered at every target view, or at
-        ``auxiliary_views`` of them per window (see
+        token's G1..G5; V16.1: a prefix of G1..G5 per token, its length drawn
+        uniformly from {1, 3, 5}), so the decoder is supervised on every token
+        at every step. Both sets share one forward pass, velocity and target
+        views; the optimized render loss is ``0.5 * (routed + router-free)``,
+        and the velocity prior is added once afterwards, exactly as for a
+        single render. The router-free set is rendered at every target view,
+        or at ``auxiliary_views`` of them per window (see
         ``_auxiliary_render_targets``).
         """
         auxiliary = self.g2g_model(

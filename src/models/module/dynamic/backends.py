@@ -1099,9 +1099,13 @@ class LocalAttentionBarrierVelocityGaussianBackend(DynamicGaussianBackend):
                 "token_position_local": token_position_local.detach(),
             }
         if auxiliary is not None:
-            auxiliary_count = torch.full_like(
-                token_count, self.gaussian_head.auxiliary_count
-            )
+            # A random-prefix auxiliary render (V16.1) reports each token's
+            # own count; every other one renders auxiliary_count per token.
+            auxiliary_count = routing.get("auxiliary_count")
+            if auxiliary_count is None:
+                auxiliary_count = torch.full_like(
+                    token_count, self.gaussian_head.auxiliary_count
+                )
             output["auxiliary_batch_gaussians"] = self._token_gaussian_fields(
                 auxiliary, geometry, token_velocity, token_motion_fields,
                 auxiliary_count, sample_count,
@@ -1155,14 +1159,15 @@ class OptionExpertBarrierVelocityGaussianBackend(
 class OrdinalCountBarrierVelocityGaussianBackend(
     LocalAttentionBarrierVelocityGaussianBackend
 ):
-    """V16: V15's nested G1..G5, chosen by two bounded ordinal gates.
+    """V16 and V16.1: V15's nested G1..G5, chosen by two bounded ordinal gates.
 
     :class:`OrdinalCountGaussianHead` decodes G1..G5 around the token anchor
     with V15's decoder; a keep gate (G2/G3) and an add gate (G4/G5 given
     G2/G3) pick ``{G1}``, ``{G1..G3}`` or ``{G1..G5}``. In training the routed
     set is every token's G1..G5 carrying per-Gaussian ``blend_mask`` values for
-    masked rasterization, and the auxiliary set is the same Gaussians
-    unmasked; evaluation renders each token's most probable prefix.
+    masked rasterization. The auxiliary set is unmasked: V16's is the same
+    G1..G5, V16.1's a prefix per token whose length is drawn uniformly from
+    {1, 3, 5}. Evaluation renders each token's most probable prefix.
     """
 
     def _build_gaussian_head(self, cfg, gs_params, offset_bound,

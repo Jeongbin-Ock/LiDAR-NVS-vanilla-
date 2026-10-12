@@ -33,9 +33,13 @@ sampled and trained.
   learn from inserting G2/G3 (and, when the add gate was sampled open, G2..G5),
   a keep token's from removing G2/G3 and inserting G4/G5, an add token's from
   removing them. Absent Gaussians get no gradient on their own attributes.
-* **The router-free second render** (``auxiliary_render: dense_add``) is every
-  token's G1..G5, unmasked, so the absent Gaussians keep training whatever the
-  router chose.
+* **The router-free second render** is unmasked, so the Gaussians a token did
+  not render keep training whatever the router chose. ``dense_add`` (V16)
+  renders every token's G1..G5. ``random_prefix`` (V16.1) renders, for every
+  token, a prefix of G1..G5 whose length is drawn uniformly from {1, 3, 5} on
+  each step, independently of the gates: G1 alone, G1..G3 and G1..G5 each
+  get a third of the auxiliary renders, so no option's Gaussians are trained
+  mostly in the five-Gaussian set just because the router prefers it.
 
 Evaluation renders only the chosen prefix, without masks; for hard 0/1 masks
 this is exactly the training render of the same choice.
@@ -109,8 +113,10 @@ class OrdinalCountGaussianHead(NestedCountGaussianHead):
 
     ``forward`` keeps the routed heads' ``(routed, auxiliary, routing)``
     contract. In training ``routed`` is every token's G1..G5 with
-    ``blend_mask`` and ``auxiliary`` the same Gaussians without it; in
-    evaluation ``routed`` is each token's most probable prefix and there is no
+    ``blend_mask`` and ``auxiliary`` is unmasked: the same Gaussians
+    (``dense_add``) or each token's random prefix (``random_prefix``, whose
+    per-token lengths ``routing["auxiliary_count"]`` carries). In evaluation
+    ``routed`` is each token's most probable prefix and there is no
     auxiliary set. ``routing["logits"]`` holds the option log-probabilities, so
     the routing statistics read them as they read V15's scores: their softmax
     is ``p`` and their argmax the evaluation choice.
@@ -123,7 +129,11 @@ class OrdinalCountGaussianHead(NestedCountGaussianHead):
 
     @property
     def auxiliary_count(self) -> int:
-        """``dense_add`` renders every token's G1..G5."""
+        """``dense_add`` renders every token's G1..G5.
+
+        ``random_prefix`` draws a count per token instead and returns it as
+        ``routing["auxiliary_count"]``, which the backend reads first.
+        """
         return self.max_count
 
     def _build_router_output(self, width, settings):
@@ -155,6 +165,17 @@ class OrdinalCountGaussianHead(NestedCountGaussianHead):
         soft = torch.sigmoid(noisy)
         # Subtract first so the forward is bit-exactly the hard sample.
         return sampled.to(soft.dtype) + (soft - soft.detach()), sampled
+
+    def _random_prefix_counts(self, tokens, device):
+        """Each token's auxiliary prefix length, uniform over {1, 3, 5}.
+
+        Drawn after the gates and independently of them, so the router never
+        decides which prefix the auxiliary render trains.
+        """
+        choice = torch.randint(
+            len(self.option_counts), (tokens,), device=device
+        )
+        return self.option_count_values[choice]
 
     def _blend_mask(self, gates, token_index, slot_index):
         """Each packed Gaussian's blend mask under the nested prefixes, (M, 1).
@@ -190,12 +211,18 @@ class OrdinalCountGaussianHead(NestedCountGaussianHead):
         log_probability = option_log_probabilities(gate_logits)
 
         auxiliary = None
+        auxiliary_count = None
         if self.training:
             gates, sampled = self._sample_gates(gate_logits)
             option = sampled[:, 0].long() * (1 + sampled[:, 1].long())
             routed = self._dense_set(decoded, anchor, self.max_count)
-            if self.auxiliary_render != "none":
+            if self.auxiliary_render == "dense_add":
                 auxiliary = {**routed, "raw": dict(routed["raw"])}
+            elif self.auxiliary_render == "random_prefix":
+                auxiliary_count = self._random_prefix_counts(
+                    feature.shape[0], feature.device
+                )
+                auxiliary = self._prefix_set(decoded, anchor, auxiliary_count)
             routed["blend_mask"] = self._blend_mask(
                 gates, routed["token_index"], routed["slot_index"]
             )
@@ -204,12 +231,15 @@ class OrdinalCountGaussianHead(NestedCountGaussianHead):
             option = log_probability.argmax(dim=-1)
             count = self.option_count_values[option]
             routed = self._prefix_set(decoded, anchor, count)
-        return routed, auxiliary, {
+        routing = {
             "logits": log_probability,
             "gate_logits": gate_logits,
             "option": option,
             "count": count,
         }
+        if auxiliary_count is not None:
+            routing["auxiliary_count"] = auxiliary_count
+        return routed, auxiliary, routing
 
 
 __all__ = [

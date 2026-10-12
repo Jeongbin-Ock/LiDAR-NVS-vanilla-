@@ -17,7 +17,7 @@ module that owns a symbol:
   subclass per head: `NestedCountBarrierVelocityGaussianBackend` (V15/V15.1),
   `OptionExpertBarrierVelocityGaussianBackend` (V15.2),
   `DenseCountBarrierVelocityGaussianBackend` (V15.3) and
-  `OrdinalCountBarrierVelocityGaussianBackend` (V16)
+  `OrdinalCountBarrierVelocityGaussianBackend` (V16/V16.1)
 - `local_attention.py`: V15's pre-LN radius local-attention block over both
   sweeps' tokens in the window reference frame
 - `gaussian_slots.py`: the token-anchored Gaussian slot layout, initialization
@@ -28,10 +28,11 @@ module that owns a symbol:
   (`NestedCountGaussianHead`)
 - `option_experts.py`: V15.2's `OptionExpertGaussianHead`, E1/E3/E5 linear
   experts on one shared trunk
-- `ordinal_count.py`: V16's `OrdinalCountGaussianHead`, V15's G1..G5 decoder
-  under two bounded ordinal gates (`CosineGateLayer`), whose training routed
-  set carries per-Gaussian `blend_mask` values for the rasterizer's masked
-  blending
+- `ordinal_count.py`: V16's and V16.1's `OrdinalCountGaussianHead`, V15's
+  G1..G5 decoder under two bounded ordinal gates (`CosineGateLayer`), whose
+  training routed set carries per-Gaussian `blend_mask` values for the
+  rasterizer's masked blending; its auxiliary set is every G1..G5 (V16) or a
+  uniformly random prefix per token (V16.1)
 - `trajectory.py`: output trajectory contract validation
 
 Config variant names in the table omit their shared `dynamic_2dgs_` prefix.
@@ -61,6 +62,7 @@ Every variant's velocity head is `EmbeddedInitVelocityHead`.
 | `attention_velocity_v15_2` | `OptionExpertBarrierVelocityGaussianBackend` | V15's, unchanged | V15's router over per-option experts E1/E3/E5 (linear readouts of one shared 576-wide trunk), every Gaussian of the chosen expert gated; training also renders every token's E5 and averages the two render losses |
 | `attention_velocity_v15_3` | `DenseCountBarrierVelocityGaussianBackend` | V15's, unchanged | no router: V15's decoder renders all five Gaussians of every token (fixed `K_max: 5`, token anchor) |
 | `attention_velocity_v16` | `OrdinalCountBarrierVelocityGaussianBackend` | V15's, unchanged | V15's nested G1..G5, chosen by a keep gate (G2/G3) and an add gate (G4/G5 given G2/G3), cosine logits bounded by 3, hard Bernoulli samples with a straight-through sigmoid; training renders every G1..G5 under blend masks (masked rasterization) plus every token's G1..G5 unmasked at 2 views and averages the two render losses |
+| `attention_velocity_v16_1` | `OrdinalCountBarrierVelocityGaussianBackend` | V15's, unchanged | V16, except that the unmasked auxiliary render is each token's G1..Gk with k drawn uniformly from {1, 3, 5} per step, independently of the router |
 
 Checkpoint compatibility depends on the registered module tree, parameter
 assignment order, and tensor shapes, not on class names: Lightning checkpoints

@@ -31,6 +31,7 @@ DYNAMIC_VARIANT_V15_1 = "dynamic_2dgs_attention_velocity_v15_1"
 DYNAMIC_VARIANT_V15_2 = "dynamic_2dgs_attention_velocity_v15_2"
 DYNAMIC_VARIANT_V15_3 = "dynamic_2dgs_attention_velocity_v15_3"
 DYNAMIC_VARIANT_V16 = "dynamic_2dgs_attention_velocity_v16"
+DYNAMIC_VARIANT_V16_1 = "dynamic_2dgs_attention_velocity_v16_1"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
 # explicit constant for each variant so checkpoint semantics stay exact.
 DYNAMIC_VARIANT = DYNAMIC_VARIANT_V11_4
@@ -114,7 +115,9 @@ FLASH_ROPE_MATCH_DYNAMIC_VARIANTS = (
 # stack and change only the Gaussian head: V15.2 gives each router option its
 # own expert, V15.3 drops the router and renders five Gaussians per token.
 # V16 keeps V15's stack and G1..G5 decoder and changes the router: two bounded
-# ordinal gates trained through masked rasterization.
+# ordinal gates trained through masked rasterization. V16.1 is V16 whose second
+# training render is a uniformly random prefix of G1..G5 per token instead of
+# every token's G1..G5.
 # V11.2 gives head 0 RoPE too and moves the barrier to a single post-refinement
 # readout head with its own gain, which is what lets its layer stack run
 # entirely on FlashAttention.
@@ -136,6 +139,7 @@ BARRIER_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_2,
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V16,
+    DYNAMIC_VARIANT_V16_1,
 )
 DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11,
@@ -160,6 +164,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_2,
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V16,
+    DYNAMIC_VARIANT_V16_1,
 )
 # Variants whose Utonia encoder is adapted by p2g.utonia_adaptation.mode=hybrid:
 # frozen XYZ stem columns plus a trained intensity column and a nonlinear stem
@@ -170,15 +175,16 @@ DYNAMIC_VARIANTS = (
 # V14.1 put the stem adapter before the stem LayerNorm; V15 puts it after the
 # activation (see POST_ACTIVATION_STEM_DYNAMIC_VARIANTS). Only these variants
 # have per-role optimizer groups, so only they accept train.downstream_no_decay.
-# Every V15-family variant (V15, V15.1, V15.2, V15.3, V16) shares V15's Utonia
-# adaptation, temporal stack and local-attention block; they differ only in how
-# the Gaussian head turns a token into Gaussians.
+# Every V15-family variant (V15, V15.1, V15.2, V15.3, V16, V16.1) shares V15's
+# Utonia adaptation, temporal stack and local-attention block; they differ only
+# in how the Gaussian head turns a token into Gaussians.
 V15_FAMILY_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15,
     DYNAMIC_VARIANT_V15_1,
     DYNAMIC_VARIANT_V15_2,
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V16,
+    DYNAMIC_VARIANT_V16_1,
 )
 HYBRID_UTONIA_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V14,
@@ -205,7 +211,8 @@ DENSE_COUNT_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V15_3,)
 # V16's ordinal nested count (p2g.grid_query.count_mode=nested_ordinal): V15's
 # G1..G5 prefixes, chosen by two bounded gates (G2/G3 present; G4/G5 present
 # given G2/G3) that train through masked rasterization of all five Gaussians.
-ORDINAL_COUNT_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V16,)
+# V16.1 differs from V16 only in its router-free second render.
+ORDINAL_COUNT_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1)
 # V15 runs one radius local-attention block (dynamic_2dgs.local_attention) after
 # the temporal stack. The velocity offset head still reads the stack's output.
 LOCAL_ATTENTION_DYNAMIC_VARIANTS = V15_FAMILY_DYNAMIC_VARIANTS
@@ -327,14 +334,18 @@ EXPERT_AUXILIARY_RENDER_BY_VARIANT = {
 # ends in two cosine gates at the fixed scale ``router_scale`` -- keep (G2/G3
 # present) and add (G4/G5 present given G2/G3) -- sampled as hard Bernoulli
 # gates with a straight-through backward. Training renders all five Gaussians
-# of every token with per-Gaussian blend masks (masked rasterization), and
-# ``dense_add`` also renders every token's G1..G5 unmasked; ``none`` renders the
-# masked set alone.
+# of every token with per-Gaussian blend masks (masked rasterization). The
+# second training render is unmasked and router-free: ``dense_add`` renders
+# every token's G1..G5; ``random_prefix`` renders, for every token, a prefix
+# of G1..G5 whose length is drawn uniformly from {1, 3, 5} each step; ``none``
+# renders the masked set alone.
 ORDINAL_COUNT_MODE = "nested_ordinal"
 ORDINAL_COUNT_OPTION_COUNTS = NESTED_COUNT_OPTION_COUNTS
-ORDINAL_AUXILIARY_RENDERS = ("dense_add", "none")
+ORDINAL_AUXILIARY_RENDERS = ("dense_add", "random_prefix", "none")
+# The auxiliary render is what separates V16 from V16.1.
 ORDINAL_AUXILIARY_RENDER_BY_VARIANT = {
     "dynamic_2dgs_attention_velocity_v16": "dense_add",
+    "dynamic_2dgs_attention_velocity_v16_1": "random_prefix",
 }
 # The count modes whose router picks 1, 3 or 5 Gaussians after the local
 # refinement, each with the p2g.grid_query block that configures it.
