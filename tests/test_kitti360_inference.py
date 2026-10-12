@@ -392,6 +392,8 @@ class KITTI360InferenceTest(unittest.TestCase):
             }))
             self.assertEqual((benchmark.data.image_height, benchmark.data.image_width), (66, 1030))
             self.assertEqual(benchmark.data.panorama_projection, 'uniform')
+            self.assertEqual((benchmark.data.ego_radius, benchmark.data.gt_ego_radius), (2.5, 2.5))
+            self.assertEqual(benchmark.data.pose_missing_policy, 'interpolate')
             for key in ['model', 'p2g', 'g2g', 'g2p', 'dynamic_2dgs', 'train']:
                 self.assertEqual(OmegaConf.to_container(benchmark[key], resolve=True),
                                  OmegaConf.to_container(stored[key], resolve=True))

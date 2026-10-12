@@ -1,4 +1,6 @@
-# Official LiDAR4D/GS-LiDAR uniform 66x1030 benchmark overlay.
+# Official LiDAR4D/GS-LiDAR uniform 66x1030 benchmark overlay. GT returns <2.5 m
+# are dropped by default (data.gt_ego_radius=2.5) and missing input poses are
+# interpolated, matching data_config=kitti360_lidar4d.
 mode: test
 seed: 42
 device:
@@ -24,6 +26,7 @@ data:
   - 180.0
   ring_to_elevation_deg: null
   ego_radius: 2.5
+  gt_ego_radius: 2.5  # drop GT returns <2.5 m (GS-LiDAR style, as trained); 0 keeps them (LiDAR4D)
   max_depth_m: 80.0
   sequence: 2013_05_28_drive_0000_sync
   benchmark_scenes:
@@ -37,7 +40,7 @@ data:
   - 10200
   - 10750
   - 11400
-  pose_missing_policy: previous
+  pose_missing_policy: interpolate  # as trained; previous reproduces LiDAR4D/GS-LiDAR preprocessing
   compact_val:
     enable: false
   verbose: true

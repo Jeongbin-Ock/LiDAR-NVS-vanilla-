@@ -76,7 +76,8 @@ KITTI files are organized by sequence and frame ID:
 
 All 40 benchmark target frames have direct optimized poses. Six distinct input
 frame IDs (8125/8135/8145 and 10225/10235/10245) lack a direct pose. Since
-2026-10-07 the default overlay uses `pose_missing_policy: interpolate`.
+2026-10-07 the default overlay uses `pose_missing_policy: interpolate`, and
+since 2026-10-12 so does the benchmark overlay.
 `previous` reproduces the official preprocessing of both baselines. LiDAR4D (`data/preprocess/kitti360_loader.py`,
 `load_lidars`) and GS-LiDAR (`preprocess/kitti360_loader.py`, the same function)
 append the last pose seen in the requested frame list. Neither paper discusses
@@ -145,7 +146,8 @@ The earlier nominal-angle projection (`hdl64e_s2_s3_nominal`) was removed on
 Returns at or beyond 80m are excluded from GT as in LiDAR4D. Intensity is
 already [0,1] and is not divided by 255. Model endpoint inputs retain their
 trained 2.5m ego exclusion. Since 2026-10-07 the default overlay sets
-`gt_ego_radius: 2.5`, which drops the same near returns from the GT panorama.
+`gt_ego_radius: 2.5`, which drops the same near returns from the GT panorama;
+since 2026-10-12 the benchmark overlay does too.
 `gt_ego_radius: 0` keeps them, as LiDAR4D's `generate_rangeview.py` does. GS-LiDAR's training/eval loader
 (`scene/kitti360_loader.py`) instead drops returns within 2.5 m before
 building its GT. The KITTI-360 scans themselves contain no return closer than

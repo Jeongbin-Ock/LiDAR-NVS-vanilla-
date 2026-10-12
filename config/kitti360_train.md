@@ -37,8 +37,8 @@ GT crops, the 80 m range and compact validation.
   follow the 64 lasers: 8 rows hold no laser centre and 5 hold two. On the 40
   benchmark targets, row fill ranges from 0.00 to 0.92, and the bottom two
   rows are always empty. Each pixel keeps its nearest return.
-- **Evaluate it with the benchmark overlay and the same GT crop:**
-  `eval_config=config/eval/kitti360_inference_lidar4d_benchmark.yaml data.gt_ego_radius=2.5`.
+- **Evaluate it with the benchmark overlay**, which applies the same 2.5 m GT crop
+  by default: `eval_config=config/eval/kitti360_inference_lidar4d_benchmark.yaml`.
 - **Checkpoints lock the mode.** The projection and image size are
   checkpoint-protected, so one run cannot switch modes.
 

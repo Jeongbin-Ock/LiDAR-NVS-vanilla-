@@ -1371,9 +1371,10 @@ dropped. `kitti360_inference_lidar4d_benchmark.yaml`
 seen from the sensor origin. No nuScenes ring table is used for KITTI cameras.
 
 KITTI XYZI intensity is already normalized. IMU forward/right/down axes are
-converted to forward/left/up for ego-frame checkpoints. The default overlay
-interpolates missing poses. The benchmark overlay keeps `previous`, which
-matches the official LiDAR4D/GS-LiDAR preprocessing. `error` is the remaining
+converted to forward/left/up for ego-frame checkpoints. Both overlays
+interpolate missing poses (the benchmark overlay since 2026-10-12);
+`pose_missing_policy=previous` reproduces the official LiDAR4D/GS-LiDAR
+preprocessing. `error` is the remaining
 option. Dynamic GT boxes are
 exact-frame visualization metadata; no GT boxes enter the model input.
 

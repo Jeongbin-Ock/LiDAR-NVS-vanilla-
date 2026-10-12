@@ -9,8 +9,8 @@
 # split manifest, sampling, poses, crops and compact validation.
 #   python main.py data_config=kitti360_lidar4d model.variant=<variant> ...
 # Runs are named <variant label>_kitti_lidar4d (v15.3_kitti_lidar4d).
-# Evaluate with eval_config=config/eval/kitti360_inference_lidar4d_benchmark.yaml
-# data.gt_ego_radius=2.5 to apply the same 2.5 m GT crop.
+# Evaluate with eval_config=config/eval/kitti360_inference_lidar4d_benchmark.yaml,
+# which applies the same 2.5 m GT crop by default.
 data:
   dataset_name: kitti360_dynamic
   dataroot: /data1/kitti360
