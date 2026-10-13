@@ -188,6 +188,7 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V15_1,
             DYNAMIC_VARIANT_V15_2,
             DYNAMIC_VARIANT_V15_3,
+            DYNAMIC_VARIANT_V15_4,
             DYNAMIC_VARIANT_V16,
             DYNAMIC_VARIANT_V16_1,
         )
@@ -242,7 +243,8 @@ class Point2Gaus(nn.Module):
         # differs only by training on the routed render alone. V15.2 keeps
         # V15's router but renders the chosen option's own expert (E1/E3/E5
         # on one shared trunk); V15.3 has no router and renders five
-        # Gaussians per token.
+        # Gaussians per token. V15.4 is V15.3 with eight temporal heads instead
+        # of twelve, which the temporal module reads from its config.
         backend_cls = {
             DYNAMIC_VARIANT_V11: MaxSpeedBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V11_1: SingleGaussianBarrierVelocityGaussianBackend,
@@ -273,6 +275,7 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V15_1: NestedCountBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V15_2: OptionExpertBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V15_3: DenseCountBarrierVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V15_4: DenseCountBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V16: OrdinalCountBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V16_1: OrdinalCountBarrierVelocityGaussianBackend,
         }.get(self.dynamic_variant)

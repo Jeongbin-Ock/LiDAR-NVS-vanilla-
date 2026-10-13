@@ -88,6 +88,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v15_3": (
         "DenseCountBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v15_4": (
+        "DenseCountBarrierVelocityGaussianBackend"
+    ),
     "dynamic_2dgs_attention_velocity_v16": (
         "OrdinalCountBarrierVelocityGaussianBackend"
     ),
@@ -207,6 +210,12 @@ _PRE_REFACTOR_MANIFEST = {
     # V15.3 keeps V15's backend and decoder and has no router.
     "dynamic_2dgs_attention_velocity_v15_3": (
         "f2b456dc5cd89feb5c00", "ceac3d77acf6877837cd"
+    ),
+    # V15.4 is V15.3 with eight temporal heads instead of twelve. Its parameter
+    # names and order are V15.3's; only the per-layer Q/K RMSNorm gains, one
+    # head wide, change shape.
+    "dynamic_2dgs_attention_velocity_v15_4": (
+        "0d8954b0eef60c36271e", "ceac3d77acf6877837cd"
     ),
     # V16 is V15 with the router's last layer swapped for two bias-free cosine
     # gates: router.4 holds one (2, 128) weight instead of (3, 128) + bias.
@@ -567,6 +576,42 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
              if isinstance(layer, torch.nn.Linear)],
             [576, 5 * 42],
         )
+
+    def test_v15_4_is_v15_3_with_eight_temporal_heads(self):
+        v15_3 = _build_backend("dynamic_2dgs_attention_velocity_v15_3")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v15_4")
+        self.assertIs(
+            type(backend), _DYNAMIC.DenseCountBarrierVelocityGaussianBackend
+        )
+        self.assertEqual(backend.gaussians_per_token, 5)
+        temporal = backend.temporal
+        self.assertEqual(
+            (v15_3.temporal.num_heads, temporal.num_heads), (12, 8)
+        )
+        self.assertEqual(temporal.head_dim, backend.dim // 8)
+        self.assertEqual(temporal.rope_head_count, 7)
+        self.assertEqual(temporal.rope.head_dim, temporal.head_dim)
+        self.assertAlmostEqual(temporal.rope.base, 10.0 ** 1.875)
+        # The local-attention block keeps V15.3's twelve heads.
+        self.assertEqual(
+            backend.local_attention.num_heads,
+            v15_3.local_attention.num_heads,
+        )
+        # V15.3's tensors in V15.3's order; only the Q/K RMSNorm gains, one
+        # head wide, change shape.
+        old = v15_3.state_dict()
+        new = backend.state_dict()
+        self.assertEqual(list(new), list(old))
+        reshaped = {
+            name for name in new if new[name].shape != old[name].shape
+        }
+        self.assertEqual(reshaped, {
+            f"temporal.{norm}.{layer}.weight"
+            for norm in ("q_norm", "k_norm")
+            for layer in range(temporal.n_layers)
+        })
+        for name in reshaped:
+            self.assertEqual(tuple(new[name].shape), (temporal.head_dim,))
 
     def test_v16_is_v15_with_two_bounded_ordinal_gates(self):
         v15 = _build_backend("dynamic_2dgs_attention_velocity_v15")

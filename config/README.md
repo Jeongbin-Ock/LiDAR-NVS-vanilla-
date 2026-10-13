@@ -59,6 +59,7 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v15
 python main.py model.variant=dynamic_2dgs_attention_velocity_v15_1
 python main.py model.variant=dynamic_2dgs_attention_velocity_v15_2
 python main.py model.variant=dynamic_2dgs_attention_velocity_v15_3
+python main.py model.variant=dynamic_2dgs_attention_velocity_v15_4
 python main.py model.variant=dynamic_2dgs_attention_velocity_v16
 python main.py model.variant=dynamic_2dgs_attention_velocity_v16_1
 ```
@@ -82,7 +83,8 @@ Gaussians instead, range-quantile-seeded except in V14/V14.1, which anchor
 every slot at the token position. V15 decodes five Gaussians per token around
 that anchor and lets a router pick one, three or five (`nested_gumbel`); V15.2
 gives each of those three options its own expert (`expert_gumbel`), V15.3
-has no router and renders five Gaussians per token (`legacy`, `K_max: 5`), and
+has no router and renders five Gaussians per token (`legacy`, `K_max: 5`),
+V15.4 is V15.3 with eight temporal heads instead of twelve, and
 V16 picks V15's prefixes with two bounded ordinal gates trained through masked
 rasterization (`nested_ordinal`); V16.1 is V16 whose second training render is
 a uniformly random prefix per token.
@@ -824,7 +826,8 @@ differs from V14.1's in exactly the five changes above.
 
 **V15.1, V15.2, V15.3, V16 and V16.1** keep every V15 key above -- stem,
 optimizer groups, temporal stack without LayerScale, local attention, loader --
-and change only how the Gaussian head turns a token into Gaussians:
+and change only how the Gaussian head turns a token into Gaussians (V15.4, below
+the table, changes the temporal head count instead):
 
 | Variant | Count contract | Rendered per token | Training renders |
 | --- | --- | --- | --- |
@@ -842,6 +845,20 @@ carries that option's opacity gate, so every token sends the router a gradient,
 reduce included. V15.3's head is V15's decoder, `LN(f) -> Linear(432, 576) ->
 SiLU -> Linear(576, 5x42)`, module for module, without the router; it is also
 V15.2's E5 path. See "Gaussians per token" for both contracts.
+
+**V15.4** is V15.3 with `dynamic_2dgs.temporal.num_heads: 8` instead of 12, so
+each temporal head is 54 channels wide instead of 36. Head 0 stays the barrier
+match head and heads 1-7 keep 3D RoPE; 54 is divisible by six, so the xyz
+sin/cos split holds with nine bands per axis instead of six.
+`temporal.rope_base` moves from 100 to 10^1.875 so the nine bands cover
+V15.3's span exactly: the longest band is `5 m * base^((d/6 - 1)/(d/6))` at
+head width `d`, and 100^(5/6) = (10^1.875)^(8/9) = 46.4, i.e. 232 m (base 100
+would stretch it to 300 m). The bands are 5, 8.1, 13.1, 21.1, 34.1, 55.0, 88.9,
+143.6 and 232.1 m. FlashAttention2 pads the 54-wide heads to 56 internally, as
+it pads V15.3's 36 to 40. The local-attention block keeps twelve heads. V15.3
+and V15.4 each pin their head count (12 and 8); any other value is rejected.
+The checkpoint differs from V15.3's only in the per-layer Q/K RMSNorm gains,
+which are one head wide.
 
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other

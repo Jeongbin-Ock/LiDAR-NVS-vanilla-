@@ -12,6 +12,7 @@ from .definitions import (
     COORDINATE_FRAMES,
     DENSE_COUNT_DYNAMIC_VARIANTS,
     DENSE_COUNT_GAUSSIANS_PER_TOKEN,
+    DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT,
     DYNAMIC_VARIANT_V12_1,
     EXPERT_AUXILIARY_RENDER_BY_VARIANT,
     EXPERT_AUXILIARY_RENDERS,
@@ -979,9 +980,17 @@ def _validate_temporal_config(config, variant: str, label: str) -> None:
         raise ValueError(f"{label} requires temporal.qk_norm=true")
     # Head 0 is the match head; every remaining head keeps 3D RoPE, so every
     # barrier-match variant needs at least one of each.
-    if int(OmegaConf.select(config, f"{temporal_path}.num_heads")) < 2:
+    num_heads = int(OmegaConf.select(config, f"{temporal_path}.num_heads"))
+    if num_heads < 2:
         raise ValueError(
             f"{label} requires dynamic_2dgs.temporal.num_heads >= 2"
+        )
+    # V15.3 and V15.4 differ only in the temporal head count.
+    expected_heads = DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT.get(variant)
+    if expected_heads is not None and num_heads != expected_heads:
+        raise ValueError(
+            f"{label} requires dynamic_2dgs.temporal.num_heads="
+            f"{expected_heads}, got {num_heads}"
         )
 
 

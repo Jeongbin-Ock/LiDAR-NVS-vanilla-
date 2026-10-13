@@ -38,10 +38,12 @@ from src.experiment_config import (
     DYNAMIC_VARIANT_V15_1,
     DYNAMIC_VARIANT_V15_2,
     DYNAMIC_VARIANT_V15_3,
+    DYNAMIC_VARIANT_V15_4,
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
     DYNAMIC_VARIANTS,
     DENSE_COUNT_DYNAMIC_VARIANTS,
+    DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT,
     EXPERT_AUXILIARY_RENDER_BY_VARIANT,
     EXPERT_AUXILIARY_RENDERS,
     EXPERT_COUNT_DYNAMIC_VARIANTS,
@@ -1805,7 +1807,7 @@ class V15ConfigTest(unittest.TestCase):
         # local-attention block; only the Gaussian head differs.
         self.assertEqual(V15_FAMILY_DYNAMIC_VARIANTS, (
             DYNAMIC_VARIANT_V15, DYNAMIC_VARIANT_V15_1,
-            DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3,
+            DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
             DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1,
         ))
         for group in (
@@ -2217,7 +2219,9 @@ class V15SiblingConfigTest(unittest.TestCase):
         }
 
     def test_registration(self):
-        for variant in (DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3):
+        for variant in (
+            DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
+        ):
             with self.subTest(variant=variant):
                 self.assertIn(variant, DYNAMIC_VARIANTS)
                 self.assertTrue(VARIANT_CONFIG_PATHS[variant].is_file())
@@ -2230,7 +2234,13 @@ class V15SiblingConfigTest(unittest.TestCase):
                 self.assertNotIn(variant, ROUTER_CAPABLE_DYNAMIC_VARIANTS)
                 self.assertNotIn(variant, NESTED_COUNT_DYNAMIC_VARIANTS)
         self.assertEqual(EXPERT_COUNT_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V15_2,))
-        self.assertEqual(DENSE_COUNT_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V15_3,))
+        self.assertEqual(
+            DENSE_COUNT_DYNAMIC_VARIANTS,
+            (DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4),
+        )
+        self.assertEqual(DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT, {
+            DYNAMIC_VARIANT_V15_3: 12, DYNAMIC_VARIANT_V15_4: 8,
+        })
         self.assertEqual(EXPERT_COUNT_MODE, "expert_gumbel")
         self.assertEqual(EXPERT_AUXILIARY_RENDERS, ("dense_add", "none"))
         self.assertEqual(
@@ -2282,6 +2292,58 @@ class V15SiblingConfigTest(unittest.TestCase):
             b["dynamic_2dgs.gaussian_head.decoder_hidden"],
             a["p2g.grid_query.nested_count.decoder_hidden"],
         )
+
+    def test_v15_4_is_v15_3_with_eight_temporal_heads(self):
+        v15_3, _ = self._compose(variant=DYNAMIC_VARIANT_V15_3)
+        v15_4, _ = self._compose(variant=DYNAMIC_VARIANT_V15_4)
+        a = self._leaves(OmegaConf.to_container(v15_3, resolve=True))
+        b = self._leaves(OmegaConf.to_container(v15_4, resolve=True))
+        changed = {
+            key for key in set(a) | set(b)
+            if a.get(key, "<absent>") != b.get(key, "<absent>")
+        }
+        self.assertEqual(changed, {
+            "model.variant", "exp_name", "logger.dir",
+            "dynamic_2dgs.temporal.num_heads", "dynamic_2dgs.temporal.rope_base",
+        })
+        temporal = "dynamic_2dgs.temporal."
+        self.assertEqual((a[temporal + "num_heads"], b[temporal + "num_heads"]), (12, 8))
+        self.assertEqual(b["dynamic_2dgs.local_attention.num_heads"], 12)
+        # Nine RoPE bands per axis over V15.3's six-band span, 5 m to 232 m.
+        from src.models.utils.attention import Rotary3D
+
+        def wavelengths(config):
+            heads = config.dynamic_2dgs.temporal.num_heads
+            rope = Rotary3D(
+                432 // heads,
+                base=config.dynamic_2dgs.temporal.rope_base,
+                position_scale=config.dynamic_2dgs.temporal.rope_position_scale,
+            )
+            return 2.0 * math.pi / (rope.position_scale * rope.inv_freq.double())
+
+        old, new = wavelengths(v15_3), wavelengths(v15_4)
+        self.assertEqual((old.numel(), new.numel()), (6, 9))
+        self.assertAlmostEqual(float(new[0]), float(old[0]), places=5)
+        self.assertAlmostEqual(float(new[-1]), float(old[-1]), places=3)
+        self.assertAlmostEqual(float(new[0]), 5.0, places=5)
+
+    def test_v15_3_and_v15_4_pin_their_temporal_head_counts(self):
+        for variant, heads, other in (
+            (DYNAMIC_VARIANT_V15_3, 12, 8),
+            (DYNAMIC_VARIANT_V15_4, 8, 12),
+        ):
+            with self.subTest(variant=variant):
+                self._rejected(
+                    f"requires dynamic_2dgs.temporal.num_heads={heads}, "
+                    f"got {other}",
+                    f"dynamic_2dgs.temporal.num_heads={other}",
+                    variant=variant,
+                )
+        # Other variants keep the head count a free (RoPE-checked) setting.
+        config, _ = self._compose(
+            "dynamic_2dgs.temporal.num_heads=8", variant=DYNAMIC_VARIANT_V15_2
+        )
+        self.assertEqual(config.dynamic_2dgs.temporal.num_heads, 8)
 
     def test_expert_count_mode_is_refused_by_every_other_variant(self):
         for variant in DYNAMIC_VARIANTS:
@@ -2443,6 +2505,10 @@ class V15SiblingConfigTest(unittest.TestCase):
                 (DYNAMIC_VARIANT_V15_3, (
                     "p2g.grid_query.K_max=3",
                     "dynamic_2dgs.gaussian_head.decoder_hidden=432",
+                )),
+                (DYNAMIC_VARIANT_V15_4, (
+                    "dynamic_2dgs.temporal.num_heads=12",
+                    "dynamic_2dgs.temporal.rope_base=100.0",
                 )),
             ):
                 checkpoint = Path(tmp) / f"{variant}.ckpt"
