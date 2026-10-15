@@ -42,7 +42,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 
-from src.model_wrapper import ModelWrapper
+from src.model_wrapper import build_model_wrapper
 from src.experiment_config import resolve_eval_config
 from src.dataloader.nuscenes.legacy import multiframe_collate_fn
 from src.dataloader.lidar4d_test import build_lidar4d_test_dataset
@@ -79,7 +79,7 @@ def to_device(obj, device):
 
 
 def load_model(cfg, ckpt_path, device, *, allow_checkpoint_mismatch=False):
-    model = ModelWrapper(cfg)
+    model = build_model_wrapper(cfg)
     if ckpt_path:
         blob = torch.load(ckpt_path, map_location="cpu")
         state = blob.get("state_dict", blob) if isinstance(blob, dict) else blob
@@ -300,6 +300,14 @@ def main(cfg, config_source="unspecified"):
     for module in pinned:
         module.shuffle_orders = shuffle_orders
     print(f"[setup] utonia shuffle_orders={shuffle_orders} on {len(pinned)} modules")
+    # A raydrop-refinement checkpoint replaces only the frozen model's raydrop
+    # mask; test.raydrop_refine=false evaluates its frozen base model instead.
+    refiner = getattr(model, "raydrop_refiner", None)
+    raydrop_refine = refiner is not None and bool(
+        OmegaConf.select(cfg, "test.raydrop_refine", default=True)
+    )
+    print(f"[setup] raydrop_refine={raydrop_refine}"
+          + ("" if refiner is not None else " (checkpoint has no refiner)"))
     backends = MetricBackends(lpips_net="alex")
 
     input_offsets_sec = OmegaConf.select(cfg, "test.input_offsets_sec", default=None)
@@ -345,6 +353,8 @@ def main(cfg, config_source="unspecified"):
         )
         out = select_render_velocity(out, velocity_source)
         renders = model.g2p_model(out, gt)
+        if raydrop_refine:
+            renders = {**renders, "raydrop": refiner(renders)}
 
         b = 0
         # Keep the image metrics, point metrics, PNGs, and predicted LiDAR HTML
@@ -513,6 +523,7 @@ def main(cfg, config_source="unspecified"):
                    "gt_range_policy": ("clamp_positive_returns" if dataset_name == "nuscenes"
                                        else "project_returns_below_max_depth"),
                    "velocity_source": velocity_source,
+                   "raydrop_refine": raydrop_refine,
                    "input_offsets_sec": list(input_offsets_sec),
                    "shuffle_orders": shuffle_orders,
                    "vfov": list(vfov),

@@ -73,6 +73,8 @@ from .definitions import (
     ORDINAL_COUNT_MODE,
     ORDINAL_COUNT_OPTION_COUNTS,
     POST_ACTIVATION_STEM_DYNAMIC_VARIANTS,
+    REFINE_CONFIG_DIR,
+    REFINE_OVERLAY_ROOTS,
     REPO_ROOT,
     RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS,
     ROUTED_COUNT_BLOCKS,
@@ -313,12 +315,12 @@ def load_checkpoint_config(
     )
 
 
-def _merge_checkpoint_cli(stored, cli) -> DictConfig:
+def _merge_checkpoint_cli(stored, cli, *, unlocked_roots=()) -> DictConfig:
     cli = _as_config(cli)
     config = OmegaConf.merge(stored, cli)
     changed_roots = []
     for root in _CHECKPOINT_STRUCTURAL_ROOTS:
-        if root not in cli:
+        if root not in cli or root in unlocked_roots:
             continue
         before = OmegaConf.select(stored, root, default=None)
         after = OmegaConf.select(config, root, default=None)
@@ -373,10 +375,100 @@ def _resolve_with_checkpoint(cli, checkpoint_key: str) -> tuple[DictConfig, str]
     return _merge_checkpoint_cli(stored, cli), source
 
 
+def checkpoint_sha256(path) -> str:
+    """SHA-256 of a checkpoint file, read in 64 MiB chunks."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 26), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def raydrop_refine_enabled(config) -> bool:
+    """True for a frozen-model raydrop refinement run (``raydrop_refine.enable``)."""
+    return bool(OmegaConf.select(config, "raydrop_refine.enable", default=False))
+
+
+def resolve_refine_profile(name) -> Path:
+    """``raydrop_unet`` -> config/refine/raydrop_unet.yaml; any other value is a file path."""
+
+    text = str(name)
+    candidate = REFINE_CONFIG_DIR / f"{text}.yaml"
+    if "/" not in text and not text.endswith((".yaml", ".yml")) and candidate.is_file():
+        return candidate
+    path = Path(text).expanduser().resolve()
+    if not path.is_file():
+        known = ", ".join(sorted(p.stem for p in REFINE_CONFIG_DIR.glob("*.yaml")))
+        raise FileNotFoundError(f"Unknown refine_config={text!r}; expected one of {known} or a path")
+    return path
+
+
+def compose_refine_config(cli=None) -> tuple[DictConfig, str]:
+    """A fresh refinement run on top of a finished checkpoint.
+
+    ``refine_config=<name or path>`` names a stage overlay in config/refine/;
+    the overlay and the CLI may only set REFINE_OVERLAY_ROOTS, and
+    ``raydrop_refine.base_ckpt`` names the checkpoint to freeze. The run's
+    config is that checkpoint's embedded config (model and data unchanged and
+    still protected) with the overlay and CLI on top, its own exp_name and
+    logs/ folder, a new W&B run and a fresh Lightning state; the base
+    checkpoint's hash, epoch, step and run name are recorded under
+    ``raydrop_refine``. Resuming the refinement run itself is an ordinary
+    ``train.ckpt_path=<refine checkpoint>`` resume.
+    """
+    cli = OmegaConf.create(OmegaConf.to_container(_as_config(cli), resolve=False))
+    profile_path = resolve_refine_profile(cli.pop("refine_config"))
+    if "data_config" in cli:
+        raise ValueError("data_config is for fresh runs; a refinement run keeps its base checkpoint's data")
+    overlay = OmegaConf.load(profile_path)
+    for source, block in ((profile_path, overlay), ("the CLI", cli)):
+        unknown = sorted(set(block) - set(REFINE_OVERLAY_ROOTS))
+        if unknown:
+            raise ValueError(f"{source} cannot set {', '.join(unknown)}; a refinement run "
+                             f"may only set {', '.join(REFINE_OVERLAY_ROOTS)}")
+    request = OmegaConf.merge(overlay, cli)
+    if str(OmegaConf.select(request, "mode", default="train")) != "train":
+        raise ValueError("refine_config composes training runs (mode=train)")
+    if OmegaConf.select(request, "train.ckpt_path", default=None):
+        raise ValueError("refine_config starts a refinement run; resume one with "
+                         "train.ckpt_path=<refinement checkpoint> and no refine_config")
+    for path in ("raydrop_refine.base_ckpt", "exp_name"):
+        parent, _, key = path.rpartition(".")
+        node = OmegaConf.select(request, parent) if parent else request
+        if node is None or key not in node or OmegaConf.is_missing(node, key) or not node[key]:
+            raise ValueError(f"refine_config requires {path}")
+    base_ckpt = Path(str(request.raydrop_refine.base_ckpt)).expanduser().resolve()
+    stored, source = load_checkpoint_config(base_ckpt)
+    if raydrop_refine_enabled(stored):
+        raise ValueError(f"{base_ckpt} is already a refinement checkpoint")
+
+    import torch
+
+    blob = torch.load(base_ckpt, map_location="cpu", weights_only=False, mmap=True)
+    request.raydrop_refine.base_ckpt = str(base_ckpt)
+    request.raydrop_refine.base_ckpt_sha256 = checkpoint_sha256(base_ckpt)
+    request.raydrop_refine.base_epoch = int(blob["epoch"])
+    request.raydrop_refine.base_global_step = int(blob["global_step"])
+    request.raydrop_refine.base_exp_name = str(stored.exp_name)
+    del blob
+    config = _merge_checkpoint_cli(stored, request, unlocked_roots=("raydrop_refine",))
+    config.mode = "train"
+    if not raydrop_refine_enabled(config):
+        raise ValueError(f"{profile_path} must set raydrop_refine.enable=true")
+    if str(config.exp_name) == str(stored.exp_name) or (
+        Path(str(config.logger.dir)).resolve() == Path(str(stored.logger.dir)).resolve()
+    ):
+        raise ValueError("A refinement run needs its own exp_name and logger.dir, "
+                         f"not the base run's {stored.exp_name!r}")
+    return config, f"{source}; refine overlay: {profile_path.resolve()}"
+
+
 def resolve_main_config(cli=None) -> tuple[DictConfig, str]:
     """Resolve train/test entrypoint config, including exact resume configs."""
 
     cli = _as_config(cli)
+    if "refine_config" in cli:
+        return compose_refine_config(cli)
     mode = str(OmegaConf.select(cli, "mode", default="train")).lower()
     checkpoint_key = "train.ckpt_path" if mode == "train" else "test.ckpt_path"
     return _resolve_with_checkpoint(cli, checkpoint_key)
@@ -483,7 +575,11 @@ __all__ = [
     "STRUCTURAL_DEFAULTS",
     "V15_FAMILY_DYNAMIC_VARIANTS",
     "VARIANT_CONFIG_PATHS",
+    "checkpoint_sha256",
     "compose_fresh_config",
+    "compose_refine_config",
+    "raydrop_refine_enabled",
+    "resolve_refine_profile",
     "resolve_data_profile",
     "load_checkpoint_config",
     "resolve_eval_config",

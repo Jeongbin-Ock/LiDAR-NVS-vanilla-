@@ -8,6 +8,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # DATA_CONFIG_DIR, named by the variant overlay or the CLI (data_config=).
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "default.yaml"
 DATA_CONFIG_DIR = REPO_ROOT / "config" / "data"
+# Stage overlays applied on top of a finished checkpoint's embedded config
+# (refine_config=<name or path>), e.g. the frozen-model raydrop refinement.
+REFINE_CONFIG_DIR = REPO_ROOT / "config" / "refine"
 
 DYNAMIC_VARIANT_V11 = "dynamic_2dgs_attention_velocity_v11"
 DYNAMIC_VARIANT_V11_1 = "dynamic_2dgs_attention_velocity_v11_1"
@@ -277,6 +280,24 @@ _CHECKPOINT_STRUCTURAL_ROOTS = (
     "g2g",
     "g2p",
     "dynamic_2dgs",
+    # Absent (= disabled) in every model checkpoint; only refine_config can
+    # add it, and a refinement checkpoint keeps it fixed.
+    "raydrop_refine",
+)
+
+# Roots a refine_config overlay (and its CLI) may set on top of the frozen
+# checkpoint's config; the model and data stay the checkpoint's.
+REFINE_OVERLAY_ROOTS = (
+    "raydrop_refine",
+    "train",
+    "test",
+    "logger",
+    "metrics",
+    "exp_name",
+    "project_name",
+    "device",
+    "seed",
+    "mode",
 )
 
 _CHECKPOINT_PROTECTED_PATHS = (

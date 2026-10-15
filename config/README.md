@@ -31,6 +31,8 @@ Checkpoint resumes ignore all of these files and restore the embedded config.
 | `data/kitti360_lidar4d.yaml` | KITTI-360, `kitti360_dynamic`, LiDAR4D uniform 66×1030 GT | opt-in (`data_config=kitti360_lidar4d`) |
 
 Inference overlays for `test_lidar4d_nvs.py eval_config=...` live in `eval/`.
+Stage overlays applied on top of a finished checkpoint live in `refine/` (see
+"Raydrop refinement" at the end).
 The JSON manifests (`compact_val_windows.json`, `kitti360_compact_val_windows.json`,
 `kitti360_train_split.json`) stay at this level because checkpoints record
 their paths.
@@ -1404,3 +1406,49 @@ Details, measured sweep rates, annotation coverage, and clip splits:
 [`kitti360_inference.md`](kitti360_inference.md).
 Sensor specifications, panorama construction, and configuration changes for a
 different training dataset: [`sensor_data_contract.md`](sensor_data_contract.md).
+
+## Raydrop refinement (`refine_config=raydrop_unet`)
+
+A second training stage on top of a finished model, as LiDAR4D, GS-LiDAR,
+SN-LiDAR and LiDAR-RT do after their scene optimization. All four use the same
+6.54M-parameter U-Net (GS-LiDAR's `scene/unet.py` is byte-identical to
+LiDAR4D's `model/unet.py`); `src/models/module/m4_raydrop_refine.py` carries it
+unchanged.
+
+```bash
+python main.py refine_config=raydrop_unet \
+    raydrop_refine.base_ckpt=/abs/logs/v15.3/epoch=29.ckpt \
+    exp_name=v15.3_raydrop_refine device='[4,5]'
+```
+
+- The run's config is the base checkpoint's embedded config with
+  `refine/raydrop_unet.yaml` and the CLI on top. Those may set only
+  `raydrop_refine`, `train`, `test`, `logger`, `metrics`, `exp_name`,
+  `project_name`, `device`, `seed` and `mode`; model, data and rendering stay
+  the base run's. `data_config` and `train.ckpt_path` are rejected.
+- The loader records the base checkpoint's `base_ckpt_sha256`, `base_epoch`,
+  `base_global_step` and `base_exp_name`. Before training, `main.py` loads the
+  base weights and checks the hash again.
+- A refinement run needs its own `exp_name`. Its `logger.dir` is
+  `logs/<exp_name>` and it opens a new W&B run. The epoch count, optimizer and
+  schedule start fresh.
+- The frozen model renders every batch in eval mode under `no_grad`. Only
+  `raydrop_refiner.unet` trains:
+  - **Input:** every target view (input endpoints and novel sweeps) as
+    `[raydrop, intensity_sh, depth_median / depth_scale_m]`.
+  - **Target:** BCE against the GT no-return mask (1 = no return).
+  - **Augmentation:** LiDAR4D's random zero boxes, in training only.
+  - **Optimizer:** AdamW at `train.lr` 1e-3 with weight decay 0, which is
+    LiDAR4D's Adam. Warmup and cosine use the usual helper.
+- `train/` and `val/` log the refined `loss_raydrop`, `raydrop_acc`,
+  `raydrop_f1` and `raydrop_rmse`. Validation adds the official
+  `depth_/intensity_*_raydrop` metrics and `loss_chamfer`. The frozen model's
+  values for the same windows go under `base/`.
+- Resume a refinement run with `train.ckpt_path=<its checkpoint>`. CLI changes
+  to `raydrop_refine` are rejected there, and a model checkpoint cannot turn
+  refinement on from the CLI.
+- `test_lidar4d_nvs.py` builds the refiner from a refinement checkpoint and
+  replaces only `renders["raydrop"]`, so the depth/intensity masks, raydrop
+  metrics and points all use the refined mask. `test.raydrop_refine=false`
+  evaluates the same checkpoint's frozen base model.
+

@@ -1,0 +1,53 @@
+# Raydrop refinement stage: LiDAR4D's U-Net on top of a frozen, finished model.
+#
+#   python main.py refine_config=raydrop_unet \
+#       raydrop_refine.base_ckpt=/abs/logs/<run>/epoch=<N>.ckpt exp_name=<name> device='[4,5]'
+#
+# The run starts from the base checkpoint's embedded config: model, data and
+# render settings are the base run's and stay protected. This overlay (and the
+# CLI) may only set raydrop_refine, train, test, logger, metrics, exp_name,
+# project_name, device, seed and mode. The loader records the base
+# checkpoint's sha256, epoch, global step and run name under raydrop_refine.
+#
+# Every step renders the batch with the frozen model in eval mode under
+# no_grad, then trains only the U-Net on the target views' maps
+# [raydrop, intensity, depth_median / depth_scale_m] -> refined no-return
+# probability, with BCE against the GT no-return mask. All target views
+# (both input endpoints and the novel sweeps) are used. Evaluation keeps the
+# frozen depth and intensity and replaces only the raydrop mask.
+raydrop_refine:
+  enable: true
+  base_ckpt: ???
+  # LiDAR4D/GS-LiDAR/LiDAR-RT network width: 6,535,969 parameters at 3 inputs.
+  channels: 32
+  # Depth enters as depth_median / 80 m (the evaluation's depth cap), the same
+  # role as LiDAR4D's scene scale (x0.0105) and GS-LiDAR's (/10).
+  depth_scale_m: 80.0
+  # LiDAR4D's training augmentation: per step, 0-31 boxes of up to 10% of H
+  # and W zeroed in every input image and channel.
+  box_mask:
+    enable: true
+    max_boxes: 32
+    max_size_frac: 0.1
+
+exp_name: ???
+
+train:
+  # LiDAR4D/GS-LiDAR refinement optimizer: Adam at 1e-3 without weight decay
+  # (AdamW with weight_decay 0 is Adam). Warmup then cosine decay to zero over
+  # all optimizer steps.
+  lr: 1.0e-3
+  weight_decay: 0.0
+  warmup_iters: 500
+  max_epochs: 20
+  batch_size: 2
+  grad_accum_steps: 1
+  ckpt_path: null
+
+test:
+  ckpt_path: null
+
+logger:
+  dir: logs/${exp_name}
+  # A new W&B run; the base run's id is not continued.
+  wandb_run_id: null

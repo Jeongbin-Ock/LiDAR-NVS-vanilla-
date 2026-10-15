@@ -58,6 +58,7 @@ from .helpers import (
     _has_path,
     _reject_unknown_keys,
     _require_choice,
+    _require_in_open_range,
     _require_positive,
     _variant,
 )
@@ -307,6 +308,36 @@ def _validate_adam_settings(config) -> None:
             raise ValueError("train.adam_betas entries must be in [0, 1)")
     if OmegaConf.select(config, "train.adam_eps", default=None) is not None:
         _require_finite(config, "train.adam_eps", minimum=0.0, inclusive=False)
+
+
+def _validate_raydrop_refine(config) -> None:
+    """Optional ``raydrop_refine`` block of a frozen-model refinement run.
+
+    Absent or ``enable: false`` is an ordinary model run. Enabled, the block
+    names the frozen checkpoint (recorded with its hash, epoch and step when
+    ``refine_config`` composes the run) and the U-Net's input settings.
+    """
+    if not _has_path(config, "raydrop_refine"):
+        return
+    root = "raydrop_refine"
+    _reject_unknown_keys(config, root, {
+        "enable", "base_ckpt", "base_ckpt_sha256", "base_epoch",
+        "base_global_step", "base_exp_name", "channels", "depth_scale_m",
+        "box_mask",
+    })
+    _require_flag(config, f"{root}.enable")
+    if not bool(OmegaConf.select(config, f"{root}.enable")):
+        return
+    for key in ("base_ckpt", "base_ckpt_sha256"):
+        if not OmegaConf.select(config, f"{root}.{key}", default=None):
+            raise ValueError(f"{root}.{key} is required when {root}.enable=true")
+    _require_positive(config, f"{root}.channels", kind=int)
+    _require_finite(config, f"{root}.depth_scale_m", minimum=0.0, inclusive=False)
+    _reject_unknown_keys(config, f"{root}.box_mask",
+                         {"enable", "max_boxes", "max_size_frac"})
+    _require_flag(config, f"{root}.box_mask.enable")
+    _require_positive(config, f"{root}.box_mask.max_boxes", kind=int)
+    _require_in_open_range(config, f"{root}.box_mask.max_size_frac", 0.0, 1.0)
 
 
 def _validate_spconv_precision(config) -> None:
@@ -1130,6 +1161,7 @@ def validate_experiment_config(config) -> None:
     _validate_adam_settings(config)
     _validate_spconv_precision(config)
     _validate_downstream_no_decay(config, variant, label)
+    _validate_raydrop_refine(config)
 
     # Checkpoints embed the anchor mode from when a second one existed.
     anchor_mode = OmegaConf.select(config, "p2g.anchor_mode", default=None)

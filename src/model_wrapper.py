@@ -21,7 +21,11 @@ from src.models.utils.routing_logging import (
     routing_option_counts,
     routing_sufficient_statistics,
 )
-from src.experiment_config import DYNAMIC_VARIANTS, ROUTED_COUNT_BLOCKS
+from src.experiment_config import (
+    DYNAMIC_VARIANTS,
+    ROUTED_COUNT_BLOCKS,
+    raydrop_refine_enabled,
+)
 from src.eval.group_metrics import GroupMetricAccumulator
 from src.dataloader.kitti360.compact_val import COMPACT_VAL_GROUPS
 
@@ -788,13 +792,18 @@ class ModelWrapper(LightningModule):
         return int(getattr(self, "global_rank", 0)) == 0
 
     def configure_optimizers(self):
-        opt_cfg = self.cfg.train
-        lr = opt_cfg.lr
-        weight_decay = opt_cfg.weight_decay
         # All-linear LoRA variants get their historical flat parameter list;
         # the hybrid Utonia adaptation (V14) gets one group per role, each with
         # its own LR / weight decay, plus the downstream group at train.lr.
-        param_groups = self.p2g_model.optimizer_param_groups(opt_cfg)
+        return self._scheduled_optimizer(
+            self.p2g_model.optimizer_param_groups(self.cfg.train)
+        )
+
+    def _scheduled_optimizer(self, param_groups):
+        """AdamW over ``param_groups`` with train.* settings and the warmup+cosine schedule."""
+        opt_cfg = self.cfg.train
+        lr = opt_cfg.lr
+        weight_decay = opt_cfg.weight_decay
         betas = tuple(
             float(beta)
             for beta in (getattr(opt_cfg, "adam_betas", None) or (0.9, 0.999))
@@ -840,3 +849,12 @@ class ModelWrapper(LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
         }
+
+
+def build_model_wrapper(cfg):
+    """The LightningModule a config describes: the model, or its raydrop refinement."""
+    if raydrop_refine_enabled(cfg):
+        from src.raydrop_refine_wrapper import RaydropRefineWrapper
+
+        return RaydropRefineWrapper(cfg)
+    return ModelWrapper(cfg)

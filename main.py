@@ -24,10 +24,10 @@ from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.plugins.environments import SLURMEnvironment
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.strategies import DDPStrategy
-from src.model_wrapper import ModelWrapper
+from src.model_wrapper import build_model_wrapper
 from src.dataloader.datamodule import DataModule
 from src.dataloader import dataset_dict
-from src.experiment_config import resolve_main_config
+from src.experiment_config import raydrop_refine_enabled, resolve_main_config
 from src.runtime_precision import apply_spconv_tf32
 
 warnings.filterwarnings(
@@ -144,7 +144,11 @@ def main(cfg, config_source="unspecified"):
         max_steps=cfg.train.max_steps,
         precision = "32"
     )
-    model_wrapper = ModelWrapper(cfg)
+    model_wrapper = build_model_wrapper(cfg)
+    if raydrop_refine_enabled(cfg) and cfg.mode == "train" and not cfg.train.ckpt_path:
+        # A fresh refinement run starts from the frozen model's weights; a
+        # resumed one restores everything from its own checkpoint.
+        model_wrapper.load_base_checkpoint()
     dataset = dataset_dict[cfg.data.dataset_name]
     datamodule = DataModule(dataset, cfg)
 
