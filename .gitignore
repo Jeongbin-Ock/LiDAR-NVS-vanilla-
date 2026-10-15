@@ -21,6 +21,7 @@ lightning_logs/
 !config/kitti360_official_splits/*.txt
 tools/
 GS_exp/
+SOTA/
 
 
 # Outputs / Logs / Visualization
