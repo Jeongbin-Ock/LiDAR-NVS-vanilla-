@@ -35,6 +35,15 @@ def camera_from_nuscenes(nusc, lidar_token, timestamp_normalized,
     H    = cfg.image_height
     W    = cfg.image_width
     ring_to_elevation_deg = getattr(cfg, "ring_to_elevation_deg", None)
+    # "ring" (default, the historical behaviour) snaps every return to its
+    # sensor ring's row. "uniform" is the GS-LiDAR / LiDAR4D convention: rows
+    # are uniform elevation bins over vfov and each return is rasterised by its
+    # own angle (nearest wins), so no ring table may be set.
+    projection = str(getattr(cfg, "panorama_projection", None) or "ring")
+    if projection not in ("ring", "uniform"):
+        raise ValueError(f"nuScenes panorama_projection must be 'ring' or 'uniform', got {projection!r}")
+    if projection == "uniform" and ring_to_elevation_deg is not None:
+        raise ValueError("panorama_projection=uniform requires ring_to_elevation_deg=null")
 
     # range image 생성
     #####
@@ -66,7 +75,7 @@ def camera_from_nuscenes(nusc, lidar_token, timestamp_normalized,
     # ring으로 각 점을 정확한 beam 행에 snap → 기하 elevation 노이즈/한 elevation 충돌 방지(GT 정확도↑).
     # render/Camera convention은 row0=최고 elevation이므로, 실제 beam table을 높은 elevation부터
     # 정렬한 순서로 panorama row를 만든다.
-    if lidar_ring is not None:
+    if lidar_ring is not None and projection == "ring":
         ring_np = lidar_ring.numpy() if torch.is_tensor(lidar_ring) else np.asarray(lidar_ring)
         ring_to_el = ring_to_elevation_deg
         if ring_to_el is not None:

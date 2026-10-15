@@ -1,0 +1,25 @@
+# GS-LiDAR-style nuScenes range image for inference: 32x1080, uniform rows, every
+# return rasterised by its own elevation/azimuth (nearest wins) with no ring snapping.
+# vfov (-31.96, 10.67) is GS-LiDAR's default panorama FOV (utils range_to_ply): 32 rows
+# at 1.332 deg, i.e. the HDL-32E beam spacing, so rows line up with beams. The released
+# GS-LiDAR code has no nuScenes config, so this FOV is inferred from that default.
+# W=1080 puts GS-LiDAR's two stitched 180 deg cameras on the same column lattice as one
+# 360 deg camera (90 deg = 270 columns). Inputs keep the checkpoint's ego_radius=2.5 m,
+# which is also GS-LiDAR's near-field crop.
+#
+#   python test_lidar4d_nvs.py eval_config=config/eval/nuscenes_inference_gslidar.yaml \
+#       test.ckpt_path=<ckpt> test.input_offsets_sec='[-0.1,0.1]' device='[0]'
+mode: test
+data:
+  image_height: 32
+  image_width: 1080
+  vfov:
+  - -31.96
+  - 10.67
+  hfov:
+  - -180.0
+  - 180.0
+  ring_to_elevation_deg: null
+  panorama_projection: uniform
+test:
+  shuffle_orders: false
