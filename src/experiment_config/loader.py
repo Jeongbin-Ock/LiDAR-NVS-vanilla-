@@ -390,6 +390,25 @@ def raydrop_refine_enabled(config) -> bool:
     return bool(OmegaConf.select(config, "raydrop_refine.enable", default=False))
 
 
+def raydrop_refine_base_record(config):
+    """The frozen base checkpoint a refinement config was trained on top of, or None.
+
+    The values are the ones recorded when the refinement run started
+    (``raydrop_refine.base_*``), so an evaluation can name the base model
+    without re-reading or re-hashing the base checkpoint.
+    """
+    if not raydrop_refine_enabled(config):
+        return None
+    refine = config.raydrop_refine
+    return {
+        "ckpt": str(refine.base_ckpt),
+        "sha256": str(refine.base_ckpt_sha256),
+        "epoch": int(refine.base_epoch),
+        "global_step": int(refine.base_global_step),
+        "exp_name": str(refine.base_exp_name),
+    }
+
+
 def resolve_refine_profile(name) -> Path:
     """``raydrop_unet`` -> config/refine/raydrop_unet.yaml; any other value is a file path."""
 
@@ -580,6 +599,7 @@ __all__ = [
     "checkpoint_sha256",
     "compose_fresh_config",
     "compose_refine_config",
+    "raydrop_refine_base_record",
     "raydrop_refine_enabled",
     "resolve_refine_profile",
     "resolve_data_profile",

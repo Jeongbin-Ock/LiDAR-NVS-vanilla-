@@ -43,7 +43,7 @@ from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 
 from src.model_wrapper import build_model_wrapper
-from src.experiment_config import resolve_eval_config
+from src.experiment_config import raydrop_refine_base_record, resolve_eval_config
 from src.dataloader.nuscenes.legacy import multiframe_collate_fn
 from src.dataloader.lidar4d_test import build_lidar4d_test_dataset
 from src.eval.output_paths import resolve_lidar4d_output_dir
@@ -308,6 +308,13 @@ def main(cfg, config_source="unspecified"):
     )
     print(f"[setup] raydrop_refine={raydrop_refine}"
           + ("" if refiner is not None else " (checkpoint has no refiner)"))
+    # The refinement checkpoint carries the frozen model it sits on; name it in
+    # the results so metrics.json is not just the refiner's path.
+    raydrop_refine_base = raydrop_refine_base_record(cfg)
+    if raydrop_refine_base is not None:
+        print(f"[setup] raydrop_refine base={raydrop_refine_base['ckpt']} "
+              f"(epoch {raydrop_refine_base['epoch']}, "
+              f"sha256 {raydrop_refine_base['sha256'][:12]})")
     backends = MetricBackends(lpips_net="alex")
 
     input_offsets_sec = OmegaConf.select(cfg, "test.input_offsets_sec", default=None)
@@ -524,6 +531,7 @@ def main(cfg, config_source="unspecified"):
                                        else "project_returns_below_max_depth"),
                    "velocity_source": velocity_source,
                    "raydrop_refine": raydrop_refine,
+                   "raydrop_refine_base": raydrop_refine_base,
                    "input_offsets_sec": list(input_offsets_sec),
                    "shuffle_orders": shuffle_orders,
                    "vfov": list(vfov),

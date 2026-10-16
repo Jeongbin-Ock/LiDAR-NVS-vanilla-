@@ -17,6 +17,7 @@ from src.experiment_config import (
     checkpoint_sha256,
     compose_fresh_config,
     compose_refine_config,
+    raydrop_refine_base_record,
     raydrop_refine_enabled,
     resolve_main_config,
 )
@@ -183,6 +184,19 @@ class RefineConfigTest(unittest.TestCase):
                 (1.0e-3, 0.0, 20, 2, 1),
             )
             self.assertEqual(config.mode, "train")
+
+    def test_base_record_names_the_frozen_checkpoint_only_for_refinement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stored, checkpoint = self._base_checkpoint(tmp)
+            self.assertIsNone(raydrop_refine_base_record(stored))
+            config, _ = self._compose(checkpoint)
+            self.assertEqual(raydrop_refine_base_record(config), {
+                "ckpt": str(checkpoint.resolve()),
+                "sha256": checkpoint_sha256(checkpoint),
+                "epoch": 29,
+                "global_step": 50_000,
+                "exp_name": "v15.3",
+            })
 
     def test_main_entry_dispatches_refine_config(self):
         with tempfile.TemporaryDirectory() as tmp:
