@@ -34,6 +34,7 @@ DYNAMIC_VARIANT_V15_1 = "dynamic_2dgs_attention_velocity_v15_1"
 DYNAMIC_VARIANT_V15_2 = "dynamic_2dgs_attention_velocity_v15_2"
 DYNAMIC_VARIANT_V15_3 = "dynamic_2dgs_attention_velocity_v15_3"
 DYNAMIC_VARIANT_V15_4 = "dynamic_2dgs_attention_velocity_v15_4"
+DYNAMIC_VARIANT_V15_5 = "dynamic_2dgs_attention_velocity_v15_5"
 DYNAMIC_VARIANT_V16 = "dynamic_2dgs_attention_velocity_v16"
 DYNAMIC_VARIANT_V16_1 = "dynamic_2dgs_attention_velocity_v16_1"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
@@ -118,7 +119,9 @@ FLASH_ROPE_MATCH_DYNAMIC_VARIANTS = (
 # V15.1 is V15 trained on its routed render alone. V15.2 and V15.3 keep V15's
 # stack and change only the Gaussian head: V15.2 gives each router option its
 # own expert, V15.3 drops the router and renders five Gaussians per token.
-# V15.4 is V15.3 with eight temporal heads instead of twelve.
+# V15.4 is V15.3 with eight temporal heads instead of twelve. V15.5 is V15.4
+# with v_init read from the plain 1/L mean of the layers' head-0 readouts
+# instead of their learned softmax mixture.
 # V16 keeps V15's stack and G1..G5 decoder and changes the router: two bounded
 # ordinal gates trained through masked rasterization. V16.1 is V16 whose second
 # training render is a uniformly random prefix of G1..G5 per token instead of
@@ -144,6 +147,7 @@ BARRIER_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_2,
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V15_4,
+    DYNAMIC_VARIANT_V15_5,
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
 )
@@ -170,6 +174,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_2,
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V15_4,
+    DYNAMIC_VARIANT_V15_5,
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
 )
@@ -182,16 +187,18 @@ DYNAMIC_VARIANTS = (
 # V14.1 put the stem adapter before the stem LayerNorm; V15 puts it after the
 # activation (see POST_ACTIVATION_STEM_DYNAMIC_VARIANTS). Only these variants
 # have per-role optimizer groups, so only they accept train.downstream_no_decay.
-# Every V15-family variant (V15, V15.1, V15.2, V15.3, V15.4, V16, V16.1) shares
-# V15's Utonia adaptation, temporal stack and local-attention block; they differ
-# only in how the Gaussian head turns a token into Gaussians, except V15.4,
-# which is V15.3 with eight temporal heads instead of twelve.
+# Every V15-family variant (V15, V15.1, V15.2, V15.3, V15.4, V15.5, V16, V16.1)
+# shares V15's Utonia adaptation, temporal stack and local-attention block; they
+# differ only in how the Gaussian head turns a token into Gaussians, except
+# V15.4, which is V15.3 with eight temporal heads instead of twelve, and V15.5,
+# which is V15.4 with v_init read from the uniform mean over layers.
 V15_FAMILY_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15,
     DYNAMIC_VARIANT_V15_1,
     DYNAMIC_VARIANT_V15_2,
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V15_4,
+    DYNAMIC_VARIANT_V15_5,
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
 )
@@ -217,13 +224,19 @@ EXPERT_COUNT_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V15_2,)
 # token anchor (count_mode=legacy, K_max=5, seed_mode=token) through V15's
 # two-layer decoder, whose hidden width is dynamic_2dgs.gaussian_head.decoder_hidden.
 # V15.4 is V15.3 with eight temporal heads (54 channels each) instead of twelve
-# (36 each).
-DENSE_COUNT_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4)
+# (36 each). V15.5 is V15.4 whose v_init averages the layers' head-0 readouts
+# uniformly instead of under learned layer logits.
+DENSE_COUNT_DYNAMIC_VARIANTS = (
+    DYNAMIC_VARIANT_V15_3,
+    DYNAMIC_VARIANT_V15_4,
+    DYNAMIC_VARIANT_V15_5,
+)
 # The temporal head count is what separates V15.4 from V15.3, so each pins its
-# own dynamic_2dgs.temporal.num_heads.
+# own dynamic_2dgs.temporal.num_heads; V15.5 keeps V15.4's eight.
 DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT = {
     DYNAMIC_VARIANT_V15_3: 12,
     DYNAMIC_VARIANT_V15_4: 8,
+    DYNAMIC_VARIANT_V15_5: 8,
 }
 # V16's ordinal nested count (p2g.grid_query.count_mode=nested_ordinal): V15's
 # G1..G5 prefixes, chosen by two bounded gates (G2/G3 present; G4/G5 present

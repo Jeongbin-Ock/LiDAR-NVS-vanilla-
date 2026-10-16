@@ -91,6 +91,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v15_4": (
         "DenseCountBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v15_5": (
+        "UniformLayerDenseCountBarrierVelocityGaussianBackend"
+    ),
     "dynamic_2dgs_attention_velocity_v16": (
         "OrdinalCountBarrierVelocityGaussianBackend"
     ),
@@ -217,6 +220,11 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v15_4": (
         "0d8954b0eef60c36271e", "ceac3d77acf6877837cd"
     ),
+    # V15.5 is V15.4 without temporal.layer_logits: V15.4's other tensors in
+    # V15.4's order and shapes.
+    "dynamic_2dgs_attention_velocity_v15_5": (
+        "2af16e29d261637ef45e", "38c6142795775fb5865f"
+    ),
     # V16 is V15 with the router's last layer swapped for two bias-free cosine
     # gates: router.4 holds one (2, 128) weight instead of (3, 128) + bias.
     "dynamic_2dgs_attention_velocity_v16": (
@@ -277,6 +285,8 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "CosineGateLayer": "ordinal_count",
     "DenseCountBarrierVelocityGaussianBackend": "backends",
     "DenseCountGaussianHead": "gaussian_slots",
+    "UniformLayerDenseCountBarrierVelocityGaussianBackend": "backends",
+    "UniformLayerMeanSoftplusBarrierCrossAttention": "temporal",
     "RadiusLocalAttentionBlock": "local_attention",
     "RawQKRoPELayerWeightedCrossAttention": "temporal",
     "RawQKRoPEVelocityGaussianBackend": "backends",
@@ -612,6 +622,39 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
         })
         for name in reshaped:
             self.assertEqual(tuple(new[name].shape), (temporal.head_dim,))
+
+    def test_v15_5_is_v15_4_without_the_layer_logits(self):
+        v15_4 = _build_backend("dynamic_2dgs_attention_velocity_v15_4")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v15_5")
+        self.assertIs(
+            type(backend),
+            _DYNAMIC.UniformLayerDenseCountBarrierVelocityGaussianBackend,
+        )
+        self.assertIsInstance(
+            backend, _DYNAMIC.DenseCountBarrierVelocityGaussianBackend
+        )
+        self.assertIs(
+            type(backend.temporal),
+            _DYNAMIC.UniformLayerMeanSoftplusBarrierCrossAttention,
+        )
+        self.assertEqual(backend.gaussians_per_token, 5)
+        self.assertEqual(backend.temporal.num_heads, 8)
+        self.assertAlmostEqual(backend.temporal.rope.base, 10.0 ** 1.875)
+        self.assertFalse(hasattr(backend.temporal, "layer_logits"))
+        old = v15_4.state_dict()
+        new = backend.state_dict()
+        self.assertEqual(
+            list(new), [name for name in old if name != "temporal.layer_logits"]
+        )
+        for name in new:
+            self.assertEqual(new[name].shape, old[name].shape)
+        # A V15.4 checkpoint does not load into V15.5 strictly: the logits
+        # are the one tensor it has no place for.
+        incompatible = backend.load_state_dict(old, strict=False)
+        self.assertEqual(incompatible.missing_keys, [])
+        self.assertEqual(
+            incompatible.unexpected_keys, ["temporal.layer_logits"]
+        )
 
     def test_v16_is_v15_with_two_bounded_ordinal_gates(self):
         v15 = _build_backend("dynamic_2dgs_attention_velocity_v15")

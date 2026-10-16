@@ -1016,7 +1016,8 @@ def _validate_temporal_config(config, variant: str, label: str) -> None:
         raise ValueError(
             f"{label} requires dynamic_2dgs.temporal.num_heads >= 2"
         )
-    # V15.3 and V15.4 differ only in the temporal head count.
+    # V15.3 and V15.4 differ only in the temporal head count; V15.5 keeps
+    # V15.4's.
     expected_heads = DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT.get(variant)
     if expected_heads is not None and num_heads != expected_heads:
         raise ValueError(

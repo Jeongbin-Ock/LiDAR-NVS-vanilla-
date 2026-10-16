@@ -62,6 +62,7 @@ python main.py model.variant=dynamic_2dgs_attention_velocity_v15_1
 python main.py model.variant=dynamic_2dgs_attention_velocity_v15_2
 python main.py model.variant=dynamic_2dgs_attention_velocity_v15_3
 python main.py model.variant=dynamic_2dgs_attention_velocity_v15_4
+python main.py model.variant=dynamic_2dgs_attention_velocity_v15_5
 python main.py model.variant=dynamic_2dgs_attention_velocity_v16
 python main.py model.variant=dynamic_2dgs_attention_velocity_v16_1
 ```
@@ -86,7 +87,9 @@ every slot at the token position. V15 decodes five Gaussians per token around
 that anchor and lets a router pick one, three or five (`nested_gumbel`); V15.2
 gives each of those three options its own expert (`expert_gumbel`), V15.3
 has no router and renders five Gaussians per token (`legacy`, `K_max: 5`),
-V15.4 is V15.3 with eight temporal heads instead of twelve, and
+V15.4 is V15.3 with eight temporal heads instead of twelve, V15.5 is V15.4
+with `v_init` read from the uniform mean over layers instead of a learned layer
+mixture, and
 V16 picks V15's prefixes with two bounded ordinal gates trained through masked
 rasterization (`nested_ordinal`); V16.1 is V16 whose second training render is
 a uniformly random prefix per token.
@@ -828,8 +831,8 @@ differs from V14.1's in exactly the five changes above.
 
 **V15.1, V15.2, V15.3, V16 and V16.1** keep every V15 key above -- stem,
 optimizer groups, temporal stack without LayerScale, local attention, loader --
-and change only how the Gaussian head turns a token into Gaussians (V15.4, below
-the table, changes the temporal head count instead):
+and change only how the Gaussian head turns a token into Gaussians (V15.4 and
+V15.5, below the table, change the temporal stack instead):
 
 | Variant | Count contract | Rendered per token | Training renders |
 | --- | --- | --- | --- |
@@ -861,6 +864,18 @@ it pads V15.3's 36 to 40. The local-attention block keeps twelve heads. V15.3
 and V15.4 each pin their head count (12 and 8); any other value is rejected.
 The checkpoint differs from V15.3's only in the per-layer Q/K RMSNorm gains,
 which are one head wide.
+
+**V15.5** is V15.4 whose `v_init` reads the plain mean of the twelve layers'
+head-0 coordinate expectations, `matched_position = (1/L) * sum_l mu_l`, instead
+of V15.4's `softmax(layer_logits)` mixture over twelve learned scalars. Zero
+logits are that same uniform mixture, so a fresh V15.5 and a fresh V15.4 agree;
+V15.5 only keeps it fixed at `1/L` for the whole run. Its overlay is V15.4's key
+for key except `model.variant`: the change lives in its backend class,
+`UniformLayerDenseCountBarrierVelocityGaussianBackend`, whose temporal stack
+(`UniformLayerMeanSoftplusBarrierCrossAttention`) is V14.1's without
+`layer_logits`. The checkpoint is V15.4's minus `temporal.layer_logits`, and,
+like V11.2, it logs no `motion_layer_weight_*` diagnostics because no mixture is
+learned.
 
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other

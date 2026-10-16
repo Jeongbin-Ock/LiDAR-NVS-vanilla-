@@ -22,6 +22,7 @@ from .dynamic.temporal import (
     RawQKRoPELayerWeightedCrossAttention,
     RMSNormFeatureRoPELayerWeightedCrossAttention,
     RMSNormRoPELayerWeightedCrossAttention,
+    UniformLayerMeanSoftplusBarrierCrossAttention,
 )
 from .dynamic.gaussian_slots import DenseCountGaussianHead
 from .dynamic.heads import EmbeddedInitVelocityHead, GaussianAttributeHead
@@ -50,6 +51,7 @@ from .dynamic.backends import (
     SeedConditionedBarrierVelocityGaussianBackend,
     SeedConditionedCosineRoPEVelocityGaussianBackend,
     SingleGaussianBarrierVelocityGaussianBackend,
+    UniformLayerDenseCountBarrierVelocityGaussianBackend,
 )
 from .dynamic.trajectory import DynamicGausTemp
 
@@ -99,4 +101,6 @@ __all__ = [
     "SeedConditionedCosineRoPEVelocityGaussianBackend",
     "SingleGaussianBarrierVelocityGaussianBackend",
     "SinusoidalScalarEncoder",
+    "UniformLayerDenseCountBarrierVelocityGaussianBackend",
+    "UniformLayerMeanSoftplusBarrierCrossAttention",
 ]

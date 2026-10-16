@@ -1,0 +1,154 @@
+# Bbox-free Dynamic 2DGS V15.5.
+#
+# V15.4 with v_init read from the plain mean of the twelve layers' head-0
+# coordinate readouts. V15.4 (like V14.1 and every V15 sibling) mixes them under
+# softmax(layer_logits), twelve learned scalars initialized to zero; V15.5 drops
+# those logits and averages every layer at the fixed weight 1/12 for the whole
+# run, which is the mixture V15.4 starts from. Nothing else reads the logits, so
+# only v_init's layer weighting changes.
+#
+# Every key below is V15.4's
+# (config/variants/dynamic_2dgs_attention_velocity_v15_4.yaml) except
+# model.variant: eight temporal heads of 54 channels, rope_base 10^1.875, the
+# 12-head radius local-attention block and the dense five-Gaussian head. The
+# backend class (UniformLayerDenseCountBarrierVelocityGaussianBackend) carries
+# the change.
+model:
+  variant: dynamic_2dgs_attention_velocity_v15_5
+
+exp_name: ${model.variant}-bs-${train.batch_size}
+
+p2g:
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: true
+    input_mode: xyzi
+    rank: 16
+    alpha: 16
+    dropout: 0.0
+  utonia_adaptation:
+    mode: hybrid
+    lora_targets: [attention, cpe, pooling]
+    train_layer_norm: true
+    stem:
+      train_intensity_column: true
+      adapter_position: post_activation
+      adapter_hidden: 16
+      adapter_activation: gelu
+      adapter_scale: 1.0
+    ffn_adapter:
+      widths: [8, 16, 32, 64]
+      activation: relu
+      scale: 0.1
+      dropout: 0.0
+  grid_query:
+    count_mode: legacy
+    K_max: 5
+    seed_mode: token
+
+train:
+  # One learning rate for the whole model: since 2026-10-08 every Utonia role
+  # follows train.lr (previously 1e-3 intensity/adapter, 5e-5 LoRA/LayerNorm).
+  # Each role keeps its weight decay; earlier checkpoints resume with the rates
+  # embedded in their config.
+  utonia_param_groups:
+    intensity:
+      lr: ${train.lr}
+      weight_decay: 1.0e-4
+    adapter:
+      lr: ${train.lr}
+      weight_decay: 1.0e-4
+      bias_weight_decay: 0.0
+    lora:
+      lr: ${train.lr}
+      weight_decay: 1.0e-4
+    layer_norm:
+      lr: ${train.lr}
+      weight_decay: 0.0
+  # Names relative to Point2Gaus. These parameters train at train.lr with no
+  # weight decay, in a last `downstream_no_decay` group.
+  downstream_no_decay: [dynamic_backend.temporal.v_raw]
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+
+# Default training data: config/data/nuscenes_dynamic.yaml, the random-duration
+# loader with the two LiDAR4D scenes held out. data_config=<name> picks another.
+data_config: nuscenes_dynamic
+
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    # V15.3: 12 heads of 36 channels.
+    num_heads: 8
+    mlp_ratio: 4
+
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+
+    position_encoding: barrier_rope_split
+
+    # V14.1's linear hinge at the learned global speed:
+    #   bias_ij = -relu(d_ij / (softplus(v_raw) * |dt|) - 1).
+    # This 30 m/s value initializes v_raw; after construction the active speed
+    # comes from the parameter, not from the config value.
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+
+    # Heads 1-7 only. 2*pi/scale = 5 m for the highest-frequency 3D RoPE band;
+    # the nine bands per axis run 5, 8.1, 13.1, 21.1, 34.1, 55.0, 88.9, 143.6,
+    # 232.1 m (V15.3's six: 5, 10.8, 23.2, 50.0, 107.7, 232.1 m at base 100).
+    rope_base: 74.98942093324558      # 10^1.875
+    rope_position_scale: 1.2566370614359172
+
+    qk_norm: true
+    # No LayerScale: every layer adds out_proj(attended) to the residual stream
+    # as is. layer_scale_init would have nothing to initialize, so it is absent.
+    layer_scale: false
+
+  # One pre-LN block after the temporal stack: x + Attn(LN(x)), then
+  # + FFN(LN(.)) with a SiLU FFN whose last layer starts at zero. Every token
+  # attends to all tokens of both sweeps within radius_m at their reference-frame
+  # positions (itself included), without QK RMSNorm or LayerScale. 3D RoPE at
+  # base 10^1.2 and 2*pi/0.4 rad/m gives six wavelengths per axis from 0.4 m (the
+  # voxel) to 4.0 m; the longest half-wavelength, 2 m, exceeds the 0.8 m radius.
+  # query_chunk_size is how many queries (one FlashAttention2 varlen sequence
+  # each) go into one call; FlashAttention2 takes at most 65535.
+  local_attention:
+    radius_m: 0.8
+    num_heads: 12
+    mlp_ratio: 4
+    rope_base: 15.848931924611133      # 10^1.2
+    rope_position_scale: 15.707963267948966  # 2*pi/0.4 -> wavelengths 0.4-4.0 m
+    implementation: flash_varlen
+    query_chunk_size: 4096
+
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+    # Hidden width of the router-free decoder (V15's decoder_hidden).
+    decoder_hidden: 576
+
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+
+  regularization:
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+
+loss:
+  w_chamfer: 0.02

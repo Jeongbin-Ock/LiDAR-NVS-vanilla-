@@ -1,4 +1,8 @@
-"""V15.2's per-option expert head and V15.3's router-free dense head."""
+"""V15.2's per-option expert head and V15.3's router-free dense head.
+
+V15.5 is the dense head behind a temporal stack whose v_init is the uniform
+layer mean; its backend tests sit beside V15.3's.
+"""
 from __future__ import annotations
 
 import math
@@ -15,6 +19,8 @@ from src.models.module.dynamic_gaussian import (
     NestedCountGaussianHead,
     OptionExpertBarrierVelocityGaussianBackend,
     OptionExpertGaussianHead,
+    UniformLayerDenseCountBarrierVelocityGaussianBackend,
+    UniformLayerMeanSoftplusBarrierCrossAttention,
 )
 from src.models.utils.render import Gaussianutil
 
@@ -611,6 +617,53 @@ def test_v15_3_velocity_reads_the_temporal_feature_not_the_local_refinement():
     assert not torch.equal(
         torch.cat([item["shs"] for item in before["batch_gaussians"]]),
         torch.cat([item["shs"] for item in after["batch_gaussians"]]),
+    )
+
+
+def _uniform_layer_backend():
+    return UniformLayerDenseCountBarrierVelocityGaussianBackend(
+        _backend_cfg(decoder_hidden=32), _gs_params(), dim=DIM,
+        offset_bound=0.4, gaussians_per_token=5, seed_mode="token",
+    )
+
+
+def test_v15_5_backend_is_the_dense_backend_without_layer_logits():
+    torch.manual_seed(13)
+    dense = _dense_backend()
+    torch.manual_seed(13)
+    backend = _uniform_layer_backend()
+    assert isinstance(backend, DenseCountBarrierVelocityGaussianBackend)
+    assert isinstance(
+        backend.temporal, UniformLayerMeanSoftplusBarrierCrossAttention
+    )
+    old, new = dense.state_dict(), backend.state_dict()
+    assert list(new) == [name for name in old if name != "temporal.layer_logits"]
+    for name, value in new.items():
+        assert torch.equal(value, old[name])
+
+    dense.eval()
+    backend.eval()
+    with torch.no_grad():
+        # Zero logits are the uniform mixture, so a fresh pair agrees.
+        expected = dense(*_inputs(slots=5))["batch_gaussians"]
+        items = backend(*_inputs(slots=5))["batch_gaussians"]
+        for name in ("position", "velocity", "velocity_init", "shs"):
+            torch.testing.assert_close(
+                torch.cat([item[name] for item in items]),
+                torch.cat([item[name] for item in expected]),
+                atol=1.0e-5, rtol=1.0e-5,
+            )
+        assert "motion_layer_weights" in expected[0]
+        for item in items:
+            assert "motion_layer_logits" not in item
+            assert "motion_layer_weights" not in item
+        _check_token_contract(items, per_token_count=5)
+        # V15.3's mixture can move; V15.5's has nothing to move.
+        dense.temporal.layer_logits.copy_(torch.tensor([-20.0, 20.0]))
+        moved = dense(*_inputs(slots=5))["batch_gaussians"]
+    assert not torch.allclose(
+        torch.cat([item["velocity_init"] for item in moved]),
+        torch.cat([item["velocity_init"] for item in items]),
     )
 
 

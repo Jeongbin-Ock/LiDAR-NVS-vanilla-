@@ -33,6 +33,7 @@ from .temporal import (
     RawQKRoPELayerWeightedCrossAttention,
     RMSNormFeatureRoPELayerWeightedCrossAttention,
     RMSNormRoPELayerWeightedCrossAttention,
+    UniformLayerMeanSoftplusBarrierCrossAttention,
 )
 
 class DynamicGaussianBackend(nn.Module):
@@ -1206,6 +1207,25 @@ class DenseCountBarrierVelocityGaussianBackend(
         )
 
 
+class UniformLayerDenseCountBarrierVelocityGaussianBackend(
+    DenseCountBarrierVelocityGaussianBackend
+):
+    """V15.5: V15.4 whose ``v_init`` averages the layer readouts uniformly.
+
+    The temporal stack is
+    :class:`UniformLayerMeanSoftplusBarrierCrossAttention`: V15.4's
+    stack (eight temporal heads, from its config) without the learned layer
+    logits, so ``v_init`` reads the plain ``1/L`` mean of the ``L`` head-0
+    coordinate expectations. The local-attention block and the dense
+    five-Gaussian head are V15.4's.
+    """
+
+    def _build_temporal(self, cfg):
+        return UniformLayerMeanSoftplusBarrierCrossAttention(
+            cfg.temporal, self.dim
+        )
+
+
 __all__ = [
     "DynamicGaussianBackend",
     "RouterCapableGaussianBackend",
@@ -1227,4 +1247,5 @@ __all__ = [
     "OptionExpertBarrierVelocityGaussianBackend",
     "OrdinalCountBarrierVelocityGaussianBackend",
     "DenseCountBarrierVelocityGaussianBackend",
+    "UniformLayerDenseCountBarrierVelocityGaussianBackend",
 ]

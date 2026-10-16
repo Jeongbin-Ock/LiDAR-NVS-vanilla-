@@ -39,6 +39,7 @@ from src.experiment_config import (
     DYNAMIC_VARIANT_V15_2,
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V15_4,
+    DYNAMIC_VARIANT_V15_5,
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
     DYNAMIC_VARIANTS,
@@ -1808,7 +1809,7 @@ class V15ConfigTest(unittest.TestCase):
         self.assertEqual(V15_FAMILY_DYNAMIC_VARIANTS, (
             DYNAMIC_VARIANT_V15, DYNAMIC_VARIANT_V15_1,
             DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
-            DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1,
+            DYNAMIC_VARIANT_V15_5, DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1,
         ))
         for group in (
             LOCAL_ATTENTION_DYNAMIC_VARIANTS,
@@ -2221,6 +2222,7 @@ class V15SiblingConfigTest(unittest.TestCase):
     def test_registration(self):
         for variant in (
             DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
+            DYNAMIC_VARIANT_V15_5,
         ):
             with self.subTest(variant=variant):
                 self.assertIn(variant, DYNAMIC_VARIANTS)
@@ -2236,10 +2238,11 @@ class V15SiblingConfigTest(unittest.TestCase):
         self.assertEqual(EXPERT_COUNT_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V15_2,))
         self.assertEqual(
             DENSE_COUNT_DYNAMIC_VARIANTS,
-            (DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4),
+            (DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4, DYNAMIC_VARIANT_V15_5),
         )
         self.assertEqual(DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT, {
             DYNAMIC_VARIANT_V15_3: 12, DYNAMIC_VARIANT_V15_4: 8,
+            DYNAMIC_VARIANT_V15_5: 8,
         })
         self.assertEqual(EXPERT_COUNT_MODE, "expert_gumbel")
         self.assertEqual(EXPERT_AUXILIARY_RENDERS, ("dense_add", "none"))
@@ -2327,10 +2330,26 @@ class V15SiblingConfigTest(unittest.TestCase):
         self.assertAlmostEqual(float(new[-1]), float(old[-1]), places=3)
         self.assertAlmostEqual(float(new[0]), 5.0, places=5)
 
+    def test_v15_5_config_is_v15_4s(self):
+        # V15.5's change (the uniform layer mean) lives in its backend class,
+        # so its composed config differs from V15.4's only in its name.
+        v15_4, _ = self._compose(variant=DYNAMIC_VARIANT_V15_4)
+        v15_5, _ = self._compose(variant=DYNAMIC_VARIANT_V15_5)
+        a = self._leaves(OmegaConf.to_container(v15_4, resolve=True))
+        b = self._leaves(OmegaConf.to_container(v15_5, resolve=True))
+        changed = {
+            key for key in set(a) | set(b)
+            if a.get(key, "<absent>") != b.get(key, "<absent>")
+        }
+        self.assertEqual(changed, {"model.variant", "exp_name", "logger.dir"})
+        self.assertEqual(b["dynamic_2dgs.temporal.num_heads"], 8)
+        self.assertEqual(b["data.dataset_name"], "nuscenes_dynamic_lidar4d")
+
     def test_v15_3_and_v15_4_pin_their_temporal_head_counts(self):
         for variant, heads, other in (
             (DYNAMIC_VARIANT_V15_3, 12, 8),
             (DYNAMIC_VARIANT_V15_4, 8, 12),
+            (DYNAMIC_VARIANT_V15_5, 8, 12),
         ):
             with self.subTest(variant=variant):
                 self._rejected(
@@ -2508,6 +2527,10 @@ class V15SiblingConfigTest(unittest.TestCase):
                 )),
                 (DYNAMIC_VARIANT_V15_4, (
                     "dynamic_2dgs.temporal.num_heads=12",
+                    "dynamic_2dgs.temporal.rope_base=100.0",
+                )),
+                (DYNAMIC_VARIANT_V15_5, (
+                    "model.variant=dynamic_2dgs_attention_velocity_v15_4",
                     "dynamic_2dgs.temporal.rope_base=100.0",
                 )),
             ):

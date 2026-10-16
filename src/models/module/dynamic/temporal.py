@@ -666,13 +666,16 @@ class MaxSpeedBarrierLayerWeightedCrossAttention(
         ) = self._combine_layer_matches(
             torch.stack(layer_matched_positions, dim=1), position_ref
         )
-        return x, {
+        fields = {
             "delta_p_match": displacement,
             "delta_p_init": displacement,
             "matched_position": matched_position,
-            "motion_layer_logits": token_logits,
-            "motion_layer_weights": token_weights,
         }
+        # A fixed uniform mean (V15.5) has no logits and publishes neither.
+        if token_logits is not None:
+            fields["motion_layer_logits"] = token_logits
+            fields["motion_layer_weights"] = token_weights
+        return x, fields
 
 
 class _LearnedRadiusBarrierCrossAttention(
@@ -843,6 +846,40 @@ class GlobalSoftplusMaxSpeedBarrierCrossAttention(
         stats["barrier_v_raw"] = float(self.v_raw)
         stats["barrier_speed_mps"] = float(self.v_max)
         return stats
+
+
+class UniformLayerMeanSoftplusBarrierCrossAttention(
+    GlobalSoftplusMaxSpeedBarrierCrossAttention
+):
+    """V15.5: V14.1's stack whose ``v_init`` is the plain mean over layers.
+
+    V14.1 and every V15 sibling mix the ``L`` head-0 coordinate expectations
+    under ``softmax(layer_logits)``. V15.5 drops those ``L`` logits and takes
+    ``matched_position = (1/L) * sum_l mu_l``, so every layer's readout keeps
+    the weight ``1/L`` for the whole run. That is the mixture a fresh V14.1
+    starts from; only its learnability goes. Every other parameter, the
+    barrier and the learned ``v_raw`` included, is V14.1's. With no logits
+    there is no mixture to report, so, like V11.2, it publishes neither
+    ``motion_layer_logits`` nor ``motion_layer_weights``.
+    """
+
+    def __init__(self, cfg, dim: int):
+        super().__init__(cfg, dim)
+        del self.layer_logits
+
+    def _combine_layer_matches(self, layer_matched_positions, position_ref):
+        """The uniform mean of the per-layer coordinate expectations."""
+        if layer_matched_positions.ndim != 3:
+            raise ValueError("V15.5 layer matches must have shape (N,L,3)")
+        if layer_matched_positions.shape[1] != self.n_layers:
+            raise ValueError("V15.5 layer matches must cover every layer")
+        if layer_matched_positions.shape[-1] != 3:
+            raise ValueError("V15.5 layer matches must end in xyz")
+        if position_ref.shape != (layer_matched_positions.shape[0], 3):
+            raise ValueError("V15.5 positions must align with layer matches")
+        matched_position = layer_matched_positions.float().mean(dim=1)
+        displacement = matched_position - position_ref.float()
+        return matched_position, displacement, None, None
 
 
 class FinalFeatureBarrierCrossAttention(
@@ -1911,4 +1948,5 @@ __all__ = [
     "GlobalSoftplusMaxSpeedBarrierCrossAttention",
     "LayerwiseSoftplusMaxSpeedBarrierCrossAttention",
     "LearnableMaxSpeedBarrierLayerWeightedCrossAttention",
+    "UniformLayerMeanSoftplusBarrierCrossAttention",
 ]

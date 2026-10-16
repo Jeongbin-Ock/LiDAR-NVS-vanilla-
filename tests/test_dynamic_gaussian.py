@@ -50,6 +50,7 @@ from src.models.module.dynamic_gaussian import (
     RMSNormFeatureRoPEVelocityGaussianBackend,
     RMSNormRoPELayerWeightedCrossAttention,
     RMSNormRoPEVelocityGaussianBackend,
+    UniformLayerMeanSoftplusBarrierCrossAttention,
 )
 from src.models.module.m3_g2p import DynamicGausRender
 from src.models.utils.attention import Rotary3D
@@ -2096,6 +2097,121 @@ class V14_1GlobalSoftplusMaxSpeedBarrierAttentionTest(unittest.TestCase):
         self.assertFalse(backend.gaussian_head.seed_conditioned)
         self.assertEqual(backend.gaussian_head.trunk[0].in_features, 24)
         self.assertIsInstance(backend.velocity_head, EmbeddedInitVelocityHead)
+
+
+class V15_5UniformLayerMeanAttentionTest(unittest.TestCase):
+    """V15.5 reads v_init from the plain mean of the layers' head-0 readouts."""
+
+    @staticmethod
+    def _forward_args(feature, position, first_frame_tokens, duration=0.8):
+        return V11MaxSpeedBarrierAttentionTest._forward_args(
+            feature, position, first_frame_tokens, duration
+        )
+
+    def test_v14_1_parameters_without_the_layer_logits(self):
+        module = UniformLayerMeanSoftplusBarrierCrossAttention(
+            v12_temporal_cfg(layers=3), dim=24
+        )
+        reference = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            v12_temporal_cfg(layers=3), dim=24
+        )
+        self.assertFalse(hasattr(module, "layer_logits"))
+        self.assertEqual(
+            [name for name, _ in module.named_parameters()],
+            [
+                name for name, _ in reference.named_parameters()
+                if name != "layer_logits"
+            ],
+        )
+        torch.testing.assert_close(module.v_max, torch.tensor(30.0))
+
+    def test_matched_position_is_the_mean_of_every_layer_readout(self):
+        torch.manual_seed(151)
+        module = UniformLayerMeanSoftplusBarrierCrossAttention(
+            v12_temporal_cfg(layers=3, match_chunk_size=2), dim=24
+        ).eval()
+        readouts = []
+        original = module._barrier_attention
+
+        def capture(*args):
+            result = original(*args)
+            readouts.append(result[1])
+            return result
+
+        feature = torch.randn(7, 24)
+        position = torch.randn(7, 3) * 12.0
+        with mock.patch.object(module, "_barrier_attention", capture):
+            with torch.no_grad():
+                _refined, fields = module(
+                    *self._forward_args(feature, position, 3)
+                )
+        self.assertEqual(len(readouts), 3)
+        expected = torch.stack(readouts, dim=1).mean(dim=1)
+        torch.testing.assert_close(fields["matched_position"], expected)
+        torch.testing.assert_close(
+            fields["delta_p_init"], expected - position
+        )
+        torch.testing.assert_close(
+            fields["delta_p_match"], fields["delta_p_init"]
+        )
+        # No logits, so no layer-mixture fields for the backend to publish.
+        self.assertNotIn("motion_layer_logits", fields)
+        self.assertNotIn("motion_layer_weights", fields)
+
+    def test_fresh_module_equals_v14_1_and_stays_uniform_when_it_trains(self):
+        cfg = v12_temporal_cfg(layers=3, match_chunk_size=2)
+        torch.manual_seed(152)
+        reference = GlobalSoftplusMaxSpeedBarrierCrossAttention(
+            cfg, dim=24
+        ).eval()
+        torch.manual_seed(152)
+        module = UniformLayerMeanSoftplusBarrierCrossAttention(
+            cfg, dim=24
+        ).eval()
+        feature = torch.randn(7, 24)
+        position = torch.randn(7, 3) * 12.0
+        args = self._forward_args(feature, position, 3)
+        with torch.no_grad():
+            refined, fields = module(*args)
+            expected_refined, expected_fields = reference(*args)
+            torch.testing.assert_close(refined, expected_refined)
+            torch.testing.assert_close(
+                fields["matched_position"],
+                expected_fields["matched_position"],
+                atol=1.0e-5, rtol=1.0e-5,
+            )
+            # Once V14.1's logits move away from zero the two part ways.
+            reference.layer_logits.copy_(torch.tensor([-20.0, 20.0, -20.0]))
+            _refined, moved = reference(*args)
+        self.assertFalse(torch.allclose(
+            moved["matched_position"], fields["matched_position"]
+        ))
+
+    def test_every_layer_and_the_speed_receive_gradient(self):
+        torch.manual_seed(153)
+        module = UniformLayerMeanSoftplusBarrierCrossAttention(
+            v12_temporal_cfg(layers=3, match_chunk_size=1), dim=24
+        ).train()
+        with torch.no_grad():
+            module.v_raw.fill_(
+                V12_2LayerwiseSoftplusMaxSpeedBarrierAttentionTest
+                ._softplus_inverse(25.0)
+            )
+        feature = torch.randn(3, 24)
+        position = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [20.0, 0.0, 0.0],
+            [60.0, 0.0, 0.0],
+        ])
+        _refined, fields = module(
+            *self._forward_args(feature, position, 1, duration=1.0)
+        )
+        fields["matched_position"].square().sum().backward()
+        self.assertNotEqual(float(module.v_raw.grad), 0.0)
+        for layer in range(module.n_layers):
+            self.assertGreater(
+                float(module.q_proj[layer].weight.grad.abs().sum()), 0.0
+            )
 
 
 class V13CosineRoPEAttentionTest(unittest.TestCase):
