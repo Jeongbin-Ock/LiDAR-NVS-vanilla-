@@ -1,0 +1,60 @@
+# Zero-shot H3D inference for a KITTI-360 checkpoint on a uniform 66x1030 grid
+# (the grid v15.3_kitti_lidar4d trained on, fitted to the H3D unit). Every val/test
+# scenario of >= 5 s gives one target per whole second T, rendered from the
+# sweeps nearest to T-0.1 s and T+0.1 s (the 0.2 s gap). Data contract and the
+# sensor/pose checks behind these values: config/h3d_inference.md.
+#   python test_lidar4d_nvs.py eval_config=config/eval/h3d_inference_lidar4d.yaml \
+#     test.ckpt_path=/abs/path/epoch=29.ckpt device=[6]
+mode: test
+seed: 42
+device: [6]
+# null -> <checkpoint folder>/lidar4d_h3d_eval; CLI out_dir still overrides.
+out_dir: null
+depth_statistic: median
+data:
+  dataset_name: h3d_lidar4d
+  dataroot: /data1/LiDAR/H3D/data/icra_benchmark_20200103_with_odom
+  version: H3D-icra_benchmark_20200103_with_odom
+  splits: [val, test]       # official detection_{split}.txt lists
+  scenarios: null           # optional subset of scenario names (sharding)
+  min_duration_sec: 5.0     # first-to-last sweep span
+  max_frame_time_error_sec: 0.05
+  coordinate_frame: ego_vehicle
+  mode: nvs
+  bbox_json_path: null
+  train_excluded_scenes: null
+  # H3D has no LiDAR-to-vehicle calibration. This is KITTI-360's ego_from_lidar
+  # (rotation and x/y unchanged) with z raised 0.152 m: the H3D LiDAR sits
+  # 0.152 m higher above the fitted road plane (-1.879 vs -1.727 m), with the
+  # same plane tilt (0.50/-0.15 vs 0.39/-0.03 deg), so the road lands at the
+  # same ego height as in training.
+  ego_from_lidar:
+    - [0.999929063, 0.005774300, 0.010417564, 0.771049336]
+    - [-0.005805356, 0.999978788, 0.002953306, -0.298541436]
+    - [-0.010400290, -0.003013574, 0.999941374, 0.988280219]
+    - [0.0, 0.0, 0.0, 1.0]
+  intensity_divisor: 256.0  # KITTI-360 stores the 8-bit value / 256 (H3D tool: / 255)
+  panorama_projection: uniform
+  image_height: 66
+  image_width: 1030
+  # The H3D unit's grid: LiDAR4D's KITTI-360 rows [-24.9, 2.0] shifted by +0.4 deg,
+  # the measured beam offset of the H3D unit (beam angles +0.32; seen from the
+  # sensor origin +0.35..0.43 at 10-40 m; GT row-fill alignment +0.40), so the
+  # same 66 rows of 0.41 deg sit on the same lasers. KITTI grid: data.vfov=[-24.9,2.0].
+  vfov: [-24.5, 2.4]
+  hfov: [-180.0, 180.0]
+  ring_to_elevation_deg: null
+  ego_radius: 2.5          # model input crop, as trained
+  input_max_range_m: 80.0  # KITTI-360 scans hold no return beyond ~80 m; 0.5% of H3D returns do
+  gt_ego_radius: 2.5       # GT crop, as trained and in the KITTI benchmark overlay
+  max_depth_m: 80.0
+  compact_val:
+    enable: false
+  verbose: true
+test:
+  batch_size: 1
+  ckpt_path: null
+  input_offsets_sec: [-0.1, 0.1]
+  velocity_source: total
+  shuffle_orders: false
+  save_gaussian_viz: false  # per-sequence Gaussian HTML is ~140 MB per window

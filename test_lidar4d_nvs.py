@@ -316,6 +316,11 @@ def main(cfg, config_source="unspecified"):
               f"(epoch {raydrop_refine_base['epoch']}, "
               f"sha256 {raydrop_refine_base['sha256'][:12]})")
     backends = MetricBackends(lpips_net="alex")
+    # Per-sequence Gaussian center/surfel HTML holds every window's Gaussians
+    # in memory and takes ~140 MB per window on disk; false keeps the metrics,
+    # PNGs and Gaussian-size statistics only (large sweeps such as H3D).
+    save_gaussian_viz = bool(OmegaConf.select(cfg, "test.save_gaussian_viz", default=True))
+    print(f"[setup] save_gaussian_viz={save_gaussian_viz}")
 
     input_offsets_sec = OmegaConf.select(cfg, "test.input_offsets_sec", default=None)
     input_offsets_sec = (
@@ -413,58 +418,59 @@ def main(cfg, config_source="unspecified"):
                  depth_keep, gt_depth, intensity_keep, gt_intensity,
                  raydrop, gt_raydrop)
 
-        # Raw LiDAR in the same (ref) frame as the Gaussian means, so the HTML
-        # can show whether a Gaussian actually sits on a measured surface: the
-        # two input endpoints (what the model saw) and the GT sweep at the
-        # target time (what it must reproduce).
-        in_pts = _input["lidar_points"][:, :3].detach().cpu().numpy()
-        gt_off = gt["offset"].tolist()
-        gt_start = ([0] + gt_off[:-1])[target_cam]
-        gt_pts = gt["lidar_points"][gt_start:gt_off[target_cam], :3].detach().cpu().numpy()
-
-        # Gaussian centers + 1σ surfels at this window's target time (per-seq HTML).
         target_gaussians = out[b]
         render_t = float(model.g2p_model.render_timestamp(gt_cam))
-        transport = velocity_transport_from_output(
-            model.g2p_model, target_gaussians, render_t
-        )
-        source_times = transport["source_times_sec"]
-        source_delta_t = render_t - source_times
-        delta_label = ", ".join(
-            f"{float(value):+.6f}" for value in source_delta_t
-        )
-        center_frame = {
-            "label": (
-                f"{target_label} | target={render_t:.6f}s | "
-                f"source→target Δt=[{delta_label}]s"
-            ),
-            "source_frame_centers": transport[
-                "target_centers_by_source_frame"
-            ],
-            "velocity_origins": transport["source_centers"],
-            "velocity_mps": transport["velocity_mps"],
-            "velocity_delta_t_sec": transport["delta_t_sec"],
-            "velocity_source_frame_index": transport[
-                "source_frame_index"
-            ],
-            "input_points": in_pts,
-            "gt_points": gt_pts,
-        }
-        seq_gauss[seq_name].append(center_frame)
-        # GT boxes at the target-second frame, interpolated to the sweep time
-        # (not the stale parent-keyframe anns) and in the Gaussian ref frame, so
-        # the surfel HTML can highlight in-bbox Gaussians + draw the boxes.
-        gt_boxes_ref = dataset.target_boxes_ref(i)
-        surf = surfels_from_output(
-            model.g2p_model, target_gaussians, render_t,
-            gt_boxes_ref=gt_boxes_ref,
-        )
-        seq_surfel[seq_name].append({
-            "label": target_label, "static": surf["static"],
-            "dynamic": surf["dynamic"], "dynamic_in_box": surf["dynamic_in_box"],
-            "gt_boxes": surf["gt_boxes"],
-            "input_points": in_pts, "gt_points": gt_pts,
-            "pred_points": pred_pts})
+        if save_gaussian_viz:
+            # Raw LiDAR in the same (ref) frame as the Gaussian means, so the HTML
+            # can show whether a Gaussian actually sits on a measured surface: the
+            # two input endpoints (what the model saw) and the GT sweep at the
+            # target time (what it must reproduce).
+            in_pts = _input["lidar_points"][:, :3].detach().cpu().numpy()
+            gt_off = gt["offset"].tolist()
+            gt_start = ([0] + gt_off[:-1])[target_cam]
+            gt_pts = gt["lidar_points"][gt_start:gt_off[target_cam], :3].detach().cpu().numpy()
+
+            # Gaussian centers + 1σ surfels at this window's target time (per-seq HTML).
+            transport = velocity_transport_from_output(
+                model.g2p_model, target_gaussians, render_t
+            )
+            source_times = transport["source_times_sec"]
+            source_delta_t = render_t - source_times
+            delta_label = ", ".join(
+                f"{float(value):+.6f}" for value in source_delta_t
+            )
+            center_frame = {
+                "label": (
+                    f"{target_label} | target={render_t:.6f}s | "
+                    f"source→target Δt=[{delta_label}]s"
+                ),
+                "source_frame_centers": transport[
+                    "target_centers_by_source_frame"
+                ],
+                "velocity_origins": transport["source_centers"],
+                "velocity_mps": transport["velocity_mps"],
+                "velocity_delta_t_sec": transport["delta_t_sec"],
+                "velocity_source_frame_index": transport[
+                    "source_frame_index"
+                ],
+                "input_points": in_pts,
+                "gt_points": gt_pts,
+            }
+            seq_gauss[seq_name].append(center_frame)
+            # GT boxes at the target-second frame, interpolated to the sweep time
+            # (not the stale parent-keyframe anns) and in the Gaussian ref frame, so
+            # the surfel HTML can highlight in-bbox Gaussians + draw the boxes.
+            gt_boxes_ref = dataset.target_boxes_ref(i)
+            surf = surfels_from_output(
+                model.g2p_model, target_gaussians, render_t,
+                gt_boxes_ref=gt_boxes_ref,
+            )
+            seq_surfel[seq_name].append({
+                "label": target_label, "static": surf["static"],
+                "dynamic": surf["dynamic"], "dynamic_in_box": surf["dynamic_in_box"],
+                "gt_boxes": surf["gt_boxes"],
+                "input_points": in_pts, "gt_points": gt_pts,
+                "pred_points": pred_pts})
 
         # per-window Gaussian-size statistics (effective radius vs geometry)
         st = collect_window_stats(
@@ -490,7 +496,8 @@ def main(cfg, config_source="unspecified"):
                            ), frames=frames)
         save_sequence_surfel_html(gauss_dir / f"{seq_name}_surfel.html",
                                   title=f"{seq_name}  ({sp})", frames=seq_surfel[seq_name])
-    print(f"[gaussians] wrote {len(seq_gauss)} center + {len(seq_surfel)} surfel HTML -> {gauss_dir}")
+    if save_gaussian_viz:
+        print(f"[gaussians] wrote {len(seq_gauss)} center + {len(seq_surfel)} surfel HTML -> {gauss_dir}")
 
     # ── Gaussian-size statistical analysis (overall + per nuScenes split) ────
     print("\n" + "-" * 70)
@@ -570,7 +577,8 @@ def main(cfg, config_source="unspecified"):
         print(f"[{name}  ({seq_split[name]})]\n{fmt(per_seq[name])}")
     print("-" * 70)
     print("PER nuScenes OFFICIAL SPLIT  (training exposure depends on scene exclusions)"
-          if dataset_name == "nuscenes" else "PER KITTI-360 SCENE CATEGORY")
+          if dataset_name == "nuscenes" else "PER H3D OFFICIAL SPLIT"
+          if dataset_name == "h3d" else "PER KITTI-360 SCENE CATEGORY")
     for sp in sorted(per_split):
         print(f"<{sp}>  seqs={per_split[sp]['sequences']}  "
               f"n={per_split[sp]['num_windows']}\n{fmt(per_split[sp])}")

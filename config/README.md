@@ -1422,6 +1422,17 @@ Details, measured sweep rates, annotation coverage, and clip splits:
 Sensor specifications, panorama construction, and configuration changes for a
 different training dataset: [`sensor_data_contract.md`](sensor_data_contract.md).
 
+## H3D zero-shot inference
+
+`config/eval/h3d_inference_lidar4d.yaml` evaluates a KITTI-360 checkpoint on
+Honda H3D (another HDL-64E) without H3D training: every val/test scenario of
+at least 5 s gives one target per whole second, rendered from the sweeps at
+-0.1/+0.1 s on a uniform 66×1030 grid whose vfov ([-24.5, 2.4]°) follows the
+H3D unit's beams. H3D has no LiDAR-to-vehicle calibration, so the overlay
+supplies `data.ego_from_lidar` (KITTI-360's, raised to H3D's mounting height). Loader: `src/dataloader/h3d/`. Release
+layout, sensor comparison, pose and timing conventions:
+[`h3d_inference.md`](h3d_inference.md).
+
 ## Raydrop refinement (`refine_config=raydrop_unet`)
 
 A second training stage on top of a finished model, as LiDAR4D, GS-LiDAR,

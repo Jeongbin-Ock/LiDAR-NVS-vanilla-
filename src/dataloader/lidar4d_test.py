@@ -8,6 +8,8 @@ def canonical_lidar4d_dataset_name(cfg):
         return "nuscenes"
     if name in {"kitti360", "kitti360_lidar4d", "kitti360_dynamic"}:
         return "kitti360"
+    if name in {"h3d", "h3d_lidar4d"}:
+        return "h3d"
     raise ValueError(f"Unsupported LiDAR4D inference dataset: {name!r}")
 
 
@@ -26,5 +28,10 @@ def build_lidar4d_test_dataset(cfg, *, input_offsets_sec=(-0.5, 0.5)):
     if name == "kitti360":
         from .kitti360.lidar4d_test import LiDAR4DKITTI360TestDataset
         return LiDAR4DKITTI360TestDataset(
+            cfg, split=split, input_offsets_sec=input_offsets_sec,
+        )
+    if name == "h3d":
+        from .h3d.lidar4d_test import LiDAR4DH3DTestDataset
+        return LiDAR4DH3DTestDataset(
             cfg, split=split, input_offsets_sec=input_offsets_sec,
         )
