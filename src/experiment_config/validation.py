@@ -315,15 +315,16 @@ def _validate_raydrop_refine(config) -> None:
 
     Absent or ``enable: false`` is an ordinary model run. Enabled, the block
     names the frozen checkpoint (recorded with its hash, epoch and step when
-    ``refine_config`` composes the run) and the U-Net's input settings.
+    ``refine_config`` composes the run), the data profile swapped in by
+    ``data_config`` if any, and the U-Net's input settings.
     """
     if not _has_path(config, "raydrop_refine"):
         return
     root = "raydrop_refine"
     _reject_unknown_keys(config, root, {
         "enable", "base_ckpt", "base_ckpt_sha256", "base_epoch",
-        "base_global_step", "base_exp_name", "channels", "depth_scale_m",
-        "box_mask",
+        "base_global_step", "base_exp_name", "data_profile", "channels",
+        "depth_scale_m", "box_mask",
     })
     _require_flag(config, f"{root}.enable")
     if not bool(OmegaConf.select(config, f"{root}.enable")):

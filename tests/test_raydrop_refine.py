@@ -19,6 +19,7 @@ from src.experiment_config import (
     compose_refine_config,
     raydrop_refine_base_record,
     raydrop_refine_enabled,
+    resolve_data_profile,
     resolve_main_config,
 )
 
@@ -214,11 +215,49 @@ class RefineConfigTest(unittest.TestCase):
             for extra, message in (
                 ("p2g.head_offset_bound=0.3", "cannot set p2g"),
                 ("data.gt_ego_radius=1.0", "cannot set data"),
-                ("data_config=kitti360", "data_config is for fresh runs"),
                 ("train.ckpt_path=/x/epoch=1.ckpt", "resume one with"),
             ):
                 with self.assertRaisesRegex(ValueError, message):
                     self._compose(checkpoint, extra)
+
+    def test_data_config_trains_the_refiner_on_another_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stored, checkpoint = self._base_checkpoint(tmp)
+            self.assertEqual(stored.data.dataset_name, "nuscenes_dynamic_lidar4d")
+            config, source = self._compose(checkpoint, "data_config=kitti360_lidar4d")
+            self.assertIn("data profile", source)
+            kitti, _ = compose_fresh_config(OmegaConf.from_dotlist([
+                f"model.variant={DYNAMIC_VARIANT_V15_3}", "data_config=kitti360_lidar4d",
+            ]))
+            self.assertEqual(OmegaConf.to_container(config.data, resolve=True),
+                             OmegaConf.to_container(kitti.data, resolve=True))
+            self.assertEqual((config.data.image_height, config.data.image_width), (66, 1030))
+            for root in ("model", "p2g", "g2g", "g2p", "dynamic_2dgs", "loss"):
+                self.assertEqual(
+                    OmegaConf.to_container(config[root], resolve=True),
+                    OmegaConf.to_container(stored[root], resolve=True), root,
+                )
+            self.assertEqual(config.raydrop_refine.data_profile,
+                             str(resolve_data_profile("kitti360_lidar4d")))
+            self.assertEqual(config.raydrop_refine.base_exp_name, "v15.3")
+            # The KITTI-360 GT-mode suffix, as for a fresh KITTI-360 run.
+            self.assertEqual(config.exp_name, "v15.3_raydrop_refine_kitti_lidar4d")
+            self.assertEqual(config.logger.dir, "logs/v15.3_raydrop_refine_kitti_lidar4d")
+            refined = Path(tmp) / "refine_epoch=3.ckpt"
+            torch.save({"experiment_config": OmegaConf.to_container(config, resolve=True)}, refined)
+            restored, _ = resolve_main_config(OmegaConf.from_dotlist([f"train.ckpt_path={refined}"]))
+            self.assertEqual(OmegaConf.to_container(restored.data, resolve=True),
+                             OmegaConf.to_container(kitti.data, resolve=True))
+
+    def test_data_config_must_keep_the_frozen_model_coordinate_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _stored, checkpoint = self._base_checkpoint(tmp)
+            profile = OmegaConf.load(resolve_data_profile("kitti360_lidar4d"))
+            profile.data.coordinate_frame = "lidar_sensor"
+            path = Path(tmp) / "kitti360_sensor_frame.yaml"
+            OmegaConf.save(profile, path)
+            with self.assertRaisesRegex(ValueError, "coordinate_frame"):
+                self._compose(checkpoint, f"data_config={path}")
 
     def test_refine_run_needs_its_own_name_and_a_base(self):
         with tempfile.TemporaryDirectory() as tmp:

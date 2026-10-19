@@ -1451,7 +1451,22 @@ python main.py refine_config=raydrop_unet \
   `refine/raydrop_unet.yaml` and the CLI on top. Those may set only
   `raydrop_refine`, `train`, `test`, `logger`, `metrics`, `exp_name`,
   `project_name`, `device`, `seed` and `mode`; model, data and rendering stay
-  the base run's. `data_config` and `train.ckpt_path` are rejected.
+  the base run's. `train.ckpt_path` and `data.*` keys are rejected.
+- `data_config=<profile>` trains the U-Net on another dataset under the same
+  frozen model, e.g. a nuScenes base on KITTI-360's 66×1030 grid:
+
+  ```bash
+  python main.py refine_config=raydrop_unet data_config=kitti360_lidar4d \
+      raydrop_refine.base_ckpt=/abs/logs/v15.4/epoch=29.ckpt \
+      exp_name=v15.4_nus_base_raydrop_refine_kitti_lidar4d device='[6]'
+  ```
+
+  The profile replaces the base run's whole data block, as in a fresh run.
+  Its `coordinate_frame` must be the base run's. The loader records the
+  profile path as `raydrop_refine.data_profile`. A KITTI-360 profile binds
+  the split manifest hash and adds the GT-mode suffix to `exp_name`. The
+  frozen model then renders the new dataset zero-shot, and `base/` logs those
+  zero-shot values.
 - The loader records the base checkpoint's `base_ckpt_sha256`, `base_epoch`,
   `base_global_step` and `base_exp_name`. Before training, `main.py` loads the
   base weights and checks the hash again.

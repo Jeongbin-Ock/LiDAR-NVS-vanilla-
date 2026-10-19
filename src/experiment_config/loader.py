@@ -170,6 +170,24 @@ def resolve_data_profile(name) -> Path:
     return path
 
 
+def _load_data_profile(path: Path) -> DictConfig:
+    profile = OmegaConf.load(path)
+    unknown = set(profile) - {"data", "exp_name"}
+    if unknown or not OmegaConf.is_dict(profile.get("data")):
+        raise ValueError(f"{path}: a data profile holds data and can only add exp_name")
+    return profile
+
+
+def _bind_kitti360_split_manifest(config) -> None:
+    """Record the KITTI-360 split manifest's SHA-256 in ``data.split_manifest_sha256``."""
+    manifest = Path(str(config.data.split_manifest_path))
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    expected = OmegaConf.select(config, "data.split_manifest_sha256")
+    if expected is not None and str(expected) != digest:
+        raise ValueError("KITTI360 split manifest hash differs from data.split_manifest_sha256")
+    config.data.split_manifest_sha256 = digest
+
+
 def compose_fresh_config(cli=None) -> tuple[DictConfig, str]:
     """Compose default.yaml -> model variant -> data profile -> CLI.
 
@@ -193,10 +211,7 @@ def compose_fresh_config(cli=None) -> tuple[DictConfig, str]:
     if not (cli_profile or variant_profile):
         raise ValueError(f"No data profile: {overlay_path} names none and the CLI passed no data_config=")
     profile_path = resolve_data_profile(cli_profile or variant_profile)
-    profile = OmegaConf.load(profile_path)
-    unknown = set(profile) - {"data", "exp_name"}
-    if unknown or not OmegaConf.is_dict(profile.get("data")):
-        raise ValueError(f"{profile_path}: a data profile holds data and can only add exp_name")
+    profile = _load_data_profile(profile_path)
     config = OmegaConf.merge(
         OmegaConf.create(STRUCTURAL_DEFAULTS),
         base,
@@ -209,12 +224,7 @@ def compose_fresh_config(cli=None) -> tuple[DictConfig, str]:
     data_source = f" data_profile={profile_path.resolve()}"
     config = OmegaConf.merge(config, cli)
     if str(config.data.dataset_name) == "kitti360_dynamic":
-        manifest = Path(str(config.data.split_manifest_path))
-        digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
-        expected = OmegaConf.select(config, "data.split_manifest_sha256")
-        if expected is not None and str(expected) != digest:
-            raise ValueError("KITTI360 split manifest hash differs from data.split_manifest_sha256")
-        config.data.split_manifest_sha256 = digest
+        _bind_kitti360_split_manifest(config)
         config.exp_name = _kitti360_exp_name(config, named=named)
     if _variant(config) != selected:
         raise ValueError(
@@ -423,6 +433,20 @@ def resolve_refine_profile(name) -> Path:
     return path
 
 
+def _swap_refine_data(stored, profile_path: Path) -> DictConfig:
+    """The base run's config with its data block replaced by a data profile's."""
+    profile = _load_data_profile(profile_path)
+    frame = OmegaConf.select(profile, "data.coordinate_frame", default=None)
+    if frame != stored.data.coordinate_frame:
+        raise ValueError(f"{profile_path} uses data.coordinate_frame={frame!r}; the frozen "
+                         f"model was trained in {stored.data.coordinate_frame!r}")
+    swapped = OmegaConf.create(OmegaConf.to_container(stored, resolve=False))
+    swapped.data = profile.data
+    if str(swapped.data.dataset_name) == "kitti360_dynamic":
+        _bind_kitti360_split_manifest(swapped)
+    return swapped
+
+
 def compose_refine_config(cli=None) -> tuple[DictConfig, str]:
     """A fresh refinement run on top of a finished checkpoint.
 
@@ -435,11 +459,17 @@ def compose_refine_config(cli=None) -> tuple[DictConfig, str]:
     checkpoint's hash, epoch, step and run name are recorded under
     ``raydrop_refine``. Resuming the refinement run itself is an ordinary
     ``train.ckpt_path=<refine checkpoint>`` resume.
+
+    ``data_config=<name or path>`` trains the U-Net on another dataset: the
+    profile replaces the base run's whole data block (the model stays the
+    base run's, so its coordinate frame must match) and its path is recorded
+    as ``raydrop_refine.data_profile``. A KITTI-360 profile binds its split
+    manifest hash and adds the GT-mode suffix to exp_name, as a fresh run does.
     """
     cli = OmegaConf.create(OmegaConf.to_container(_as_config(cli), resolve=False))
     profile_path = resolve_refine_profile(cli.pop("refine_config"))
-    if "data_config" in cli:
-        raise ValueError("data_config is for fresh runs; a refinement run keeps its base checkpoint's data")
+    data_config = cli.pop("data_config", None)
+    data_path = resolve_data_profile(data_config) if data_config is not None else None
     overlay = OmegaConf.load(profile_path)
     for source, block in ((profile_path, overlay), ("the CLI", cli)):
         unknown = sorted(set(block) - set(REFINE_OVERLAY_ROOTS))
@@ -461,6 +491,10 @@ def compose_refine_config(cli=None) -> tuple[DictConfig, str]:
     stored, source = load_checkpoint_config(base_ckpt)
     if raydrop_refine_enabled(stored):
         raise ValueError(f"{base_ckpt} is already a refinement checkpoint")
+    if data_path is not None:
+        stored = _swap_refine_data(stored, data_path)
+        request.raydrop_refine.data_profile = str(data_path.resolve())
+        source = f"{source}; data profile: {data_path.resolve()}"
 
     import torch
 
@@ -475,6 +509,8 @@ def compose_refine_config(cli=None) -> tuple[DictConfig, str]:
     config.mode = "train"
     if not raydrop_refine_enabled(config):
         raise ValueError(f"{profile_path} must set raydrop_refine.enable=true")
+    if data_path is not None and str(config.data.dataset_name) == "kitti360_dynamic":
+        config.exp_name = _kitti360_exp_name(config, named=True)
     if str(config.exp_name) == str(stored.exp_name) or (
         Path(str(config.logger.dir)).resolve() == Path(str(stored.logger.dir)).resolve()
     ):

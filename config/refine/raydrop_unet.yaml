@@ -8,6 +8,8 @@
 # CLI) may only set raydrop_refine, train, test, logger, metrics, exp_name,
 # project_name, device, seed and mode. The loader records the base
 # checkpoint's sha256, epoch, global step and run name under raydrop_refine.
+# data_config=<profile> on the CLI swaps in another dataset's whole data block
+# (same coordinate frame) and records it as raydrop_refine.data_profile.
 #
 # Every step renders the batch with the frozen model in eval mode under
 # no_grad, then trains only the U-Net on the target views' maps
