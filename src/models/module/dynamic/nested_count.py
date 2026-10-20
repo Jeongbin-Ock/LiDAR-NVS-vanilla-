@@ -44,6 +44,7 @@ from .gaussian_slots import (
     SLOT_PARAM_NAMES,
     initialize_slot_projection,
     pack_slots,
+    slot_param_names,
     slot_param_sizes,
 )
 
@@ -127,6 +128,11 @@ class RoutedCountGaussianHead(nn.Module):
         self.option_counts = option_counts
         self.keep_count = option_counts[1]
         self.max_count = option_counts[-1]
+        if slot_param_names(gs_params) != self.PARAM_NAMES:
+            raise ValueError(
+                f"{self.COUNT_LABEL} decodes SH slots; a feature slot "
+                "(p2g.gs_params.feature) is only available to V18's dense head"
+            )
         self.param_sizes = slot_param_sizes(gs_params)
         self.param_dim = sum(self.param_sizes)
         # Geometry of the contract, not learned state.

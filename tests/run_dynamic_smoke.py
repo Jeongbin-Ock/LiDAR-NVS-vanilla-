@@ -84,8 +84,10 @@ def forward_memory_probe(model, batch):
     )
     terms = []
     for item in gaussians:
+        # SH coefficients, or V18's rendered feature.
+        appearance = item["feature"] if "feature" in item else item["shs"]
         terms.extend([
-            item["shs"].square().mean(),
+            appearance.square().mean(),
             item["opacity"].square().mean(),
             item["scaling"].square().mean(),
             (item["velocity"] - 0.1).square().mean(),
@@ -295,14 +297,15 @@ def main():
     if frozen_base_parameter.requires_grad:
         raise RuntimeError(f"Utonia base parameter is trainable: {frozen_base_name}")
     parameters = [
-        parameter for parameter in p2g.parameters()
+        parameter for parameter in model.parameters()
         if parameter.requires_grad
     ]
     # The run's own groups: --lr replaces train.lr, which is the whole flat
     # list for all-linear LoRA and only the downstream groups for the hybrid
     # adaptation (V15 also splits off downstream_no_decay at train.lr),
-    # whose Utonia roles keep their configured rates.
-    param_groups = p2g.optimizer_param_groups(cfg.train)
+    # whose Utonia roles keep their configured rates. V18's lidar_decoder
+    # group sets no rate of its own and takes --lr.
+    param_groups = model.optimizer_param_groups()
     for group in param_groups:
         if isinstance(group, dict) and group.get("name") in (
             "downstream", "downstream_no_decay",
@@ -339,6 +342,15 @@ def main():
     )
     count_router_weight = (
         count_predictor[-1].weight if count_predictor is not None else None
+    )
+    # V18 decodes intensity and raydrop in the renderer.
+    lidar_decoder = getattr(model.g2p_model, "lidar_decoder", None)
+    lidar_decoder_weight = (
+        lidar_decoder.mlp[0].weight if lidar_decoder is not None else None
+    )
+    sensor_embedding_weight = (
+        lidar_decoder.sensor_embedding.weight
+        if lidar_decoder is not None else None
     )
 
     torch.cuda.reset_peak_memory_stats(device)
@@ -438,6 +450,14 @@ def main():
                 "utonia_lora_up_grad_norm": lora_up_grad,
                 "utonia_intensity_grad_norm": grad_norm(intensity_parameter),
                 "utonia_frozen_base_grad_norm": frozen_base_grad,
+                "lidar_decoder_grad_norm": (
+                    grad_norm(lidar_decoder_weight)
+                    if lidar_decoder_weight is not None else None
+                ),
+                "sensor_embedding_grad_norm": (
+                    grad_norm(sensor_embedding_weight)
+                    if sensor_embedding_weight is not None else None
+                ),
                 "velocity_speed_mean_mps": float(speeds.mean()),
                 "velocity_speed_max_mps": float(speeds.max()),
                 "middle_displacement_mean_m": float(displacement),
@@ -597,6 +617,12 @@ def main():
         raise RuntimeError("render loss did not reach adaptive-K router")
     if not all(item[adaptation_grad_key] > 0.0 for item in records):
         raise RuntimeError("render loss did not reach Utonia adaptation")
+    if lidar_decoder is not None and not all(
+        item["lidar_decoder_grad_norm"] > 0.0
+        and item["sensor_embedding_grad_norm"] > 0.0
+        for item in records
+    ):
+        raise RuntimeError("render loss did not reach the lidar decoder")
     if any(item["utonia_frozen_base_grad_norm"] != 0.0 for item in records):
         raise RuntimeError("render loss unexpectedly reached frozen Utonia base")
     if records[-1]["velocity_speed_mean_mps"] <= 1.0e-5:

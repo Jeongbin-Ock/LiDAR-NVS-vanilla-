@@ -1,7 +1,9 @@
 """Token-anchored Gaussian slots of the V15 family, and V15.3's dense head.
 
 A slot is one Gaussian's raw parameters, ``P`` channels in ``SLOT_PARAM_NAMES``
-order (shs, opacity, scaling, rotation, offset). Every V15-family head decodes
+order (shs, opacity, scaling, rotation, offset); V18's slots carry a rendered
+feature in place of the SH coefficients (``FEATURE_SLOT_PARAM_NAMES``, see
+``slot_param_names``). Every V15-family head decodes
 slots around the token's one anchor, its Utonia position in the window reference
 frame: a slot sits at ``anchor + offset_bound * tanh(offset)``. The heads differ
 only in which slots a token renders -- a routed prefix of G1..G5 (V15/V15.1,
@@ -19,11 +21,32 @@ import torch.nn as nn
 from .common import _cfg_get
 
 SLOT_PARAM_NAMES = ("shs", "opacity", "scaling", "rotation", "offset")
+# V18: the first block is a feature the renderer alpha-blends and G2P's lidar
+# decoder turns into intensity and raydrop (p2g.gs_params.feature, shs: 0).
+FEATURE_SLOT_PARAM_NAMES = ("feature", "opacity", "scaling", "rotation", "offset")
+
+
+def slot_param_names(gs_params) -> tuple[str, ...]:
+    """The slot layout ``gs_params`` describes: SH coefficients or a feature.
+
+    A positive ``gs_params.feature`` selects ``FEATURE_SLOT_PARAM_NAMES`` and
+    requires ``shs: 0``; otherwise the slot is the SH layout.
+    """
+    feature = int(_cfg_get(gs_params, "feature", 0) or 0)
+    if feature <= 0:
+        return SLOT_PARAM_NAMES
+    if int(_cfg_get(gs_params, "shs", 0) or 0) != 0:
+        raise ValueError(
+            "a Gaussian slot carries SH coefficients or a feature, not both: "
+            "p2g.gs_params.feature needs shs: 0"
+        )
+    return FEATURE_SLOT_PARAM_NAMES
 
 
 def slot_param_sizes(gs_params) -> list[int]:
-    """Channel widths of one slot, in ``SLOT_PARAM_NAMES`` order."""
-    sizes = [int(getattr(gs_params, name)) for name in SLOT_PARAM_NAMES]
+    """Channel widths of one slot, in ``slot_param_names(gs_params)`` order."""
+    sizes = [int(getattr(gs_params, name))
+             for name in slot_param_names(gs_params)]
     if sizes[-2:] != [4, 3]:
         raise ValueError(
             "token-anchored Gaussian slots require rotation=4 and offset=3"
@@ -45,14 +68,16 @@ def initialize_slot_projection(projection: nn.Linear, head_cfg, param_sizes,
     opacity = float(_cfg_get(head_cfg, "initial_opacity", 0.2))
     opacity = min(max(opacity, 1.0e-4), 1.0 - 1.0e-4)
     scale = float(_cfg_get(head_cfg, "initial_scale_m", 0.3))
-    sh_size, opacity_size, scale_size, rotation_size, offset_size = param_sizes
+    appearance_size, opacity_size, scale_size, rotation_size, offset_size = (
+        param_sizes
+    )
     param_dim = sum(param_sizes)
     if projection.out_features != slots * param_dim:
         raise ValueError(
             f"a {slots}-slot projection must have {slots * param_dim} outputs, "
             f"got {projection.out_features}"
         )
-    opacity_start = sh_size
+    opacity_start = appearance_size
     scale_start = opacity_start + opacity_size
     rotation_start = scale_start + scale_size
     offset_start = rotation_start + rotation_size
@@ -72,14 +97,15 @@ def initialize_slot_projection(projection: nn.Linear, head_cfg, param_sizes,
 
 
 def pack_slots(params, anchor, token_index, slot_index, param_sizes,
-               offset_bound: float):
+               offset_bound: float, param_names=SLOT_PARAM_NAMES):
     """Per-Gaussian raw attributes and positions for the listed slots.
 
     ``params`` holds one gathered ``(M, P)`` slot row per rendered Gaussian,
     ``token_index`` the token each row belongs to and ``slot_index`` its slot
-    number within what that token renders.
+    number within what that token renders. ``param_names`` is the slot layout
+    (``slot_param_names``).
     """
-    raw = dict(zip(SLOT_PARAM_NAMES, torch.split(params, param_sizes, dim=-1)))
+    raw = dict(zip(param_names, torch.split(params, param_sizes, dim=-1)))
     offset = raw.pop("offset")
     position = anchor[token_index] + offset_bound * torch.tanh(offset)
     return {
@@ -102,10 +128,10 @@ class DenseCountGaussianHead(nn.Module):
     ``decoder_hidden`` is read from ``dynamic_2dgs.gaussian_head``.
 
     ``forward`` returns ``(rendered, None, None)``, the routed heads'
-    ``(routed, auxiliary, routing)`` contract with nothing routed.
+    ``(routed, auxiliary, routing)`` contract with nothing routed. Its slots
+    follow ``slot_param_names(gs_params)``: V15.3-V15.5 decode SH
+    coefficients, V18 a feature for G2P's lidar decoder.
     """
-
-    PARAM_NAMES = SLOT_PARAM_NAMES
 
     def __init__(self, head_cfg, gs_params, dim: int, offset_bound: float,
                  gaussians_per_token: int):
@@ -122,6 +148,7 @@ class DenseCountGaussianHead(nn.Module):
                 f"dynamic_2dgs.gaussian_head.decoder_hidden, got {hidden!r}"
             )
         self.decoder_hidden = int(hidden)
+        self.param_names = slot_param_names(gs_params)
         self.param_sizes = slot_param_sizes(gs_params)
         self.param_dim = sum(self.param_sizes)
 
@@ -158,15 +185,17 @@ class DenseCountGaussianHead(nn.Module):
         rendered = pack_slots(
             decoded.reshape(token_count * slots, self.param_dim),
             anchor, token_index, slot_index, self.param_sizes,
-            self.offset_bound,
+            self.offset_bound, self.param_names,
         )
         return rendered, None, None
 
 
 __all__ = [
     "DenseCountGaussianHead",
+    "FEATURE_SLOT_PARAM_NAMES",
     "SLOT_PARAM_NAMES",
     "initialize_slot_projection",
     "pack_slots",
+    "slot_param_names",
     "slot_param_sizes",
 ]

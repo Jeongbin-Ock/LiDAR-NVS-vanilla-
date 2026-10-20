@@ -1,7 +1,8 @@
 """V15.2's per-option expert head and V15.3's router-free dense head.
 
 V15.5 is the dense head behind a temporal stack whose v_init is the uniform
-layer mean; its backend tests sit beside V15.3's.
+layer mean, and V18 the dense head with a feature slot in place of the SH
+coefficients; their backend tests sit beside V15.3's.
 """
 from __future__ import annotations
 
@@ -38,6 +39,14 @@ def _gs_params():
     })
 
 
+def _feature_gs_params():
+    """V18's slot: a 30-channel feature instead of 32 SH coefficients."""
+    return OmegaConf.create({
+        "shs": 0, "feature": 30, "opacity": 1, "scaling": 2, "rotation": 4,
+        "offset": 3,
+    })
+
+
 def _routed_block(**overrides):
     block = {
         "option_counts": [1, 3, 5],
@@ -68,10 +77,10 @@ def _expert_head(**overrides):
     )
 
 
-def _dense_head(gaussians_per_token=5, decoder_hidden=32):
+def _dense_head(gaussians_per_token=5, decoder_hidden=32, gs_params=None):
     return DenseCountGaussianHead(
         OmegaConf.create({**HEAD_CFG, "decoder_hidden": decoder_hidden}),
-        _gs_params(),
+        _gs_params() if gs_params is None else gs_params,
         DIM,
         offset_bound=0.4,
         gaussians_per_token=gaussians_per_token,
@@ -437,6 +446,47 @@ def test_dense_head_is_the_v15_decoder_without_the_router():
         torch.testing.assert_close(rendered["raw"][name], value)
 
 
+def test_v18_dense_head_decodes_a_feature_in_place_of_the_sh_coefficients():
+    """V18's slot: feature (30) + V15.4's opacity, scale, rotation, offset."""
+    torch.manual_seed(14)
+    head = _dense_head(gs_params=_feature_gs_params())
+    sh_head = _dense_head()
+    assert head.param_names == (
+        "feature", "opacity", "scaling", "rotation", "offset",
+    )
+    assert head.param_dim == 40 and head.decoder[-1].out_features == 200
+    # Same priors on the shared channels; the feature, like the SH block it
+    # replaces, starts from small weights and no bias.
+    bias = head.decoder[-1].bias.reshape(5, 40)
+    assert torch.equal(bias[:, :30], torch.zeros(5, 30))
+    assert torch.equal(bias[:, 30:], sh_head.decoder[-1].bias.reshape(5, 42)[:, 32:])
+    assert head.decoder[-1].weight.reshape(5, 40, -1)[:, :30].std() < 0.02
+    feature = torch.randn(4, DIM)
+    anchor = torch.randn(4, 3)
+    rendered, auxiliary, routing = head(feature, anchor)
+    assert auxiliary is None and routing is None
+    assert set(rendered["raw"]) == {"feature", "opacity", "scaling", "rotation"}
+    rows = head.decoder(head.decoder_norm(feature)).reshape(20, 40)
+    torch.testing.assert_close(rendered["raw"]["feature"], rows[:, :30])
+    torch.testing.assert_close(rendered["raw"]["opacity"], rows[:, 30:31])
+    torch.testing.assert_close(
+        rendered["position"],
+        anchor.repeat_interleave(5, dim=0) + 0.4 * torch.tanh(rows[:, 37:40]),
+    )
+
+
+def test_feature_slots_need_shs_zero_and_a_dense_head():
+    both = _feature_gs_params()
+    both.shs = 32
+    with pytest.raises(ValueError, match="not both"):
+        _dense_head(gs_params=both)
+    with pytest.raises(ValueError, match="decodes SH slots"):
+        OptionExpertGaussianHead(
+            expert_count_cfg(), OmegaConf.create(HEAD_CFG),
+            _feature_gs_params(), DIM, offset_bound=0.4,
+        )
+
+
 @pytest.mark.parametrize("decoder_hidden", [None, 0, 576.0, True])
 def test_dense_head_requires_an_integer_decoder_width(decoder_hidden):
     cfg = dict(HEAD_CFG)
@@ -618,6 +668,19 @@ def test_v15_3_velocity_reads_the_temporal_feature_not_the_local_refinement():
         torch.cat([item["shs"] for item in before["batch_gaussians"]]),
         torch.cat([item["shs"] for item in after["batch_gaussians"]]),
     )
+
+
+def test_v18_backend_hands_the_renderer_features_instead_of_shs():
+    torch.manual_seed(15)
+    backend = DenseCountBarrierVelocityGaussianBackend(
+        _backend_cfg(decoder_hidden=32), _feature_gs_params(), dim=DIM,
+        offset_bound=0.4, gaussians_per_token=5, seed_mode="token",
+    )
+    for mode in (backend.train(), backend.eval()):
+        items = mode(*_inputs(slots=5))["batch_gaussians"]
+        assert [item["feature"].shape for item in items] == [(45, 30), (45, 30)]
+        assert all("shs" not in item for item in items)
+        _check_token_contract(items, per_token_count=5)
 
 
 def _uniform_layer_backend():

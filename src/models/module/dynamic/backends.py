@@ -149,9 +149,12 @@ class DynamicGaussianBackend(nn.Module):
         shared. ``extra_fields`` carries whatever the variant additionally
         exposes -- motion diagnostics, and for the adaptive-K router the token
         each Gaussian came from. ``is_dynamic`` marks every Gaussian as moving
-        for the evaluation viewers; nothing here gates rendering.
+        for the evaluation viewers; nothing here gates rendering. Each Gaussian
+        carries its SH coefficients (``shs``) or, in V18, the ``feature`` that
+        G2P's lidar decoder reads after alpha blending.
         """
         extra_fields = extra_fields or {}
+        appearance = "feature" if "feature" in raw else "shs"
         batch_gaussians = []
         for batch_id in range(sample_count):
             rows = (batch_index == batch_id).nonzero(as_tuple=True)[0]
@@ -160,7 +163,7 @@ class DynamicGaussianBackend(nn.Module):
                 continue
             batch_gaussians.append({
                 "position": position[rows],
-                "shs": raw["shs"][rows],
+                appearance: raw[appearance][rows],
                 "opacity": raw["opacity"][rows],
                 "scaling": raw["scaling"][rows],
                 "rotation": raw["rotation"][rows],

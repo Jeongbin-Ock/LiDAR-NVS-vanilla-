@@ -103,6 +103,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v17_1": (
         "DenseCountBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v18": (
+        "DenseCountBarrierVelocityGaussianBackend"
+    ),
 }
 
 
@@ -242,6 +245,13 @@ _PRE_REFACTOR_MANIFEST = {
     "dynamic_2dgs_attention_velocity_v17_1": (
         "0d8954b0eef60c36271e", "ceac3d77acf6877837cd"
     ),
+    # V18 is V15.4's backend in V15.4's parameter order; only the decoder's
+    # last layer narrows, five 40-channel slots (a 30-channel feature) instead
+    # of five 42-channel ones (32 SH coefficients). Its lidar decoder lives in
+    # the renderer (see test_v18_renderer_owns_the_lidar_decoder).
+    "dynamic_2dgs_attention_velocity_v18": (
+        "8cadb1f651af5e46ad32", "ceac3d77acf6877837cd"
+    ),
 }
 
 
@@ -305,6 +315,14 @@ _SEMANTIC_MODULE_BY_EXPORT = {
     "GaussianAttributeHead": "heads",
     "DynamicGausTemp": "trajectory",
 }
+
+
+def _load_lidar_decoder_module():
+    """``src/models/module/lidar_decoder.py`` without the CUDA renderer."""
+    _load_dynamic_module_without_renderer()
+    return importlib.import_module(
+        "src.models._checkpoint_compat_module.lidar_decoder"
+    )
 
 
 def _build_backend(variant):
@@ -386,6 +404,52 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
                         new_optimizer.state[parameter]["compatibility_index"].item(),
                         index,
                     )
+
+    def test_v18_is_v15_4_with_a_narrower_slot_projection(self):
+        v15_4 = _build_backend("dynamic_2dgs_attention_velocity_v15_4")
+        backend = _build_backend("dynamic_2dgs_attention_velocity_v18")
+        self.assertIs(type(backend), type(v15_4))
+        old, new = v15_4.state_dict(), backend.state_dict()
+        self.assertEqual(list(new), list(old))
+        changed = [
+            name for name in new if tuple(new[name].shape) != tuple(old[name].shape)
+        ]
+        self.assertEqual(
+            changed, ["gaussian_head.decoder.2.weight", "gaussian_head.decoder.2.bias"]
+        )
+        self.assertEqual(tuple(new["gaussian_head.decoder.2.weight"].shape), (200, 576))
+        self.assertEqual(
+            backend.gaussian_head.param_names,
+            ("feature", "opacity", "scaling", "rotation", "offset"),
+        )
+
+    def test_v18_renderer_owns_the_lidar_decoder(self):
+        """G2P's checkpoint keys: the sensor embedding, then the 64-96-96-2 MLP."""
+        config, _source = compose_fresh_config(OmegaConf.from_dotlist(
+            ["model.variant=dynamic_2dgs_attention_velocity_v18"]
+        ))
+        decoder = _load_lidar_decoder_module().LidarFeatureDecoder(
+            config.g2p.lidar_decoder
+        )
+        self.assertEqual(
+            [(name, tuple(value.shape)) for name, value in decoder.state_dict().items()],
+            [
+                ("sensor_embedding.weight", (1, 30)),
+                ("mlp.0.weight", (96, 64)), ("mlp.0.bias", (96,)),
+                ("mlp.2.weight", (96, 96)), ("mlp.2.bias", (96,)),
+                ("mlp.4.weight", (2, 96)), ("mlp.4.bias", (2,)),
+            ],
+        )
+        for variant in DYNAMIC_VARIANTS:
+            if variant == "dynamic_2dgs_attention_velocity_v18":
+                continue
+            with self.subTest(variant=variant):
+                config, _source = compose_fresh_config(
+                    OmegaConf.from_dotlist([f"model.variant={variant}"])
+                )
+                self.assertIsNone(
+                    OmegaConf.select(config, "g2p.lidar_decoder", default=None)
+                )
 
     def test_v11_5_builds_the_v11_3_decoder_under_the_v11_4_hinge(self):
         backend = _build_backend("dynamic_2dgs_attention_velocity_v11_5")

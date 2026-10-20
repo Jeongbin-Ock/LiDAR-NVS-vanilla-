@@ -11,7 +11,34 @@ from ..utils.render import Gaussianutil
 gu = Gaussianutil(None)
 
 
+def panorama_ray_directions(viewpoint_camera, device, dtype):
+    """Every pixel's unit ray direction in the render's world frame, ``(3, H, W)``.
 
+    The rasterizer casts pixel (row y, column x) along azimuth
+    ``phi = x * (hfov_max - hfov_min) / W + hfov_min`` and polar angle
+    ``theta = row_to_theta[y]``, i.e. along
+    ``(sin(theta) sin(phi), -cos(theta), sin(theta) cos(phi))`` in its camera
+    frame. ``world_view_transform[:3, :3]`` is the transposed world-to-camera
+    rotation, so it takes that direction to the world frame, which for Dynamic
+    2DGS is the window's reference frame the Gaussians live in.
+    """
+    height = int(viewpoint_camera.image_height)
+    width = int(viewpoint_camera.image_width)
+    hfov_min, hfov_max = (math.radians(float(value)) for value in viewpoint_camera.hfov)
+    phi = torch.arange(width, device=device, dtype=dtype) * (
+        (hfov_max - hfov_min) / width
+    ) + hfov_min
+    theta = viewpoint_camera.row_to_theta.to(device=device, dtype=dtype)
+    sin_theta = theta.sin().unsqueeze(1)
+    camera_direction = torch.stack([
+        sin_theta * phi.sin().unsqueeze(0),
+        (-theta.cos()).unsqueeze(1).expand(height, width),
+        sin_theta * phi.cos().unsqueeze(0),
+    ], dim=0)
+    camera_to_world = viewpoint_camera.world_view_transform[:3, :3].to(
+        device=device, dtype=dtype
+    )
+    return torch.einsum("ij,jhw->ihw", camera_to_world, camera_direction)
 
 
 def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifier=1.0,
@@ -20,6 +47,12 @@ def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifie
     Render the scene. 
     
     Background tensor (bg_color) must be on GPU!
+
+    ``pc["shs"]`` renders intensity and raydrop from per-Gaussian SH
+    coefficients. ``pc["feature"]`` (V18) instead alpha-blends a per-Gaussian
+    feature with no background term and returns it as ``feature`` beside each
+    pixel's world-frame ``ray_dir``; G2P's lidar decoder turns those into
+    intensity and raydrop, so this package then has neither.
     """
     render_device = pc["position"].device
     render_dtype = pc["position"].dtype
@@ -72,7 +105,16 @@ def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifie
     scales = gu.get_scaling(pc["scales"])
     rotations = gu.get_rotation(pc["rotations"])
     cov3D_precomp = None
-    shs = pc["shs"]
+    feature_mode = "feature" in pc
+    if feature_mode:
+        # The colour channels blend zeros: only the feature carries appearance.
+        shs = None
+        colors_precomp = torch.zeros(
+            (means3D.shape[0], 4), device=render_device, dtype=render_dtype
+        )
+    else:
+        shs = pc["shs"]
+        colors_precomp = None
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -89,7 +131,7 @@ def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifie
     # else:
     #     colors_precomp = override_color
 
-    feature_list = other
+    feature_list = ([pc["feature"]] if feature_mode else []) + list(other)
 
     if len(feature_list) > 0:
         features = torch.cat(feature_list, dim=1)
@@ -109,7 +151,7 @@ def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifie
         means3D=means3D,
         means2D=means2D,
         shs=shs,
-        colors_precomp=None,
+        colors_precomp=colors_precomp,
         features=features,
         opacities=opacity,
         scales=scales,
@@ -144,6 +186,18 @@ def render(viewpoint_camera, pc, cfg, bg_color, input_timestamp, scaling_modifie
     #     "intensity_sh": rendered_intensity_sh,
     #     "raydrop": rendered_raydrop.clamp(0, 1)
     # }
+    if feature_mode:
+        feature_dim = pc["feature"].shape[1]
+        return {
+            "depth": rendered_depth[[0]],
+            "depth_median": rendered_depth[[1]],
+            "normal": rendered_normal,
+            "alpha": rendered_opacity,
+            "feature": rendered_other[:feature_dim],
+            "ray_dir": panorama_ray_directions(
+                viewpoint_camera, render_device, render_dtype
+            ),
+        }
     return {
         "depth": rendered_depth[[0]],          # mean: 알파 가중 기대 depth (depth loss + metric)
         "depth_median": rendered_depth[[1]],   # median: T가 0.5를 넘는 contributor의 depth (chamfer + median loss)

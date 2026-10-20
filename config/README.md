@@ -89,7 +89,8 @@ gives each of those three options its own expert (`expert_gumbel`), V15.3
 has no router and renders five Gaussians per token (`legacy`, `K_max: 5`),
 V15.4 is V15.3 with eight temporal heads instead of twelve, V15.5 is V15.4
 with `v_init` read from the uniform mean over layers instead of a learned layer
-mixture, and
+mixture, V18 is V15.4 whose Gaussians carry a rendered feature that G2P
+decodes into intensity and raydrop instead of SH coefficients, and
 V16 picks V15's prefixes with two bounded ordinal gates trained through masked
 rasterization (`nested_ordinal`); V16.1 is V16 whose second training render is
 a uniformly random prefix per token.
@@ -888,6 +889,50 @@ installed. Autograd still traverses the encoder to train `w_I`. Only the
 the downstream groups, learned layer mixture, eight temporal heads, local
 attention, dense five-Gaussian decoder, losses and nuScenes data profile are
 V15.4's. V17.1 checkpoints retain and protect this adaptation mode.
+
+**V18** is V15.4 with SplatAD-style LiDAR appearance (Hess et al., CVPR 2025).
+Each Gaussian slot carries a feature of `p2g.gs_params.feature: 30` channels
+instead of the 32 SH coefficients (`shs: 0`), so the decoder's last layer is
+`576 -> 5x40` instead of `5x42`; the feature rows start like the SH rows they
+replace (N(0, 0.01) weights, zero bias). The rasterizer alpha-blends the
+feature into `f'` with no background term, and `g2p.lidar_decoder`
+(`src/models/module/lidar_decoder.py`, inside G2P) decodes every pixel:
+
+```text
+[f' (30), ray direction (3), median depth / range_scale_m (1), sensor embedding (30)]
+  = 64 -> Linear 96 -> SiLU -> Linear 96 -> SiLU -> Linear 2 -> sigmoid -> surface (i, p)
+intensity = a * i,   raydrop = (1 - a) + a * p      (a = the pixel's accumulated alpha)
+```
+
+The MLP predicts the surface the ray hits -- its intensity `i` and the
+probability `p` that it still returns nothing -- and each pixel composites it
+over V15.4's background (intensity 0, raydrop 1) by its alpha, exactly as the
+SH render composites `C + T * bg`: a ray that hits no Gaussian returns nothing,
+and through `a` the raydrop loss asks for coverage where the GT returns and
+none where it drops, as in V15.4.
+
+The ray direction is the unit ray from the rendering LiDAR's origin (a KITTI
+block's own emitter origin) through the pixel -- `normalize(hit point - sensor
+origin)` -- written in the axes of the window reference frame, sweep 0's ego
+frame, where the Gaussians and their features live (SplatAD uses world-frame
+rays too); the median depth is the renderer's `depth_median`,
+`range_scale_m: 80` the sensor's effective range; `num_sensors: 1` gives every
+view embedding 0. The decoded maps keep the SH render's keys (`intensity_sh`,
+`raydrop`) and [0, 1] range, so losses, metrics, evaluation and the raydrop
+refinement read them unchanged. The losses train the MLP and the embedding,
+every Gaussian's feature, and its opacity and footprint through the blending
+weights and the composite's alpha -- the rasterizer's feature channels now
+differentiate their alpha like its colour channels, which they did not before
+V18. The median depth enters
+detached: it only tells the decoder the range, while geometry is supervised by
+the depth losses; a live `r` would let the raydrop loss push the median
+Gaussian's depth wherever dropping is easier to predict, unopposed on GT-dropped
+pixels, which carry no depth loss. `feature_dim` must equal
+`p2g.gs_params.feature` (at most 32, the rasterizer's `MAX_FEATURE_CHANNELS`),
+and every other variant rejects both keys. The MLP and the embedding train in a
+last `lidar_decoder` optimizer group at `train.lr` / `train.weight_decay`; the
+backend checkpoint keys are V15.4's in V15.4's order, plus G2P's
+`g2p_model.lidar_decoder.*`.
 
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other

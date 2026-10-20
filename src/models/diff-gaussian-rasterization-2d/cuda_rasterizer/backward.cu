@@ -10,6 +10,7 @@
 #include "auxiliary.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <type_traits>
 namespace cg = cooperative_groups;
 
 // Backward pass for conversion of spherical harmonics to RGB for
@@ -198,12 +199,15 @@ __device__ float theta_to_row_dtheta_from_table(float theta, const float *row_to
 // alpha (hence opacity and footprint) receives m * dL/da. A Gaussian with
 // m = 0 composites nothing, yet dL/dm there is the first-order change of the
 // loss from inserting it.
-template <uint32_t C, bool MASKED>
+// FEATURES >= 0 is the number of feature channels as a compile-time constant
+// (the feature loops unroll into registers); FEATURES < 0 reads it from
+// S_runtime instead.
+template <uint32_t C, bool MASKED, int FEATURES>
 __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	renderCUDA(
 		const uint2 *__restrict__ ranges,
 		const uint32_t *__restrict__ point_list,
-		const int S, int W, int H,
+		const int S_runtime, int W, int H,
 		const float *__restrict__ bg_color,
 		const float2 *__restrict__ points_xy_image,
 		const float4 *__restrict__ normal_opacity,
@@ -255,7 +259,6 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	__shared__ float4 collected_normal_opacity[BLOCK_SIZE];
 	__shared__ float collected_colors[C * BLOCK_SIZE];
 	__shared__ float collected_depths[BLOCK_SIZE];
-	__shared__ float collected_features[13 * BLOCK_SIZE];
 	__shared__ float3 collected_Tu[BLOCK_SIZE];
 	__shared__ float3 collected_Tv[BLOCK_SIZE];
 	__shared__ float3 collected_Tw[BLOCK_SIZE];
@@ -272,10 +275,18 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	const int last_contributor = inside ? n_contrib[pix_id] : 0;
 	const int median_contributor = inside ? n_contrib[pix_id + H * W] : 0;
 
+	const int S = FEATURES >= 0 ? FEATURES : S_runtime;
 	float accum_rec[C] = {0};
-	float accum_feature_rec[13 + 3] = {0};
+	float accum_normal_rec[3] = {0};
 	float dL_dpixel[C] = {0};
-	float dL_dfeature[13] = {0};
+	// This pixel's gradient w.r.t. its S rendered features, then its normal.
+	float dL_dfeature[FEATURES > 0 ? FEATURES : (FEATURES == 0 ? 1 : MAX_FEATURE_CHANNELS)];
+	float dL_dnormal[3] = {0};
+	// The features' alpha gradient needs sum_ch (f_ch - accum_ch) * dL/dF_ch.
+	// Because dL/dF is fixed per pixel, the back-to-front recurrence of
+	// accum_ch can run on its projection onto dL/dF: one scalar, not S.
+	float accum_feature_dot = 0;
+	float last_feature_dot = 0;
 	float dL_depth = 0;
 	float dL_dmedian_depth = 0;
 	float dL_ddistortion = 0;
@@ -296,9 +307,14 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 		{
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
 		}
-		for (int i = 0; i < S + 3; i++)
+#pragma unroll
+		for (int i = 0; i < S; i++)
 		{
 			dL_dfeature[i] = dL_dpix_feature[i * H * W + pix_id];
+		}
+		for (int i = 0; i < 3; i++)
+		{
+			dL_dnormal[i] = dL_dpix_feature[(S + i) * H * W + pix_id];
 		}
 		dL_depth = dL_depths[pix_id];
 		dL_dmedian_depth = dL_depths[H * W + pix_id];
@@ -309,7 +325,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 
 	float last_alpha = 0;
 	float last_color[C] = {0};
-	float last_feature[13] = {0};
+	float last_normal[3] = {0};
 	float last_depth = 0;
 
 	// Gradient of pixel coordinate w.r.t. normalized
@@ -343,8 +359,10 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			collected_Tw[block.thread_rank()] = {transMats[9 * coll_id + 6], transMats[9 * coll_id + 7], transMats[9 * coll_id + 8]};
 			for (int i = 0; i < C; i++)
 				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
-			for (int i = 0; i < S; i++)
-				collected_features[i * BLOCK_SIZE + block.thread_rank()] = features[coll_id * S + i];
+			// Features are read from global memory below: staging up to
+			// MAX_FEATURE_CHANNELS of them here would overflow the 48 KB of
+			// static shared memory, and every thread of a block reads the same
+			// Gaussian's row, which the cache broadcasts.
 			if (MASKED)
 				collected_blend_mask[block.thread_rank()] = blend_mask[coll_id];
 		}
@@ -452,34 +470,40 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			const float dL_dmd = 2.0f * (T * alpha) * (m_d * final_A - final_D) * dL_ddistortion;
 			dL_dr += dL_dmd * dmd_dd;
 
-			for (int ch = 0; ch < S + 3; ch++)
+			// Features blend exactly like colors (no background term): each
+			// receives alpha * T, and alpha receives the projection of
+			// (feature - what blends behind it) onto this pixel's dL/dF.
+			if (S > 0)
 			{
-				float feature;
-				if (ch < S)
-					feature = collected_features[ch * BLOCK_SIZE + j];
-				else
-					feature = normal[ch - S];
-
-				// Update last color (to be used in the next iteration)
-				accum_feature_rec[ch] = last_alpha * last_feature[ch] + (1.f - last_alpha) * accum_feature_rec[ch];
-				last_feature[ch] = feature;
-
-				const float dL_dchannelfeature = dL_dfeature[ch];
-				// dL_dalpha += (feature - accum_feature_rec[ch]) * dL_dchannelfeature;
-				// Update the gradients w.r.t. color of the Gaussian.
-				// Atomic, since this pixel is just one of potentially
-				// many that were affected by this Gaussian.
-				if (ch < S)
+				const float *feature = features + global_id * S;
+				float feature_dot = 0.0f;
+#pragma unroll
+				for (int ch = 0; ch < S; ch++)
 				{
+					const float dL_dchannelfeature = dL_dfeature[ch];
+					feature_dot += feature[ch] * dL_dchannelfeature;
 					if (present)
 						atomicAdd(&(dL_dfeatures[global_id * S + ch]), dchannel_dcolor * dL_dchannelfeature);
 				}
-				else
-				{
-					dL_dalpha += (feature - accum_feature_rec[ch]) * dL_dchannelfeature;
-					if (present)
-						atomicAdd(&(dL_dnormals[global_id * 3 + ch - S]), dchannel_dcolor * dL_dchannelfeature); // normal loss
-				}
+				accum_feature_dot = last_alpha * last_feature_dot + (1.f - last_alpha) * accum_feature_dot;
+				last_feature_dot = feature_dot;
+				dL_dalpha += feature_dot - accum_feature_dot;
+			}
+
+			for (int ch = 0; ch < 3; ch++)
+			{
+				const float feature = normal[ch];
+
+				// Update last color (to be used in the next iteration)
+				accum_normal_rec[ch] = last_alpha * last_normal[ch] + (1.f - last_alpha) * accum_normal_rec[ch];
+				last_normal[ch] = feature;
+
+				const float dL_dchannelfeature = dL_dnormal[ch];
+				dL_dalpha += (feature - accum_normal_rec[ch]) * dL_dchannelfeature;
+				// Atomic, since this pixel is just one of potentially
+				// many that were affected by this Gaussian.
+				if (present)
+					atomicAdd(&(dL_dnormals[global_id * 3 + ch]), dchannel_dcolor * dL_dchannelfeature); // normal loss
 			}
 
 			// Propagate gradients to per-Gaussian depths
@@ -904,68 +928,54 @@ void BACKWARD::render(
 	const float *row_to_theta,
 	const float scale_factor)
 {
+	// One instantiation per (masked, feature count): see renderCUDA.
+	auto launch = [&](auto masked, auto feature_count)
+	{
+		constexpr bool M = decltype(masked)::value;
+		constexpr int FEAT = decltype(feature_count)::value;
+		renderCUDA<NUM_CHANNELS, M, FEAT><<<grid, block>>>(
+			ranges,
+			point_list,
+			S, W, H,
+			bg_color,
+			means2D,
+			normal_opacity,
+			M ? blend_mask : nullptr,
+			transMats,
+			colors,
+			depths,
+			features,
+			final_Ts,
+			n_contrib,
+			dL_dpixels,
+			dL_depths,
+			dL_masks,
+			dL_dpix_feature,
+			dL_dtransMat,
+			dL_dmean2D,
+			dL_dopacity,
+			M ? dL_dblend_mask : nullptr,
+			dL_dcolors,
+			dL_dfeatures,
+			dL_dnormals,
+			vfov_min,
+			vfov_max,
+			hfov_min,
+			hfov_max,
+			row_to_theta,
+			scale_factor);
+	};
+	auto launch_masked = [&](auto masked)
+	{
+		if (S == 0)
+			launch(masked, std::integral_constant<int, 0>{});
+		else if (S == SPECIALIZED_FEATURE_CHANNELS)
+			launch(masked, std::integral_constant<int, SPECIALIZED_FEATURE_CHANNELS>{});
+		else
+			launch(masked, std::integral_constant<int, -1>{});
+	};
 	if (blend_mask != nullptr)
-		renderCUDA<NUM_CHANNELS, true><<<grid, block>>>(
-			ranges,
-			point_list,
-			S, W, H,
-			bg_color,
-			means2D,
-			normal_opacity,
-			blend_mask,
-			transMats,
-			colors,
-			depths,
-			features,
-			final_Ts,
-			n_contrib,
-			dL_dpixels,
-			dL_depths,
-			dL_masks,
-			dL_dpix_feature,
-			dL_dtransMat,
-			dL_dmean2D,
-			dL_dopacity,
-			dL_dblend_mask,
-			dL_dcolors,
-			dL_dfeatures,
-			dL_dnormals,
-			vfov_min,
-			vfov_max,
-			hfov_min,
-			hfov_max,
-			row_to_theta,
-			scale_factor);
+		launch_masked(std::true_type{});
 	else
-		renderCUDA<NUM_CHANNELS, false><<<grid, block>>>(
-			ranges,
-			point_list,
-			S, W, H,
-			bg_color,
-			means2D,
-			normal_opacity,
-			nullptr,
-			transMats,
-			colors,
-			depths,
-			features,
-			final_Ts,
-			n_contrib,
-			dL_dpixels,
-			dL_depths,
-			dL_masks,
-			dL_dpix_feature,
-			dL_dtransMat,
-			dL_dmean2D,
-			dL_dopacity,
-			nullptr,
-			dL_dcolors,
-			dL_dfeatures,
-			dL_dnormals,
-			vfov_min,
-			vfov_max,
-			hfov_min,
-			hfov_max,
-			row_to_theta,
-			scale_factor);
+		launch_masked(std::false_type{});
 }

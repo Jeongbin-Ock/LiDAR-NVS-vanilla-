@@ -38,6 +38,7 @@ DYNAMIC_VARIANT_V15_5 = "dynamic_2dgs_attention_velocity_v15_5"
 DYNAMIC_VARIANT_V16 = "dynamic_2dgs_attention_velocity_v16"
 DYNAMIC_VARIANT_V16_1 = "dynamic_2dgs_attention_velocity_v16_1"
 DYNAMIC_VARIANT_V17_1 = "dynamic_2dgs_attention_velocity_v17_1"
+DYNAMIC_VARIANT_V18 = "dynamic_2dgs_attention_velocity_v18"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
 # explicit constant for each variant so checkpoint semantics stay exact.
 DYNAMIC_VARIANT = DYNAMIC_VARIANT_V11_4
@@ -122,7 +123,9 @@ FLASH_ROPE_MATCH_DYNAMIC_VARIANTS = (
 # own expert, V15.3 drops the router and renders five Gaussians per token.
 # V15.4 is V15.3 with eight temporal heads instead of twelve. V15.5 is V15.4
 # with v_init read from the plain 1/L mean of the layers' head-0 readouts
-# instead of their learned softmax mixture.
+# instead of their learned softmax mixture. V18 is V15.4 whose Gaussians carry
+# a feature, alpha-blended and decoded into intensity and raydrop by G2P's lidar
+# MLP, instead of SH coefficients.
 # V16 keeps V15's stack and G1..G5 decoder and changes the router: two bounded
 # ordinal gates trained through masked rasterization. V16.1 is V16 whose second
 # training render is a uniformly random prefix of G1..G5 per token instead of
@@ -152,6 +155,7 @@ BARRIER_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
     DYNAMIC_VARIANT_V17_1,
+    DYNAMIC_VARIANT_V18,
 )
 DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11,
@@ -180,6 +184,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
     DYNAMIC_VARIANT_V17_1,
+    DYNAMIC_VARIANT_V18,
 )
 # Variants whose Utonia encoder is adapted by p2g.utonia_adaptation.mode=hybrid:
 # frozen XYZ stem columns plus a trained intensity column and a nonlinear stem
@@ -190,11 +195,12 @@ DYNAMIC_VARIANTS = (
 # V14.1 put the stem adapter before the stem LayerNorm; V15 puts it after the
 # activation (see POST_ACTIVATION_STEM_DYNAMIC_VARIANTS). Only these variants
 # have per-role optimizer groups, so only they accept train.downstream_no_decay.
-# Every V15-family variant (V15, V15.1, V15.2, V15.3, V15.4, V15.5, V16, V16.1)
-# shares V15's Utonia adaptation, temporal stack and local-attention block; they
-# differ only in how the Gaussian head turns a token into Gaussians, except
-# V15.4, which is V15.3 with eight temporal heads instead of twelve, and V15.5,
-# which is V15.4 with v_init read from the uniform mean over layers.
+# Every V15-family variant (V15, V15.1, V15.2, V15.3, V15.4, V15.5, V16, V16.1,
+# V18) shares V15's Utonia adaptation, temporal stack and local-attention block;
+# they differ only in how the Gaussian head turns a token into Gaussians, except
+# V15.4, which is V15.3 with eight temporal heads instead of twelve, V15.5,
+# which is V15.4 with v_init read from the uniform mean over layers, and V18,
+# which is V15.4 with a rendered feature in place of the SH coefficients.
 V15_FAMILY_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15,
     DYNAMIC_VARIANT_V15_1,
@@ -204,6 +210,7 @@ V15_FAMILY_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_5,
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
+    DYNAMIC_VARIANT_V18,
 )
 HYBRID_UTONIA_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V14,
@@ -235,21 +242,33 @@ EXPERT_COUNT_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V15_2,)
 # two-layer decoder, whose hidden width is dynamic_2dgs.gaussian_head.decoder_hidden.
 # V15.4 is V15.3 with eight temporal heads (54 channels each) instead of twelve
 # (36 each). V15.5 is V15.4 whose v_init averages the layers' head-0 readouts
-# uniformly instead of under learned layer logits.
+# uniformly instead of under learned layer logits. V18 decodes V15.4's five
+# slots with a feature in place of the SH coefficients.
 DENSE_COUNT_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V15_4,
     DYNAMIC_VARIANT_V15_5,
     DYNAMIC_VARIANT_V17_1,
+    DYNAMIC_VARIANT_V18,
 )
 # The temporal head count is what separates V15.4 from V15.3, so each pins its
-# own dynamic_2dgs.temporal.num_heads; V15.5 keeps V15.4's eight.
+# own dynamic_2dgs.temporal.num_heads; V15.5 and V18 keep V15.4's eight.
 DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT = {
     DYNAMIC_VARIANT_V15_3: 12,
     DYNAMIC_VARIANT_V15_4: 8,
     DYNAMIC_VARIANT_V15_5: 8,
     DYNAMIC_VARIANT_V17_1: 8,
+    DYNAMIC_VARIANT_V18: 8,
 }
+# V18 (SplatAD-style LiDAR appearance): every Gaussian carries a feature of
+# p2g.gs_params.feature channels instead of SH coefficients (shs: 0); the
+# rasterizer alpha-blends it, and G2P's lidar decoder (g2p.lidar_decoder) maps
+# [blended feature, world-frame ray direction, median depth / range_scale_m,
+# learned sensor embedding] to intensity and raydrop with one MLP.
+FEATURE_DECODER_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V18,)
+# The rasterizer blends at most this many feature channels per Gaussian
+# (MAX_FEATURE_CHANNELS in its cuda_rasterizer/config.h).
+RASTERIZER_MAX_FEATURE_CHANNELS = 32
 # V16's ordinal nested count (p2g.grid_query.count_mode=nested_ordinal): V15's
 # G1..G5 prefixes, chosen by two bounded gates (G2/G3 present; G4/G5 present
 # given G2/G3) that train through masked rasterization of all five Gaussians.

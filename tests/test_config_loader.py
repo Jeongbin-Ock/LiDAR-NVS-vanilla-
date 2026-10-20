@@ -43,6 +43,7 @@ from src.experiment_config import (
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
     DYNAMIC_VARIANT_V17_1,
+    DYNAMIC_VARIANT_V18,
     DYNAMIC_VARIANTS,
     DENSE_COUNT_DYNAMIC_VARIANTS,
     DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT,
@@ -1811,6 +1812,7 @@ class V15ConfigTest(unittest.TestCase):
             DYNAMIC_VARIANT_V15, DYNAMIC_VARIANT_V15_1,
             DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
             DYNAMIC_VARIANT_V15_5, DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1,
+            DYNAMIC_VARIANT_V18,
         ))
         for group in (
             LOCAL_ATTENTION_DYNAMIC_VARIANTS,
@@ -2223,7 +2225,7 @@ class V15SiblingConfigTest(unittest.TestCase):
     def test_registration(self):
         for variant in (
             DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
-            DYNAMIC_VARIANT_V15_5,
+            DYNAMIC_VARIANT_V15_5, DYNAMIC_VARIANT_V18,
         ):
             with self.subTest(variant=variant):
                 self.assertIn(variant, DYNAMIC_VARIANTS)
@@ -2240,12 +2242,13 @@ class V15SiblingConfigTest(unittest.TestCase):
         self.assertEqual(
             DENSE_COUNT_DYNAMIC_VARIANTS,
             (DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4, DYNAMIC_VARIANT_V15_5,
-             DYNAMIC_VARIANT_V17_1),
+             DYNAMIC_VARIANT_V17_1, DYNAMIC_VARIANT_V18),
         )
         self.assertEqual(DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT, {
             DYNAMIC_VARIANT_V15_3: 12, DYNAMIC_VARIANT_V15_4: 8,
             DYNAMIC_VARIANT_V15_5: 8,
             DYNAMIC_VARIANT_V17_1: 8,
+            DYNAMIC_VARIANT_V18: 8,
         })
         self.assertEqual(EXPERT_COUNT_MODE, "expert_gumbel")
         self.assertEqual(EXPERT_AUXILIARY_RENDERS, ("dense_add", "none"))
@@ -2348,11 +2351,66 @@ class V15SiblingConfigTest(unittest.TestCase):
         self.assertEqual(b["dynamic_2dgs.temporal.num_heads"], 8)
         self.assertEqual(b["data.dataset_name"], "nuscenes_dynamic_lidar4d")
 
+    def test_v18_config_is_v15_4s_with_a_feature_and_its_decoder(self):
+        v15_4, _ = self._compose(variant=DYNAMIC_VARIANT_V15_4)
+        v18, _ = self._compose(variant=DYNAMIC_VARIANT_V18)
+        a = self._leaves(OmegaConf.to_container(v15_4, resolve=True))
+        b = self._leaves(OmegaConf.to_container(v18, resolve=True))
+        changed = {
+            key for key in set(a) | set(b)
+            if a.get(key, "<absent>") != b.get(key, "<absent>")
+        }
+        decoder = "g2p.lidar_decoder."
+        self.assertEqual(changed, {
+            "model.variant", "exp_name", "logger.dir",
+            "p2g.gs_params.shs", "p2g.gs_params.feature",
+            *(decoder + key for key in (
+                "feature_dim", "sensor_embedding_dim", "num_sensors",
+                "hidden_dims", "range_scale_m",
+            )),
+        })
+        self.assertEqual((a["p2g.gs_params.shs"], b["p2g.gs_params.shs"]), (32, 0))
+        self.assertEqual(b["p2g.gs_params.feature"], 30)
+        # [f' (30), ray (3), r / R (1), sensor embedding (30)] = 64 inputs.
+        self.assertEqual(
+            b[decoder + "feature_dim"] + 3 + 1 + b[decoder + "sensor_embedding_dim"],
+            64,
+        )
+        self.assertEqual(b[decoder + "hidden_dims"], [96, 96])
+        self.assertEqual(b[decoder + "range_scale_m"], 80.0)
+
+    def test_v18_appearance_keys_are_its_own(self):
+        self._rejected(
+            "p2g.gs_params.shs must be 0", "p2g.gs_params.shs=32",
+            variant=DYNAMIC_VARIANT_V18,
+        )
+        self._rejected(
+            "feature_dim must equal p2g.gs_params.feature",
+            "g2p.lidar_decoder.feature_dim=16", variant=DYNAMIC_VARIANT_V18,
+        )
+        self._rejected(
+            "at most 32", "p2g.gs_params.feature=33",
+            "g2p.lidar_decoder.feature_dim=33", variant=DYNAMIC_VARIANT_V18,
+        )
+        self._rejected(
+            "Unsupported keys under g2p.lidar_decoder",
+            "g2p.lidar_decoder.depth_input=mean", variant=DYNAMIC_VARIANT_V18,
+        )
+        for override in (
+            "p2g.gs_params.feature=30", "g2p.lidar_decoder.feature_dim=30",
+        ):
+            with self.subTest(override=override):
+                self._rejected(
+                    "only available to V18", override,
+                    variant=DYNAMIC_VARIANT_V15_4,
+                )
+
     def test_v15_3_and_v15_4_pin_their_temporal_head_counts(self):
         for variant, heads, other in (
             (DYNAMIC_VARIANT_V15_3, 12, 8),
             (DYNAMIC_VARIANT_V15_4, 8, 12),
             (DYNAMIC_VARIANT_V15_5, 8, 12),
+            (DYNAMIC_VARIANT_V18, 8, 12),
         ):
             with self.subTest(variant=variant):
                 self._rejected(

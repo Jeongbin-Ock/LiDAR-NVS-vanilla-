@@ -72,6 +72,10 @@ RasterizeGaussiansCUDA(
 	const int S = features.size(1);
 	const int H = image_height;
 	const int W = image_width;
+	if (S > MAX_FEATURE_CHANNELS)
+	{
+		AT_ERROR("features may have at most ", MAX_FEATURE_CHANNELS, " channels, got ", S);
+	}
 	// An empty blend_mask renders every Gaussian unmasked.
 	if (blend_mask.numel() != 0 && (blend_mask.numel() != P || blend_mask.scalar_type() != torch::kFloat32))
 	{
@@ -208,6 +212,10 @@ RasterizeGaussiansBackwardCUDA(
 	const int S = features.size(1);
 	const int H = dL_dout_color.size(1);
 	const int W = dL_dout_color.size(2);
+	if (S > MAX_FEATURE_CHANNELS)
+	{
+		AT_ERROR("features may have at most ", MAX_FEATURE_CHANNELS, " channels, got ", S);
+	}
 
 	int M = 0;
 	if (sh.size(0) != 0)

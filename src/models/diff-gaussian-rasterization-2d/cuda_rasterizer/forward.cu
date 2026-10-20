@@ -10,6 +10,7 @@
 #include "auxiliary.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <type_traits>
 namespace cg = cooperative_groups;
 
 // Forward method for converting the input spherical harmonics
@@ -330,12 +331,15 @@ __global__ void preprocessCUDA(
 // with m = 0 therefore leaves every output unchanged, exactly as if it were
 // absent, yet it is still visited here and in the backward pass, which
 // differentiates the outputs with respect to m at m = 0 as well.
-template <uint32_t CHANNELS, bool MASKED>
+// FEATURES >= 0 is the number of feature channels as a compile-time constant
+// (the loops unroll and F stays in registers); FEATURES < 0 reads it from
+// S_runtime instead.
+template <uint32_t CHANNELS, bool MASKED, int FEATURES>
 __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	renderCUDA(
 		const uint2 *__restrict__ ranges,
 		const uint32_t *__restrict__ point_list,
-		const int S, int W, int H,
+		const int S_runtime, int W, int H,
 		const float2 *__restrict__ points_xy_image,
 		const float *__restrict__ colors,
 		const float *__restrict__ features,
@@ -388,8 +392,9 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 	float T = 1.0f;
 	int32_t contributor = 0;
 	int32_t last_contributor = 0;
+	const int S = FEATURES >= 0 ? FEATURES : S_runtime;
 	float C[CHANNELS] = {0};
-	float F[13] = {0};
+	float F[(FEATURES >= 0 ? FEATURES : MAX_FEATURE_CHANNELS) + 3] = {0};
 	float D = {0};
 	float D2 = {0};
 
@@ -518,6 +523,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += colors[collected_id[j] * CHANNELS + ch] * alpha * T;
+#pragma unroll
 			for (int ch = 0; ch < S + 3; ch++)
 			{
 				if (ch < S)
@@ -549,6 +555,7 @@ __global__ void __launch_bounds__(BLOCK_X *BLOCK_Y)
 		n_contrib[H * W + pix_id] = median_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+#pragma unroll
 		for (int ch = 0; ch < S + 3; ch++)
 			out_feature[ch * H * W + pix_id] = F[ch];
 		out_depth[pix_id] = D;
@@ -583,54 +590,48 @@ void FORWARD::render(
 	const float *row_to_theta,
 	const float scale_factor)
 {
+	// One instantiation per (masked, feature count): see renderCUDA.
+	auto launch = [&](auto masked, auto feature_count)
+	{
+		constexpr bool M = decltype(masked)::value;
+		constexpr int FEAT = decltype(feature_count)::value;
+		renderCUDA<NUM_CHANNELS, M, FEAT><<<grid, block>>>(
+			ranges,
+			point_list,
+			S, W, H,
+			means2D,
+			colors,
+			features,
+			transMats,
+			depths,
+			normal_opacity,
+			M ? blend_mask : nullptr,
+			final_T,
+			n_contrib,
+			bg_color,
+			out_color,
+			out_feature,
+			out_depth,
+			vfov_min,
+			vfov_max,
+			hfov_min,
+			hfov_max,
+			row_to_theta,
+			scale_factor);
+	};
+	auto launch_masked = [&](auto masked)
+	{
+		if (S == 0)
+			launch(masked, std::integral_constant<int, 0>{});
+		else if (S == SPECIALIZED_FEATURE_CHANNELS)
+			launch(masked, std::integral_constant<int, SPECIALIZED_FEATURE_CHANNELS>{});
+		else
+			launch(masked, std::integral_constant<int, -1>{});
+	};
 	if (blend_mask != nullptr)
-		renderCUDA<NUM_CHANNELS, true><<<grid, block>>>(
-			ranges,
-			point_list,
-			S, W, H,
-			means2D,
-			colors,
-			features,
-			transMats,
-			depths,
-			normal_opacity,
-			blend_mask,
-			final_T,
-			n_contrib,
-			bg_color,
-			out_color,
-			out_feature,
-			out_depth,
-			vfov_min,
-			vfov_max,
-			hfov_min,
-			hfov_max,
-			row_to_theta,
-			scale_factor);
+		launch_masked(std::true_type{});
 	else
-		renderCUDA<NUM_CHANNELS, false><<<grid, block>>>(
-			ranges,
-			point_list,
-			S, W, H,
-			means2D,
-			colors,
-			features,
-			transMats,
-			depths,
-			normal_opacity,
-			nullptr,
-			final_T,
-			n_contrib,
-			bg_color,
-			out_color,
-			out_feature,
-			out_depth,
-			vfov_min,
-			vfov_max,
-			hfov_min,
-			hfov_max,
-			row_to_theta,
-			scale_factor);
+		launch_masked(std::false_type{});
 }
 
 void FORWARD::preprocess(

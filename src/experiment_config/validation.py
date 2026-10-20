@@ -19,6 +19,7 @@ from .definitions import (
     EXPERT_COUNT_DYNAMIC_VARIANTS,
     EXPERT_COUNT_MODE,
     EXPERT_COUNT_OPTION_COUNTS,
+    FEATURE_DECODER_DYNAMIC_VARIANTS,
     FEATURE_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
     FIXED_COUNT_SEED_MODES,
     FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
@@ -42,6 +43,7 @@ from .definitions import (
     ORDINAL_COUNT_MODE,
     ORDINAL_COUNT_OPTION_COUNTS,
     POST_ACTIVATION_STEM_DYNAMIC_VARIANTS,
+    RASTERIZER_MAX_FEATURE_CHANNELS,
     RMSNORM_ROPE_MATCH_DYNAMIC_VARIANTS,
     ROUTED_COUNT_BLOCKS,
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
@@ -1121,6 +1123,68 @@ def _validate_gaussian_head_config(config, variant: str, label: str) -> None:
         )
 
 
+def _validate_lidar_appearance(config, variant: str, label: str) -> None:
+    """How a Gaussian becomes intensity and raydrop: SH, or V18's decoder.
+
+    Every variant but V18 renders SH coefficients and rejects both V18 keys.
+    V18 needs ``p2g.gs_params.feature`` channels (at most what the rasterizer
+    blends) with ``shs: 0``, and ``g2p.lidar_decoder`` reading exactly that
+    many feature channels.
+    """
+    feature_path = "p2g.gs_params.feature"
+    decoder_path = "g2p.lidar_decoder"
+    if variant not in FEATURE_DECODER_DYNAMIC_VARIANTS:
+        for path in (feature_path, decoder_path):
+            if OmegaConf.select(config, path, default=None) is not None:
+                raise ValueError(
+                    f"{label} renders SH coefficients; {path} is only "
+                    "available to "
+                    + _only_available_to(FEATURE_DECODER_DYNAMIC_VARIANTS)
+                )
+        return
+    feature = _require_int(config, feature_path)
+    if feature > RASTERIZER_MAX_FEATURE_CHANNELS:
+        raise ValueError(
+            f"{feature_path} must be at most {RASTERIZER_MAX_FEATURE_CHANNELS}, "
+            "the feature channels the rasterizer blends"
+        )
+    if OmegaConf.select(config, "p2g.gs_params.shs", default=None) != 0:
+        raise ValueError(
+            f"{label} renders a feature instead of SH coefficients; "
+            "p2g.gs_params.shs must be 0"
+        )
+    if not _has_path(config, decoder_path):
+        raise ValueError(f"{label} requires {decoder_path}")
+    _reject_unknown_keys(
+        config,
+        decoder_path,
+        {
+            "feature_dim", "sensor_embedding_dim", "num_sensors",
+            "hidden_dims", "range_scale_m",
+        },
+    )
+    if _require_int(config, f"{decoder_path}.feature_dim") != feature:
+        raise ValueError(
+            f"{decoder_path}.feature_dim must equal {feature_path}"
+        )
+    _require_int(config, f"{decoder_path}.sensor_embedding_dim")
+    _require_int(config, f"{decoder_path}.num_sensors")
+    hidden = OmegaConf.select(config, f"{decoder_path}.hidden_dims")
+    if (
+        not isinstance(hidden, ListConfig) or len(hidden) == 0
+        or any(
+            isinstance(width, bool) or not isinstance(width, int) or width <= 0
+            for width in hidden
+        )
+    ):
+        raise ValueError(
+            f"{decoder_path}.hidden_dims must list positive integer widths"
+        )
+    _require_finite(
+        config, f"{decoder_path}.range_scale_m", minimum=0.0, inclusive=False
+    )
+
+
 def _validate_motion_regularization(config) -> None:
     """The velocity prior: independent squared norms on v_init and v_offset."""
     regularization_path = "dynamic_2dgs.regularization"
@@ -1225,6 +1289,7 @@ def validate_experiment_config(config) -> None:
     _validate_temporal_config(config, variant, label)
     _validate_local_attention_config(config, variant, label)
     _validate_gaussian_head_config(config, variant, label)
+    _validate_lidar_appearance(config, variant, label)
     # Every offset head embeds the v_init it corrects.
     _reject_unknown_keys(
         config,

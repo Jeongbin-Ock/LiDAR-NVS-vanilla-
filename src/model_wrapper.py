@@ -791,13 +791,30 @@ class ModelWrapper(LightningModule):
     def _is_rank_zero(self) -> bool:
         return int(getattr(self, "global_rank", 0)) == 0
 
+    def optimizer_param_groups(self):
+        """What ``configure_optimizers`` hands to AdamW.
+
+        All-linear LoRA variants get their historical flat parameter list; the
+        hybrid Utonia adaptation (V14) gets one group per role, each with its
+        own LR / weight decay, plus the downstream group at train.lr. V18's
+        lidar decoder (MLP and sensor embedding) lives in the renderer and
+        trains in a last ``lidar_decoder`` group at train.lr /
+        train.weight_decay; every other variant's renderer has no parameters,
+        so its groups are exactly Point2Gaus's.
+        """
+        param_groups = self.p2g_model.optimizer_param_groups(self.cfg.train)
+        renderer = [
+            parameter for parameter in self.g2p_model.parameters()
+            if parameter.requires_grad
+        ]
+        if not renderer:
+            return param_groups
+        if not all(isinstance(group, dict) for group in param_groups):
+            param_groups = [{"name": "point2gaus", "params": list(param_groups)}]
+        return [*param_groups, {"name": "lidar_decoder", "params": renderer}]
+
     def configure_optimizers(self):
-        # All-linear LoRA variants get their historical flat parameter list;
-        # the hybrid Utonia adaptation (V14) gets one group per role, each with
-        # its own LR / weight decay, plus the downstream group at train.lr.
-        return self._scheduled_optimizer(
-            self.p2g_model.optimizer_param_groups(self.cfg.train)
-        )
+        return self._scheduled_optimizer(self.optimizer_param_groups())
 
     def _scheduled_optimizer(self, param_groups):
         """AdamW over ``param_groups`` with train.* settings and the warmup+cosine schedule."""

@@ -224,6 +224,7 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V16,
             DYNAMIC_VARIANT_V16_1,
             DYNAMIC_VARIANT_V17_1,
+            DYNAMIC_VARIANT_V18,
         )
         from .dynamic_gaussian import (
             CosineRoPEVelocityGaussianBackend,
@@ -280,6 +281,8 @@ class Point2Gaus(nn.Module):
         # Gaussians per token. V15.4 is V15.3 with eight temporal heads instead
         # of twelve, which the temporal module reads from its config. V15.5 is
         # V15.4 whose v_init is the plain mean of the layers' head-0 readouts.
+        # V18 is V15.4's backend whose slots carry a feature instead of SH
+        # coefficients (p2g.gs_params.feature), which G2P's lidar decoder reads.
         backend_cls = {
             DYNAMIC_VARIANT_V11: MaxSpeedBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V11_1: SingleGaussianBarrierVelocityGaussianBackend,
@@ -317,6 +320,7 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V16: OrdinalCountBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V16_1: OrdinalCountBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V17_1: DenseCountBarrierVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V18: DenseCountBarrierVelocityGaussianBackend,
         }.get(self.dynamic_variant)
         if backend_cls is None:
             raise ValueError(

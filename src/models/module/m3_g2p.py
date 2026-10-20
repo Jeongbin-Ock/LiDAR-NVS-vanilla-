@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from ..gaussian_renderer import render
 from ..utils.graphics_utils import lidar4d_range_image_to_points
+from .lidar_decoder import LidarFeatureDecoder
 
 
 class DynamicGausRender(nn.Module):
@@ -9,6 +10,13 @@ class DynamicGausRender(nn.Module):
 
     Every Gaussian moves as ``position + velocity * (t_target - t_source)``
     while its rotation stays fixed.
+
+    Intensity and raydrop come from each Gaussian's SH coefficients, or, with
+    ``g2p.lidar_decoder`` (V18), from :class:`LidarFeatureDecoder` applied to
+    the alpha-blended Gaussian ``feature``, the ray direction and the median
+    depth of every pixel and composited over the same no-return background by
+    the pixel's alpha. Either way the returned maps keep the keys
+    ``intensity_sh`` and ``raydrop``.
     """
 
     # Evaluation tools read this explicit rendering contract instead of
@@ -21,6 +29,10 @@ class DynamicGausRender(nn.Module):
         # Channels are [unused, unused, intensity, raydrop]. No-return background
         # should carry zero intensity/depth support and raydrop probability 1.
         self.background = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
+        decoder_cfg = getattr(cfg, "lidar_decoder", None)
+        self.lidar_decoder = (
+            None if decoder_cfg is None else LidarFeatureDecoder(decoder_cfg)
+        )
 
     def pack_lidar_shs(self, shs):
         if shs.dim() == 3:
@@ -109,10 +121,19 @@ class DynamicGausRender(nn.Module):
             for block in blocks
         ]
         if kept_rows is None:
-            return packages[0]
-        return {key: torch.cat([package[key][..., first:last, :]
-                                for package, (first, last) in zip(packages, kept_rows)], dim=-2)
-                for key in packages[0]}
+            package = packages[0]
+        else:
+            package = {key: torch.cat([block[key][..., first:last, :]
+                                       for block, (first, last) in zip(packages, kept_rows)], dim=-2)
+                       for key in packages[0]}
+        if self.lidar_decoder is not None:
+            # Decoded per pixel, so after the row blocks are stitched; each
+            # block's rays come from its own camera.
+            package["intensity_sh"], package["raydrop"] = self.lidar_decoder(
+                package["feature"], package["ray_dir"], package["depth_median"],
+                package["alpha"],
+            )
+        return package
 
     def forward(
         self,
@@ -159,8 +180,11 @@ class DynamicGausRender(nn.Module):
                     "scales":   self.pack_scales(b_gs.get("scales", b_gs.get("scale", b_gs["scaling"]))),
                     "rotation": rotations,
                     "rotations": rotations,
-                    "shs":      self.pack_lidar_shs(b_gs["shs"]),
                 }
+                if self.lidar_decoder is not None:
+                    pc["feature"] = b_gs["feature"]
+                else:
+                    pc["shs"] = self.pack_lidar_shs(b_gs["shs"])
                 if "opacity_gate" in b_gs:
                     pc["opacity_gate"] = b_gs["opacity_gate"]
                 if "blend_mask" in b_gs:
