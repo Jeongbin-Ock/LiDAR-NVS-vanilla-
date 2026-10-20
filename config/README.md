@@ -877,6 +877,18 @@ for key except `model.variant`: the change lives in its backend class,
 like V11.2, it logs no `motion_layer_weight_*` diagnostics because no mixture is
 learned.
 
+**V17.1** is V15.4 with Utonia adaptation restricted to its new intensity input
+column (`p2g.utonia_adaptation.mode: intensity_only`, `utonia_lora.enable: false`).
+The original pretrained 9-to-54 stem supplies its frozen XYZ columns and bias;
+the other six input columns are discarded. A separate zero-initialized
+54-element parameter adds `I * w_I`. Every pretrained Utonia parameter,
+including LayerNorm, remains frozen, and no LoRA or nonlinear adapters are
+installed. Autograd still traverses the encoder to train `w_I`. Only the
+`utonia_intensity` optimizer role exists, using V15.4's LR and weight decay;
+the downstream groups, learned layer mixture, eight temporal heads, local
+attention, dense five-Gaussian decoder, losses and nuScenes data profile are
+V15.4's. V17.1 checkpoints retain and protect this adaptation mode.
+
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other
 weights shows a=0 to a=4 is decisive (mass beyond the radius 11.2% -> 0.85%,

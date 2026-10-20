@@ -1,0 +1,79 @@
+# V17.1: V15.4 with Utonia fine-tuning removed.
+# Load the original pretrained 9->54 stem, copy its XYZ columns (3->54),
+# and add a zero-initialized trainable intensity column (1->54).
+# Every pretrained Utonia parameter is frozen; no LoRA or nonlinear adapters.
+# All downstream architecture, data and loss settings are exactly V15.4's.
+model:
+  variant: dynamic_2dgs_attention_velocity_v17_1
+exp_name: ${model.variant}-bs-${train.batch_size}
+p2g:
+  freeze_utonia: true
+  utonia_feature_stage: 3
+  head_offset_bound: 0.4
+  utonia_lora:
+    enable: false
+    input_mode: xyzi
+  utonia_adaptation:
+    mode: intensity_only
+  grid_query:
+    count_mode: legacy
+    K_max: 5
+    seed_mode: token
+train:
+  utonia_param_groups:
+    intensity:
+      lr: ${train.lr}
+      weight_decay: 0.0001
+  downstream_no_decay:
+  - dynamic_backend.temporal.v_raw
+  adam_betas:
+  - 0.9
+  - 0.999
+  adam_eps: 1.0e-08
+data_config: nuscenes_dynamic
+dynamic_2dgs:
+  temporal:
+    implementation: flash_varlen
+    layers: 12
+    num_heads: 8
+    mlp_ratio: 4
+    use_time_embedding: true
+    time_embedding_dim: 64
+    time_frequencies: 8
+    time_reference_sec: 1.0
+    position_encoding: barrier_rope_split
+    barrier_speed_mps: 30.0
+    barrier_weight: 1.0
+    barrier_exponent: 1
+    match_chunk_size: 4096
+    rope_base: 74.98942093324558
+    rope_position_scale: 1.2566370614359172
+    qk_norm: true
+    layer_scale: false
+  local_attention:
+    radius_m: 0.8
+    num_heads: 12
+    mlp_ratio: 4
+    rope_base: 15.848931924611133
+    rope_position_scale: 15.707963267948966
+    implementation: flash_varlen
+    query_chunk_size: 4096
+  gaussian_head:
+    initial_opacity: 0.2
+    initial_scale_m: 0.3
+    decoder_hidden: 576
+  motion:
+    zero_init: true
+    residual_hidden_dim: 96
+    velocity_embedding_dim: 32
+    detach_init_condition: true
+  regularization:
+    velocity_l2:
+      enabled: true
+      mode: split_group_l2
+      init_weight: 0.01
+      offset_weight: 0.01
+      warmup_steps: 0
+      ramp_steps: 0
+loss:
+  w_chamfer: 0.02

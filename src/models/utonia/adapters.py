@@ -37,6 +37,7 @@ import spconv.pytorch as spconv
 
 from src.experiment_config.definitions import (
     UTONIA_ADAPTATION_MODE_HYBRID,
+    UTONIA_ADAPTATION_MODE_INTENSITY_ONLY,
     UTONIA_ADAPTER_ACTIVATIONS,
     UTONIA_LORA_TARGETS,
     UTONIA_PARAM_GROUP_ROLES,
@@ -75,6 +76,13 @@ _GROUP_SPEC = (
     ("utonia_layer_norm", "layer_norm", "layer_norm", "weight_decay"),
 )
 assert {spec[2] for spec in _GROUP_SPEC} == set(UTONIA_PARAM_GROUP_ROLES)
+
+
+@dataclass(frozen=True)
+class UtoniaIntensityOnlySettings:
+    """Frozen Utonia with only its new intensity input column trainable."""
+
+    mode: str = UTONIA_ADAPTATION_MODE_INTENSITY_ONLY
 
 
 @dataclass(frozen=True)
@@ -122,7 +130,7 @@ def _activation(value, name) -> str:
 
 
 def resolve_utonia_adaptation_settings(cfg):
-    """``p2g.utonia_adaptation`` as settings, or ``None`` for all-linear LoRA.
+    """Hybrid/intensity-only settings, or ``None`` for all-linear LoRA.
 
     Config validation already rejects bad values before a model is built; the
     checks here keep direct constructions (tests, tools) equally strict.
@@ -131,6 +139,10 @@ def resolve_utonia_adaptation_settings(cfg):
     if block is None:
         return None
     mode = str(_cfg_get(block, "mode", "")).lower()
+    if mode == UTONIA_ADAPTATION_MODE_INTENSITY_ONLY:
+        if set(block) != {"mode"}:
+            raise ValueError("intensity_only adaptation accepts only the mode key")
+        return UtoniaIntensityOnlySettings()
     if mode != UTONIA_ADAPTATION_MODE_HYBRID:
         raise ValueError(
             "p2g.utonia_adaptation.mode must be "
@@ -373,6 +385,30 @@ class ParallelAdapterMLP(nn.Module):
 
 
 _ADAPTER_TYPES = (NonlinearAdapter,)
+
+
+def adapt_utonia_stem_to_intensity_only(feature_extractor) -> int:
+    """Copy the pretrained XYZ columns; train only a new zero-init I column.
+
+    Frozen modules still participate in autograd, so rendering gradients can
+    traverse every Utonia stage back to the 54 intensity weights.
+    """
+    stem = feature_extractor.embedding.stem
+    base = stem._modules.get("linear")
+    if type(base) is not nn.Linear or base.in_features != 9:
+        raise ValueError("intensity_only requires the original 9D Utonia stem")
+    xyz = nn.Linear(3, base.out_features, bias=base.bias is not None).to(
+        device=base.weight.device, dtype=base.weight.dtype
+    )
+    with torch.no_grad():
+        xyz.weight.copy_(base.weight[:, :3])
+        if base.bias is not None:
+            xyz.bias.copy_(base.bias)
+    stem._modules["linear"] = XYZIStem(xyz)
+    feature_extractor.embedding.in_channels = 4
+    feature_extractor.requires_grad_(False)
+    stem.linear.intensity_weight.requires_grad_(True)
+    return int(base.in_features)
 
 
 def _executed_blocks(feature_extractor, stage: int):
@@ -810,9 +846,11 @@ __all__ = [
     "PostActivationStemAdapter",
     "UTONIA_PARAMETER_ROLES",
     "UtoniaHybridSettings",
+    "UtoniaIntensityOnlySettings",
     "XYZIAdapterStem",
     "XYZIStem",
     "adapt_utonia_stem_to_hybrid",
+    "adapt_utonia_stem_to_intensity_only",
     "attach_utonia_ffn_adapters",
     "build_hybrid_param_groups",
     "check_param_group_coverage",

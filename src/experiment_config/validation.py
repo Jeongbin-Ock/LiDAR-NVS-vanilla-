@@ -23,6 +23,7 @@ from .definitions import (
     FIXED_COUNT_SEED_MODES,
     FLASH_ROPE_MATCH_DYNAMIC_VARIANTS,
     HYBRID_UTONIA_DYNAMIC_VARIANTS,
+    INTENSITY_ONLY_UTONIA_DYNAMIC_VARIANTS,
     LEARNED_COUNT_MODES,
     LEARNED_COUNT_SEED_MODES,
     LEGACY_COUNT_MODE,
@@ -46,9 +47,11 @@ from .definitions import (
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
     SEED_MODE_TOKEN,
     UTONIA_ADAPTATION_MODE_HYBRID,
+    UTONIA_ADAPTATION_MODE_INTENSITY_ONLY,
     UTONIA_ADAPTER_ACTIVATIONS,
     UTONIA_LORA_TARGETS,
     UTONIA_PARAM_GROUP_ROLES,
+    UTONIA_PARAM_GROUP_DYNAMIC_VARIANTS,
     UTONIA_STEM_ADAPTER_POSITIONS,
     VARIANT_CONFIG_PATHS,
     _REQUIRED_ROOTS,
@@ -76,10 +79,13 @@ def _validate_3d_rope_width(dim: int, num_heads: int, label: str) -> None:
 
 
 def _validate_utonia_lora_config(config, label: str) -> None:
-    """Every variant feeds Utonia's XYZI tokens through LoRA adapters."""
+    """LoRA is required except for the explicit intensity-only ablation."""
+    intensity_only = _variant(config) in INTENSITY_ONLY_UTONIA_DYNAMIC_VARIANTS
+    expected_enable = not intensity_only
+    required = f"{label} requires p2g.utonia_lora.enable={str(expected_enable).lower()}"
     block = OmegaConf.select(config, "p2g.utonia_lora", default=None)
     if block is None:
-        raise ValueError(f"{label} requires p2g.utonia_lora.enable=true")
+        raise ValueError(required)
     _reject_unknown_keys(
         config,
         "p2g.utonia_lora",
@@ -88,11 +94,12 @@ def _validate_utonia_lora_config(config, label: str) -> None:
             "alpha", "linear_alpha", "conv_alpha", "dropout",
         },
     )
-    if not bool(OmegaConf.select(config, "p2g.utonia_lora.enable", default=False)):
-        raise ValueError(f"{label} requires p2g.utonia_lora.enable=true")
+    _require_flag(config, "p2g.utonia_lora.enable")
+    if OmegaConf.select(config, "p2g.utonia_lora.enable") != expected_enable:
+        raise ValueError(required)
     if not bool(OmegaConf.select(config, "p2g.freeze_utonia", default=True)):
         raise ValueError(
-            "p2g.utonia_lora.enable=true requires p2g.freeze_utonia=true"
+            f"{label} requires p2g.freeze_utonia=true"
         )
     input_mode = str(OmegaConf.select(
         config, "p2g.utonia_lora.input_mode", default="xyzi"
@@ -156,10 +163,11 @@ def _only_available_to(variants) -> str:
 
 
 def _validate_utonia_adaptation_config(config, variant, label: str) -> None:
-    """The hybrid Utonia adaptation block and its AdamW role groups.
+    """Utonia's hybrid or intensity-only scope and its AdamW role groups.
 
     V14-family variants require ``p2g.utonia_adaptation`` (mode ``hybrid``)
-    and ``train.utonia_param_groups``. Every other variant adapts Utonia with
+    and ``train.utonia_param_groups``. V17.1 requires ``intensity_only`` with
+    just the intensity optimizer role. Other variants adapt Utonia with
     LoRA on every Linear/SubMConv3d and rejects both blocks, so neither can be
     carried along silently unused. Within the family, ``stem.adapter_position``
     is the one key that tells V15's post-activation stem adapter from
@@ -169,6 +177,23 @@ def _validate_utonia_adaptation_config(config, variant, label: str) -> None:
     groups_path = "train.utonia_param_groups"
     block = OmegaConf.select(config, path, default=None)
     groups = OmegaConf.select(config, groups_path, default=None)
+    if variant in INTENSITY_ONLY_UTONIA_DYNAMIC_VARIANTS:
+        if block is None:
+            raise ValueError(f"{label} requires {path}.mode='intensity_only'")
+        _reject_unknown_keys(config, path, {"mode"})
+        _require_choice(
+            config, f"{path}.mode", (UTONIA_ADAPTATION_MODE_INTENSITY_ONLY,)
+        )
+        if groups is None:
+            raise ValueError(f"{label} requires {groups_path}.intensity")
+        _reject_unknown_keys(config, groups_path, {"intensity"})
+        role_path = f"{groups_path}.intensity"
+        _reject_unknown_keys(config, role_path, {"lr", "weight_decay"})
+        _require_finite(config, f"{role_path}.lr", minimum=0.0, inclusive=False)
+        _require_finite(
+            config, f"{role_path}.weight_decay", minimum=0.0, inclusive=True
+        )
+        return
     if variant not in HYBRID_UTONIA_DYNAMIC_VARIANTS:
         allowed = ", ".join(
             _variant_label(name) for name in HYBRID_UTONIA_DYNAMIC_VARIANTS
@@ -357,7 +382,7 @@ def _validate_downstream_no_decay(config, variant, label: str) -> None:
 
     Names are relative to Point2Gaus (``dynamic_backend.temporal.v_raw``) and
     move from the ``downstream`` optimizer group into a last group at
-    ``train.lr`` with weight decay 0. Only the hybrid Utonia variants build
+    ``train.lr`` with weight decay 0. Hybrid and intensity-only variants build
     per-role optimizer groups; every other variant trains one flat parameter
     list, so the key would have nothing to act on. Utonia parameters are
     excluded because their roles already set their own decay.
@@ -366,10 +391,10 @@ def _validate_downstream_no_decay(config, variant, label: str) -> None:
     names = OmegaConf.select(config, path, default=None)
     if names is None:
         return
-    if variant not in HYBRID_UTONIA_DYNAMIC_VARIANTS:
+    if variant not in UTONIA_PARAM_GROUP_DYNAMIC_VARIANTS:
         raise ValueError(
             f"{label} trains one flat parameter group; {path} is only "
-            "available to " + _only_available_to(HYBRID_UTONIA_DYNAMIC_VARIANTS)
+            "available to " + _only_available_to(UTONIA_PARAM_GROUP_DYNAMIC_VARIANTS)
         )
     if not isinstance(names, (list, tuple, ListConfig)):
         raise ValueError(f"{path} must be a list of parameter names")

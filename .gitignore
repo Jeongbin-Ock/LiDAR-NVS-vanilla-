@@ -75,6 +75,7 @@ tests/*
 !tests/check_dynamic_refactor_parity.py
 !tests/test_utonia_lora.py
 !tests/test_utonia_adapters.py
+!tests/test_utonia_intensity_only.py
 !tests/test_nested_count.py
 !tests/test_expert_dense_count.py
 !tests/test_radius_local_attention.py

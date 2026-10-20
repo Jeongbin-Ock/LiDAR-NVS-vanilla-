@@ -5,11 +5,15 @@ import os
 import torch
 import torch.nn as nn
 
-from src.experiment_config.definitions import ROUTED_COUNT_BLOCKS
+from src.experiment_config.definitions import (
+    INTENSITY_ONLY_UTONIA_DYNAMIC_VARIANTS,
+    ROUTED_COUNT_BLOCKS,
+)
 
 from .. import utonia
 from ..utonia.adapters import (
     adapt_utonia_stem_to_hybrid,
+    adapt_utonia_stem_to_intensity_only,
     attach_utonia_ffn_adapters,
     build_hybrid_param_groups,
     check_param_group_coverage,
@@ -19,6 +23,7 @@ from ..utonia.adapters import (
     resolve_utonia_adaptation_settings,
     set_active_adaptation_mode,
     utonia_parameter_roles,
+    UtoniaIntensityOnlySettings,
 )
 from ..utonia.lora import (
     adapt_utonia_embedding_to_xyzi,
@@ -26,6 +31,7 @@ from ..utonia.lora import (
     freeze_utonia_and_enable_active_lora,
     inject_utonia_lora,
     resolve_utonia_lora_settings,
+    UtoniaLoRAReport,
 )
 from .builders import OccupiedGridTokenBuilder
 from .builders.common import GridSeedConfig, UtoniaGridMapper
@@ -74,16 +80,25 @@ class Point2Gaus(nn.Module):
         self.freeze_utonia = bool(getattr(cfg, "freeze_utonia", True))
         self.utonia_lora_settings = resolve_utonia_lora_settings(cfg)
         self.utonia_lora_enabled = self.utonia_lora_settings.enabled
-        if not self.utonia_lora_enabled:
+        self.utonia_adaptation = resolve_utonia_adaptation_settings(cfg)
+        intensity_only = isinstance(
+            self.utonia_adaptation, UtoniaIntensityOnlySettings
+        )
+        if intensity_only != (
+            dynamic_variant in INTENSITY_ONLY_UTONIA_DYNAMIC_VARIANTS
+        ):
+            raise ValueError("intensity_only Utonia adaptation is required only by V17.1")
+        if intensity_only and self.utonia_lora_enabled:
+            raise ValueError("intensity_only Utonia adaptation requires LoRA disabled")
+        if not self.utonia_lora_enabled and not intensity_only:
             raise ValueError(
                 "Point2Gaus requires p2g.utonia_lora.enable=true: intensity "
                 "enters Utonia through its XYZI LoRA stem"
             )
         if not self.freeze_utonia:
             raise ValueError(
-                "p2g.utonia_lora.enable=true requires p2g.freeze_utonia=true; "
-                "LoRA fine-tunes adapters while the pretrained Utonia base "
-                "stays frozen"
+                "Point2Gaus requires p2g.freeze_utonia=true; "
+                "the pretrained Utonia base stays frozen"
             )
         # Load the frozen Utonia encoder from a repo-local checkpoint so the weights
         # and their embedded architecture config live under the project (not ~/.cache).
@@ -111,8 +126,24 @@ class Point2Gaus(nn.Module):
         # Load the untouched 9D checkpoint before migrating its functional
         # [xyz, 0, ..., 0] stem to [xyz, intensity]. The new intensity column,
         # every LoRA up projection and every adapter output start at zero.
-        self.utonia_adaptation = resolve_utonia_adaptation_settings(cfg)
-        if self.utonia_adaptation is None:
+        if intensity_only:
+            old_input_channels = adapt_utonia_stem_to_intensity_only(
+                self.feature_extractor
+            )
+            self.utonia_lora_report = UtoniaLoRAReport(0, 0)
+            self.utonia_lora_trainable_parameters = 0
+            self.utonia_trainable_parameters = sum(
+                parameter.numel()
+                for parameter in self.feature_extractor.parameters()
+                if parameter.requires_grad
+            )
+            print(
+                "Utonia intensity-only adaptation: "
+                f"input={old_input_channels}->4 (xyzi), "
+                f"active_trainable={self.utonia_trainable_parameters}, "
+                "zero-init intensity column only; all pretrained parameters frozen"
+            )
+        elif self.utonia_adaptation is None:
             old_input_channels = adapt_utonia_embedding_to_xyzi(
                 self.feature_extractor
             )
@@ -192,6 +223,7 @@ class Point2Gaus(nn.Module):
             DYNAMIC_VARIANT_V15_5,
             DYNAMIC_VARIANT_V16,
             DYNAMIC_VARIANT_V16_1,
+            DYNAMIC_VARIANT_V17_1,
         )
         from .dynamic_gaussian import (
             CosineRoPEVelocityGaussianBackend,
@@ -284,6 +316,7 @@ class Point2Gaus(nn.Module):
             ),
             DYNAMIC_VARIANT_V16: OrdinalCountBarrierVelocityGaussianBackend,
             DYNAMIC_VARIANT_V16_1: OrdinalCountBarrierVelocityGaussianBackend,
+            DYNAMIC_VARIANT_V17_1: DenseCountBarrierVelocityGaussianBackend,
         }.get(self.dynamic_variant)
         if backend_cls is None:
             raise ValueError(
@@ -427,6 +460,9 @@ class Point2Gaus(nn.Module):
         """Hybrid-adaptation magnitudes from the last forward ({} otherwise)."""
         if self.utonia_adaptation is None:
             return {}
+        if isinstance(self.utonia_adaptation, UtoniaIntensityOnlySettings):
+            stem = self.feature_extractor.embedding.stem.linear
+            return {f"stem_{name}": value for name, value in stem.statistics.items()}
         return hybrid_adaptation_statistics(
             self.feature_extractor, self.utonia_feature_stage
         )

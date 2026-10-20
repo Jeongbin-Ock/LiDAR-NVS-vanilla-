@@ -42,6 +42,7 @@ from src.experiment_config import (
     DYNAMIC_VARIANT_V15_5,
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
+    DYNAMIC_VARIANT_V17_1,
     DYNAMIC_VARIANTS,
     DENSE_COUNT_DYNAMIC_VARIANTS,
     DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT,
@@ -1814,9 +1815,9 @@ class V15ConfigTest(unittest.TestCase):
         for group in (
             LOCAL_ATTENTION_DYNAMIC_VARIANTS,
             NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS,
-            POST_ACTIVATION_STEM_DYNAMIC_VARIANTS,
         ):
-            self.assertEqual(group, V15_FAMILY_DYNAMIC_VARIANTS)
+            self.assertEqual(group, (*V15_FAMILY_DYNAMIC_VARIANTS, DYNAMIC_VARIANT_V17_1))
+        self.assertEqual(POST_ACTIVATION_STEM_DYNAMIC_VARIANTS, V15_FAMILY_DYNAMIC_VARIANTS)
         # V15.1 shares every V15 group; its auxiliary render is its identity.
         self.assertIn(DYNAMIC_VARIANT_V15_1, DYNAMIC_VARIANTS)
         self.assertTrue(VARIANT_CONFIG_PATHS[DYNAMIC_VARIANT_V15_1].is_file())
@@ -1930,7 +1931,7 @@ class V15ConfigTest(unittest.TestCase):
     def test_downstream_no_decay_is_only_for_hybrid_variants(self):
         names = "train.downstream_no_decay=[dynamic_backend.temporal.v_raw]"
         for variant in DYNAMIC_VARIANTS:
-            if variant in HYBRID_UTONIA_DYNAMIC_VARIANTS:
+            if variant in (*HYBRID_UTONIA_DYNAMIC_VARIANTS, DYNAMIC_VARIANT_V17_1):
                 continue
             with self.subTest(variant=variant):
                 self._rejected(
@@ -2238,11 +2239,13 @@ class V15SiblingConfigTest(unittest.TestCase):
         self.assertEqual(EXPERT_COUNT_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V15_2,))
         self.assertEqual(
             DENSE_COUNT_DYNAMIC_VARIANTS,
-            (DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4, DYNAMIC_VARIANT_V15_5),
+            (DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4, DYNAMIC_VARIANT_V15_5,
+             DYNAMIC_VARIANT_V17_1),
         )
         self.assertEqual(DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT, {
             DYNAMIC_VARIANT_V15_3: 12, DYNAMIC_VARIANT_V15_4: 8,
             DYNAMIC_VARIANT_V15_5: 8,
+            DYNAMIC_VARIANT_V17_1: 8,
         })
         self.assertEqual(EXPERT_COUNT_MODE, "expert_gumbel")
         self.assertEqual(EXPERT_AUXILIARY_RENDERS, ("dense_add", "none"))

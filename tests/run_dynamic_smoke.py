@@ -103,6 +103,8 @@ def forward_memory_probe(model, batch):
 
 
 def grad_norm(parameter):
+    if parameter is None:
+        return 0.0
     grad = parameter.grad
     if grad is None:
         return 0.0
@@ -239,8 +241,6 @@ def main():
 
     model = ModelWrapper(cfg).to(device).train()
     p2g = model.p2g_model
-    if not p2g.utonia_lora_enabled:
-        raise RuntimeError("dynamic smoke requires Utonia XYZI LoRA")
     utonia_named_parameters = list(
         p2g.feature_extractor.named_parameters()
     )
@@ -272,15 +272,25 @@ def main():
             "Utonia parameters outside the adaptation scope are trainable: "
             + ", ".join(unexpected_utonia_trainable[:5])
         )
-    lora_up_name, lora_up_parameter = next(
+    lora_up_name, lora_up_parameter = next((
         (name, parameter)
         for name, parameter in utonia_named_parameters
         if ".lora_up." in name and parameter.requires_grad
+    ), (None, None))
+    intensity_name, intensity_parameter = next((
+        (name, parameter) for name, parameter in trainable_utonia_parameters
+        if name.endswith(".intensity_weight")
+    ), (None, None))
+    adaptation_grad_key = (
+        "utonia_lora_up_grad_norm" if lora_up_parameter is not None
+        else "utonia_intensity_grad_norm"
     )
+    if lora_up_parameter is None and intensity_parameter is None:
+        raise RuntimeError("dynamic smoke needs a trainable Utonia adaptation")
     frozen_base_name, frozen_base_parameter = next(
         (name, parameter)
         for name, parameter in utonia_named_parameters
-        if ".base_layer." in name
+        if not parameter.requires_grad
     )
     if frozen_base_parameter.requires_grad:
         raise RuntimeError(f"Utonia base parameter is trainable: {frozen_base_name}")
@@ -426,6 +436,7 @@ def main():
                 "dustbin_predictor_grad_norm": dustbin_predictor_grad,
                 "count_router_grad_norm": count_router_grad,
                 "utonia_lora_up_grad_norm": lora_up_grad,
+                "utonia_intensity_grad_norm": grad_norm(intensity_parameter),
                 "utonia_frozen_base_grad_norm": frozen_base_grad,
                 "velocity_speed_mean_mps": float(speeds.mean()),
                 "velocity_speed_max_mps": float(speeds.max()),
@@ -440,8 +451,8 @@ def main():
     peak_gib = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
     peak_reserved_gib = torch.cuda.max_memory_reserved(device) / (1024 ** 3)
     if args.memory_only:
-        if not all(item["utonia_lora_up_grad_norm"] > 0.0 for item in records):
-            raise RuntimeError("memory probe did not reach Utonia LoRA")
+        if not all(item[adaptation_grad_key] > 0.0 for item in records):
+            raise RuntimeError("memory probe did not reach Utonia adaptation")
         if any(
             item["utonia_frozen_base_grad_norm"] != 0.0
             for item in records
@@ -473,6 +484,8 @@ def main():
             ),
             "count_router_grad_norm": records[-1]["count_router_grad_norm"],
             "utonia_lora_parameter": lora_up_name,
+            "utonia_intensity_parameter": intensity_name,
+            "utonia_intensity_grad_norm": records[-1]["utonia_intensity_grad_norm"],
             "utonia_lora_up_grad_norm": (
                 records[-1]["utonia_lora_up_grad_norm"]
             ),
@@ -582,8 +595,8 @@ def main():
         item["count_router_grad_norm"] > 0.0 for item in records
     ):
         raise RuntimeError("render loss did not reach adaptive-K router")
-    if not all(item["utonia_lora_up_grad_norm"] > 0.0 for item in records):
-        raise RuntimeError("render loss did not reach Utonia LoRA")
+    if not all(item[adaptation_grad_key] > 0.0 for item in records):
+        raise RuntimeError("render loss did not reach Utonia adaptation")
     if any(item["utonia_frozen_base_grad_norm"] != 0.0 for item in records):
         raise RuntimeError("render loss unexpectedly reached frozen Utonia base")
     if records[-1]["velocity_speed_mean_mps"] <= 1.0e-5:

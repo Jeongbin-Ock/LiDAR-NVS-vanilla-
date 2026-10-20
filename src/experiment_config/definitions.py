@@ -37,6 +37,7 @@ DYNAMIC_VARIANT_V15_4 = "dynamic_2dgs_attention_velocity_v15_4"
 DYNAMIC_VARIANT_V15_5 = "dynamic_2dgs_attention_velocity_v15_5"
 DYNAMIC_VARIANT_V16 = "dynamic_2dgs_attention_velocity_v16"
 DYNAMIC_VARIANT_V16_1 = "dynamic_2dgs_attention_velocity_v16_1"
+DYNAMIC_VARIANT_V17_1 = "dynamic_2dgs_attention_velocity_v17_1"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
 # explicit constant for each variant so checkpoint semantics stay exact.
 DYNAMIC_VARIANT = DYNAMIC_VARIANT_V11_4
@@ -150,6 +151,7 @@ BARRIER_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_5,
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
+    DYNAMIC_VARIANT_V17_1,
 )
 DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11,
@@ -177,6 +179,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_5,
     DYNAMIC_VARIANT_V16,
     DYNAMIC_VARIANT_V16_1,
+    DYNAMIC_VARIANT_V17_1,
 )
 # Variants whose Utonia encoder is adapted by p2g.utonia_adaptation.mode=hybrid:
 # frozen XYZ stem columns plus a trained intensity column and a nonlinear stem
@@ -207,6 +210,13 @@ HYBRID_UTONIA_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V14_1,
     *V15_FAMILY_DYNAMIC_VARIANTS,
 )
+# V17.1 keeps V15.4's downstream path and trains only the zero-init intensity
+# column of the pretrained Utonia stem. No LoRA, nonlinear adapters or LN fit.
+INTENSITY_ONLY_UTONIA_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V17_1,)
+UTONIA_PARAM_GROUP_DYNAMIC_VARIANTS = (
+    *HYBRID_UTONIA_DYNAMIC_VARIANTS,
+    *INTENSITY_ONLY_UTONIA_DYNAMIC_VARIANTS,
+)
 # V15's nested Gaussian count (p2g.grid_query.count_mode=nested_gumbel): one
 # shared token anchor, G1..G5 decoded from the refined feature, and a router over
 # the prefixes {G1}, {G1..G3}, {G1..G5}. This is not the learned_gumbel K={1,2,3}
@@ -230,6 +240,7 @@ DENSE_COUNT_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V15_4,
     DYNAMIC_VARIANT_V15_5,
+    DYNAMIC_VARIANT_V17_1,
 )
 # The temporal head count is what separates V15.4 from V15.3, so each pins its
 # own dynamic_2dgs.temporal.num_heads; V15.5 keeps V15.4's eight.
@@ -237,6 +248,7 @@ DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT = {
     DYNAMIC_VARIANT_V15_3: 12,
     DYNAMIC_VARIANT_V15_4: 8,
     DYNAMIC_VARIANT_V15_5: 8,
+    DYNAMIC_VARIANT_V17_1: 8,
 }
 # V16's ordinal nested count (p2g.grid_query.count_mode=nested_ordinal): V15's
 # G1..G5 prefixes, chosen by two bounded gates (G2/G3 present; G4/G5 present
@@ -245,11 +257,13 @@ DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT = {
 ORDINAL_COUNT_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1)
 # V15 runs one radius local-attention block (dynamic_2dgs.local_attention) after
 # the temporal stack. The velocity offset head still reads the stack's output.
-LOCAL_ATTENTION_DYNAMIC_VARIANTS = V15_FAMILY_DYNAMIC_VARIANTS
+LOCAL_ATTENTION_DYNAMIC_VARIANTS = (
+    *V15_FAMILY_DYNAMIC_VARIANTS, DYNAMIC_VARIANT_V17_1,
+)
 # V15's temporal cross-attention adds its branch to the residual stream without
 # the per-layer LayerScale gate (dynamic_2dgs.temporal.layer_scale=false).
 # Every other variant keeps the gate and its layer_scale_init.
-NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS = V15_FAMILY_DYNAMIC_VARIANTS
+NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS = LOCAL_ATTENTION_DYNAMIC_VARIANTS
 # V15's Utonia stem adapter reads GELU(LN(W x)) and adds a residual to it
 # (p2g.utonia_adaptation.stem.adapter_position=post_activation). V14 and V14.1
 # keep the adapter on [x, y, z, I] before the stem LayerNorm.
@@ -427,12 +441,14 @@ LEGACY_EXP_SEED_MODES = {
     2: SEED_MODE_TOKEN,
 }
 
-# p2g.utonia_adaptation vocabulary. ``hybrid`` is the only mode; configs without
+# p2g.utonia_adaptation vocabulary. ``hybrid`` enables the V14/V15 adapters;
+# ``intensity_only`` enables only V17.1's new intensity column. Configs without
 # the block keep the all-linear LoRA. LoRA targets name module roles: attention
 # (qkv and output projection), cpe (SubMConv3d and the Linear after it) and
 # pooling (GridPooling projection). The stem and FFN are deliberately absent:
 # they adapt through the intensity column and the parallel adapters instead.
 UTONIA_ADAPTATION_MODE_HYBRID = "hybrid"
+UTONIA_ADAPTATION_MODE_INTENSITY_ONLY = "intensity_only"
 UTONIA_LORA_TARGETS = ("attention", "cpe", "pooling")
 UTONIA_ADAPTER_ACTIVATIONS = ("relu", "gelu")
 # Where the stem's nonlinear adapter sits. ``pre_norm`` (the key's absent

@@ -100,6 +100,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v16_1": (
         "OrdinalCountBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v17_1": (
+        "DenseCountBarrierVelocityGaussianBackend"
+    ),
 }
 
 
@@ -234,6 +237,10 @@ _PRE_REFACTOR_MANIFEST = {
     # parameter, so its checkpoint and optimizer schemas are exactly V16's.
     "dynamic_2dgs_attention_velocity_v16_1": (
         "db3159b8dc10ce6df033", "8404a6a2e2418a971004"
+    ),
+    # V17.1 changes only Utonia; its entire downstream schema is V15.4's.
+    "dynamic_2dgs_attention_velocity_v17_1": (
+        "0d8954b0eef60c36271e", "ceac3d77acf6877837cd"
     ),
 }
 
