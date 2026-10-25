@@ -31,8 +31,8 @@ Checkpoint resumes ignore all of these files and restore the embedded config.
 | `data/kitti360_lidar4d.yaml` | KITTI-360, `kitti360_dynamic`, LiDAR4D uniform 66×1030 GT | opt-in (`data_config=kitti360_lidar4d`) |
 
 Inference overlays for `test_lidar4d_nvs.py eval_config=...` live in `eval/`.
-Stage overlays applied on top of a finished checkpoint live in `refine/` (see
-"Raydrop refinement" at the end).
+Stage overlays applied on top of a finished checkpoint live in `refine/` and
+`adapt/` (see "Raydrop refinement" and "Sensor-head adaptation" at the end).
 The JSON manifests (`compact_val_windows.json`, `kitti360_compact_val_windows.json`,
 `kitti360_train_split.json`) stay at this level because checkpoints record
 their paths.
@@ -1550,3 +1550,45 @@ python main.py refine_config=raydrop_unet \
   metrics and points all use the refined mask. `test.raydrop_refine=false`
   evaluates the same checkpoint's frozen base model.
 
+## Sensor-head adaptation (`adapt_config=sensor_head`)
+
+V18's LiDAR decoder (the sensor embedding and the MLP that decodes the
+alpha-blended Gaussian feature, the ray and the median depth into intensity
+and raydrop) retrained for a new sensor behind a frozen scene model, usually
+on another dataset:
+
+```bash
+python main.py adapt_config=sensor_head data_config=kitti360_lidar4d \
+    sensor_adapt.base_ckpt=/abs/logs/v18_wint0.5/epoch=28.ckpt \
+    exp_name=v18_wint0.5_ep28_sensorhead_wint1_wrd1 device='[4,5]'
+```
+
+- Composition is the refinement stage's (`_compose_frozen_model_stage` in
+  `src/experiment_config/loader.py`): the base checkpoint's embedded config,
+  then `adapt/sensor_head.yaml`, then the CLI. Those may set `sensor_adapt`,
+  `loss`, `train`, `test`, `logger`, `metrics`, `exp_name`, `project_name`,
+  `device`, `seed` and `mode`. `data_config=<profile>` swaps the whole data
+  block (same `coordinate_frame`) and is recorded as
+  `sensor_adapt.data_profile`; a KITTI-360 profile adds the GT-mode suffix to
+  `exp_name`. The base's hash, epoch, step and run name go under
+  `sensor_adapt.base_*`, and `main.py` re-checks the hash before loading every
+  weight from it.
+- Only a variant with `g2p.lidar_decoder` (V18) can be adapted, and a run
+  either adapts the sensor head or refines raydrop. A refinement or
+  adaptation checkpoint is not accepted as the base of either stage.
+- `SensorAdaptWrapper` (`src/sensor_adapt_wrapper.py`) runs P2G and G2G under
+  `no_grad` and keeps P2G, G2G and G2P in eval mode, as at test time. Only
+  `g2p_model.lidar_decoder` (15,776 parameters) trains, in one
+  `lidar_decoder` AdamW group, starting from the base's weights.
+- **Objective:** `loss.w_intensity` x intensity L1 on GT returns +
+  `loss.w_raydrop` x raydrop BCE on every pixel of every target view (1 and 1
+  in the overlay). `w_depth`, `w_depth_median` and `w_chamfer` must be 0: the
+  frozen geometry gives the decoder no gradient. Depth and (in val) Chamfer
+  are still logged for the frozen geometry; no velocity prior is computed.
+- **Optimizer:** V18's decoder group, `train.lr` 5e-4 and weight decay 1e-4,
+  500 warmup steps and cosine decay; 20 epochs at bs 2 x accumulation 4.
+- The checkpoint keeps the model's state_dict keys. `test_lidar4d_nvs.py`
+  renders with the adapted decoder and records the frozen base as
+  `sensor_adapt_base` in `metrics.json`. Resume with
+  `train.ckpt_path=<its checkpoint>`; CLI changes to `sensor_adapt` are
+  rejected there.

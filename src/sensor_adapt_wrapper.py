@@ -1,0 +1,117 @@
+"""Adapt V18's sensor head to a new LiDAR behind a frozen Dynamic 2DGS model.
+
+A sensor-adaptation run's config is a finished V18 checkpoint's embedded
+config plus a ``sensor_adapt`` block (``adapt_config=``, see config/adapt/),
+usually with another dataset's data block (``data_config=``). The scene model
+-- P2G, temporal G2G and the Gaussians with their features -- runs in eval
+mode under ``no_grad`` on every batch, exactly as at test time. Only G2P's
+``lidar_decoder`` trains: the sensor embedding and the MLP that decodes the
+alpha-blended feature, ray and depth into intensity and raydrop. The objective
+is the loss block's intensity L1 and raydrop BCE; depth and Chamfer stay logged
+as diagnostics of the frozen geometry with weight 0.
+
+The checkpoint keeps the model's state_dict keys, so test_lidar4d_nvs.py reads
+it like any model checkpoint and renders with the adapted decoder.
+"""
+import torch
+
+from src.experiment_config import checkpoint_sha256
+from src.model_wrapper import WANDB_BASE_LOSS_KEYS, ModelWrapper
+
+
+class SensorAdaptWrapper(ModelWrapper):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        if self.g2p_model.lidar_decoder is None:
+            raise ValueError("sensor_adapt needs a model with g2p.lidar_decoder (V18)")
+        self.requires_grad_(False)
+        self.g2p_model.lidar_decoder.requires_grad_(True)
+        for module in self._frozen_modules():
+            module.eval()
+        # The frozen motion does not train, so no velocity prior is computed.
+        self._wandb_loss_keys = set(WANDB_BASE_LOSS_KEYS)
+
+    def _frozen_modules(self):
+        # G2P too, so it renders as at test time; the decoder it holds is an
+        # MLP with no train-only layers, so eval mode leaves its training as is.
+        return (self.p2g_model, self.g2g_model, self.g2p_model)
+
+    def train(self, mode: bool = True):
+        """Lightning switches the whole module to train mode around every
+        validation; the frozen model must keep rendering in eval mode."""
+        super().train(mode)
+        for module in self._frozen_modules():
+            module.train(False)
+        return self
+
+    def load_base_checkpoint(self) -> None:
+        """Load every weight from ``sensor_adapt.base_ckpt``.
+
+        Called once for a fresh adaptation run (the decoder starts from the
+        base model's); a resumed run restores every weight from its own
+        checkpoint instead. The file must still match the hash recorded when
+        the run was composed and hold exactly this model's weights.
+        """
+        adapt = self.cfg.sensor_adapt
+        path = str(adapt.base_ckpt)
+        digest = checkpoint_sha256(path)
+        if digest != str(adapt.base_ckpt_sha256):
+            raise RuntimeError(
+                f"{path} changed since the run was composed: sha256 {digest} != "
+                f"{adapt.base_ckpt_sha256}"
+            )
+        blob = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+        state = blob["state_dict"]
+        # Compared by key, not via load_state_dict's report: BatchNorm does
+        # not list an absent num_batches_tracked as missing.
+        own_keys = set(self.state_dict())
+        missing, unexpected = own_keys - set(state), set(state) - own_keys
+        if missing or unexpected:
+            raise RuntimeError(
+                "Base checkpoint does not match the model: "
+                f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+            )
+        self.load_state_dict(state)
+        if self._is_rank_zero():
+            print(f"[sensor_adapt] frozen base {path} (epoch {int(blob['epoch'])}, "
+                  f"step {int(blob['global_step'])}, sha256 {digest[:12]})", flush=True)
+
+    def configure_optimizers(self):
+        return self._scheduled_optimizer([{
+            "name": "lidar_decoder",
+            "params": list(self.g2p_model.lidar_decoder.parameters()),
+        }])
+
+    def _shared_step(self, batch, batch_idx, *, prefix: str):
+        _input, gt = batch["input"], batch["gt"]
+        compute_valid_metrics, compute_official_metrics = self._metric_schedule(
+            prefix, batch_idx
+        )
+        with torch.no_grad():
+            p2g_out = self.p2g_model(_input)
+            p2g_out.pop("routing_stats", None)
+            p2g_out.pop("auxiliary_batch_gaussians", None)
+            gaussians = self.g2g_model(
+                p2g_out, _input["timestamps_sec"], _input["window_duration_sec"],
+            )
+        # Rendered with grad enabled for the decoder alone: no frozen input
+        # requires grad, so autograd records nothing before its parameters.
+        renders = self.g2p_model(gaussians, gt, compute_points=prefix != "train")
+        losses = self.loss(
+            renders,
+            gaussians=gaussians,
+            metric_mode=prefix,
+            compute_valid_metrics=compute_valid_metrics,
+            compute_raydrop_metrics=compute_official_metrics,
+        )
+
+        self._log_losses(losses, prefix=prefix, batch_size=self._batch_size(_input))
+        if prefix != "train":
+            self._record_eval_summary(losses, batch_idx=batch_idx, prefix=prefix)
+        groups = batch.get("meta", {}).get("window_group")
+        if prefix == "val" and groups and self._val_group_metrics is not None:
+            self._val_group_metrics.add(losses, groups, self._batch_size(_input))
+        return losses["total"]
+
+
+__all__ = ["SensorAdaptWrapper"]

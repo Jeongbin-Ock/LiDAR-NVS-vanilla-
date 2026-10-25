@@ -15,6 +15,8 @@ from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 
 from .definitions import (
+    ADAPT_CONFIG_DIR,
+    ADAPT_OVERLAY_ROOTS,
     ALL_HEAD_ROPE_MATCH_DYNAMIC_VARIANTS,
     BARRIER_MATCH_DYNAMIC_VARIANTS,
     COSINE_ROPE_MATCH_DYNAMIC_VARIANTS,
@@ -403,6 +405,11 @@ def raydrop_refine_enabled(config) -> bool:
     return bool(OmegaConf.select(config, "raydrop_refine.enable", default=False))
 
 
+def sensor_adapt_enabled(config) -> bool:
+    """True for a frozen-model sensor-head adaptation run (``sensor_adapt.enable``)."""
+    return bool(OmegaConf.select(config, "sensor_adapt.enable", default=False))
+
+
 def _frozen_base_record(block):
     return {
         "ckpt": str(block.base_ckpt),
@@ -425,6 +432,16 @@ def raydrop_refine_base_record(config):
     return _frozen_base_record(config.raydrop_refine)
 
 
+def sensor_adapt_base_record(config):
+    """The frozen base checkpoint a sensor-adaptation config was trained on top of, or None.
+
+    Recorded under ``sensor_adapt.base_*`` when the adaptation run started.
+    """
+    if not sensor_adapt_enabled(config):
+        return None
+    return _frozen_base_record(config.sensor_adapt)
+
+
 def _resolve_stage_profile(name, directory: Path, option: str) -> Path:
     text = str(name)
     candidate = directory / f"{text}.yaml"
@@ -440,6 +457,11 @@ def _resolve_stage_profile(name, directory: Path, option: str) -> Path:
 def resolve_refine_profile(name) -> Path:
     """``raydrop_unet`` -> config/refine/raydrop_unet.yaml; any other value is a file path."""
     return _resolve_stage_profile(name, REFINE_CONFIG_DIR, "refine_config")
+
+
+def resolve_adapt_profile(name) -> Path:
+    """``sensor_head`` -> config/adapt/sensor_head.yaml; any other value is a file path."""
+    return _resolve_stage_profile(name, ADAPT_CONFIG_DIR, "adapt_config")
 
 
 def _swap_stage_data(stored, profile_path: Path) -> DictConfig:
@@ -461,11 +483,12 @@ def _swap_stage_data(stored, profile_path: Path) -> DictConfig:
 # is called in messages, and where their overlays live.
 _FROZEN_MODEL_STAGES = {
     "refine_config": ("raydrop_refine", REFINE_OVERLAY_ROOTS, "refinement", resolve_refine_profile),
+    "adapt_config": ("sensor_adapt", ADAPT_OVERLAY_ROOTS, "sensor-adaptation", resolve_adapt_profile),
 }
 
 
 def _compose_frozen_model_stage(cli, option: str) -> tuple[DictConfig, str]:
-    """The body of compose_refine_config, kept generic over _FROZEN_MODEL_STAGES."""
+    """The shared body of compose_refine_config and compose_adapt_config."""
     root, overlay_roots, noun, resolve_profile = _FROZEN_MODEL_STAGES[option]
     cli = OmegaConf.create(OmegaConf.to_container(_as_config(cli), resolve=False))
     profile_path = resolve_profile(cli.pop(option))
@@ -544,12 +567,28 @@ def compose_refine_config(cli=None) -> tuple[DictConfig, str]:
     return _compose_frozen_model_stage(cli, "refine_config")
 
 
+def compose_adapt_config(cli=None) -> tuple[DictConfig, str]:
+    """A fresh sensor-head adaptation run on top of a finished V18 checkpoint.
+
+    ``adapt_config=<name or path>`` names a stage overlay in config/adapt/ and
+    ``sensor_adapt.base_ckpt`` the checkpoint to freeze; the overlay and the
+    CLI may only set ADAPT_OVERLAY_ROOTS (the refinement roots with
+    ``sensor_adapt`` instead of ``raydrop_refine``, plus ``loss``). Everything
+    else -- the base config, the record under ``sensor_adapt``, the
+    ``data_config=`` data swap, naming and resuming -- works as in
+    :func:`compose_refine_config`.
+    """
+    return _compose_frozen_model_stage(cli, "adapt_config")
+
+
 def resolve_main_config(cli=None) -> tuple[DictConfig, str]:
     """Resolve train/test entrypoint config, including exact resume configs."""
 
     cli = _as_config(cli)
     if "refine_config" in cli:
         return compose_refine_config(cli)
+    if "adapt_config" in cli:
+        return compose_adapt_config(cli)
     mode = str(OmegaConf.select(cli, "mode", default="train")).lower()
     checkpoint_key = "train.ckpt_path" if mode == "train" else "test.ckpt_path"
     return _resolve_with_checkpoint(cli, checkpoint_key)
@@ -661,11 +700,15 @@ __all__ = [
     "V15_FAMILY_DYNAMIC_VARIANTS",
     "VARIANT_CONFIG_PATHS",
     "checkpoint_sha256",
+    "compose_adapt_config",
     "compose_fresh_config",
     "compose_refine_config",
     "raydrop_refine_base_record",
     "raydrop_refine_enabled",
+    "resolve_adapt_profile",
     "resolve_refine_profile",
+    "sensor_adapt_base_record",
+    "sensor_adapt_enabled",
     "resolve_data_profile",
     "load_checkpoint_config",
     "resolve_eval_config",

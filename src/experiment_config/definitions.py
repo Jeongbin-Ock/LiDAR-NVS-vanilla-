@@ -11,6 +11,9 @@ DATA_CONFIG_DIR = REPO_ROOT / "config" / "data"
 # Stage overlays applied on top of a finished checkpoint's embedded config
 # (refine_config=<name or path>), e.g. the frozen-model raydrop refinement.
 REFINE_CONFIG_DIR = REPO_ROOT / "config" / "refine"
+# Sensor-head adaptation overlays (adapt_config=<name or path>): V18's LiDAR
+# decoder retrained behind a frozen model, usually on another dataset.
+ADAPT_CONFIG_DIR = REPO_ROOT / "config" / "adapt"
 
 DYNAMIC_VARIANT_V11 = "dynamic_2dgs_attention_velocity_v11"
 DYNAMIC_VARIANT_V11_1 = "dynamic_2dgs_attention_velocity_v11_1"
@@ -326,9 +329,11 @@ _CHECKPOINT_STRUCTURAL_ROOTS = (
     "g2g",
     "g2p",
     "dynamic_2dgs",
-    # Absent (= disabled) in every model checkpoint; only refine_config can
-    # add it, and a refinement checkpoint keeps it fixed.
+    # Absent (= disabled) in every model checkpoint; only refine_config
+    # (adapt_config) can add it, and a refinement (adaptation) checkpoint
+    # keeps it fixed.
     "raydrop_refine",
+    "sensor_adapt",
 )
 
 # Roots a refine_config overlay (and its CLI) may set on top of the frozen
@@ -344,6 +349,15 @@ REFINE_OVERLAY_ROOTS = (
     "device",
     "seed",
     "mode",
+)
+
+# Roots an adapt_config overlay (and its CLI) may set: the refinement roots
+# with sensor_adapt in place of raydrop_refine, plus the loss weights, since
+# the decoder trains on intensity and raydrop alone.
+ADAPT_OVERLAY_ROOTS = (
+    "sensor_adapt",
+    "loss",
+    *(root for root in REFINE_OVERLAY_ROOTS if root != "raydrop_refine"),
 )
 
 _CHECKPOINT_PROTECTED_PATHS = (

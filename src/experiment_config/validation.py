@@ -368,6 +368,49 @@ def _validate_raydrop_refine(config) -> None:
     _require_in_open_range(config, f"{root}.box_mask.max_size_frac", 0.0, 1.0)
 
 
+def _validate_sensor_adapt(config, variant: str, label: str) -> None:
+    """Optional ``sensor_adapt`` block of a frozen-model sensor-head adaptation run.
+
+    Absent or ``enable: false`` is an ordinary model run. Enabled, the block
+    names the frozen checkpoint (recorded with its hash, epoch and step when
+    ``adapt_config`` composes the run) and the data profile swapped in by
+    ``data_config`` if any. Only V18's LiDAR decoder trains, so the variant
+    must have one and the run cannot also refine raydrop. The objective is
+    the intensity and raydrop terms: the frozen geometry gives the decoder no
+    depth or Chamfer gradient, so those weights must be 0.
+    """
+    if not _has_path(config, "sensor_adapt"):
+        return
+    root = "sensor_adapt"
+    _reject_unknown_keys(config, root, {
+        "enable", "base_ckpt", "base_ckpt_sha256", "base_epoch",
+        "base_global_step", "base_exp_name", "data_profile",
+    })
+    _require_flag(config, f"{root}.enable")
+    if not bool(OmegaConf.select(config, f"{root}.enable")):
+        return
+    for key in ("base_ckpt", "base_ckpt_sha256"):
+        if not OmegaConf.select(config, f"{root}.{key}", default=None):
+            raise ValueError(f"{root}.{key} is required when {root}.enable=true")
+    if variant not in FEATURE_DECODER_DYNAMIC_VARIANTS:
+        raise ValueError(
+            f"{label} has no LiDAR decoder to adapt; {root} is only available to "
+            + _only_available_to(FEATURE_DECODER_DYNAMIC_VARIANTS)
+        )
+    if bool(OmegaConf.select(config, "raydrop_refine.enable", default=False)):
+        raise ValueError("A run either refines raydrop or adapts the sensor head, not both")
+    for weight in ("w_depth", "w_depth_median", "w_chamfer"):
+        if float(OmegaConf.select(config, f"loss.{weight}", default=0.0)) != 0.0:
+            raise ValueError(
+                f"loss.{weight} must be 0 in a sensor-adaptation run: the frozen "
+                "model's geometry gives the decoder no gradient"
+            )
+    for weight in ("w_intensity", "w_raydrop"):
+        _require_finite(config, f"loss.{weight}", minimum=0.0, inclusive=True)
+    if not (float(config.loss.w_intensity) > 0.0 or float(config.loss.w_raydrop) > 0.0):
+        raise ValueError("A sensor-adaptation run needs loss.w_intensity or loss.w_raydrop > 0")
+
+
 def _validate_spconv_precision(config) -> None:
     """Optional ``train.spconv_allow_tf32``: a YAML boolean when present.
 
@@ -1253,6 +1296,7 @@ def validate_experiment_config(config) -> None:
     _validate_spconv_precision(config)
     _validate_downstream_no_decay(config, variant, label)
     _validate_raydrop_refine(config)
+    _validate_sensor_adapt(config, variant, label)
 
     # Checkpoints embed the anchor mode from when a second one existed.
     anchor_mode = OmegaConf.select(config, "p2g.anchor_mode", default=None)

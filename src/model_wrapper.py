@@ -25,6 +25,7 @@ from src.experiment_config import (
     DYNAMIC_VARIANTS,
     ROUTED_COUNT_BLOCKS,
     raydrop_refine_enabled,
+    sensor_adapt_enabled,
 )
 from src.eval.group_metrics import GroupMetricAccumulator
 from src.dataloader.kitti360.compact_val import COMPACT_VAL_GROUPS
@@ -869,9 +870,14 @@ class ModelWrapper(LightningModule):
 
 
 def build_model_wrapper(cfg):
-    """The LightningModule a config describes: the model, or its raydrop refinement."""
+    """The LightningModule a config describes: the model, its raydrop
+    refinement, or its sensor-head adaptation."""
     if raydrop_refine_enabled(cfg):
         from src.raydrop_refine_wrapper import RaydropRefineWrapper
 
         return RaydropRefineWrapper(cfg)
+    if sensor_adapt_enabled(cfg):
+        from src.sensor_adapt_wrapper import SensorAdaptWrapper
+
+        return SensorAdaptWrapper(cfg)
     return ModelWrapper(cfg)

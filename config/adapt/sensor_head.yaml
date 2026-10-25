@@ -1,0 +1,51 @@
+# Sensor-head adaptation: V18's LiDAR decoder retrained behind a frozen model.
+#
+#   python main.py adapt_config=sensor_head data_config=kitti360_lidar4d \
+#       sensor_adapt.base_ckpt=/abs/logs/<run>/epoch=<N>.ckpt exp_name=<name> device='[4,5]'
+#
+# The run starts from the base checkpoint's embedded config: model and render
+# settings are the base run's and stay protected; data_config=<profile> swaps
+# in another dataset's whole data block (same coordinate frame) and records it
+# as sensor_adapt.data_profile. This overlay (and the CLI) may only set
+# sensor_adapt, loss, train, test, logger, metrics, exp_name, project_name,
+# device, seed and mode. The loader records the base checkpoint's sha256,
+# epoch, global step and run name under sensor_adapt.
+#
+# Every step renders the batch with the frozen scene model (Utonia + adapters,
+# temporal G2G, Gaussians and their 30-ch features) in eval mode under no_grad,
+# as at test time. Only g2p.lidar_decoder trains: the sensor embedding and the
+# MLP [f', ray, depth_median / 80 m, embedding] -> (intensity, raydrop), which
+# starts from the base checkpoint's weights. The objective is intensity L1 on
+# GT returns plus raydrop BCE on every pixel of every target view; depth and
+# Chamfer are logged for the frozen geometry and carry weight 0.
+sensor_adapt:
+  enable: true
+  base_ckpt: ???
+
+exp_name: ???
+
+loss:
+  w_depth: 0.0
+  w_depth_median: 0.0
+  w_chamfer: 0.0
+  w_intensity: 1.0
+  w_raydrop: 1.0
+
+train:
+  # V18's lidar_decoder AdamW group (train.lr / train.weight_decay of the
+  # V18 runs). Warmup then cosine decay to zero over all optimizer steps.
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  warmup_iters: 500
+  max_epochs: 20
+  batch_size: 2
+  grad_accum_steps: 4
+  ckpt_path: null
+
+test:
+  ckpt_path: null
+
+logger:
+  dir: logs/${exp_name}
+  # A new W&B run; the base run's id is not continued.
+  wandb_run_id: null
