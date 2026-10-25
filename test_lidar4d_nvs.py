@@ -43,7 +43,11 @@ from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 
 from src.model_wrapper import build_model_wrapper
-from src.experiment_config import raydrop_refine_base_record, resolve_eval_config
+from src.experiment_config import (
+    raydrop_refine_base_record,
+    resolve_eval_config,
+    sensor_adapt_base_record,
+)
 from src.dataloader.nuscenes.legacy import multiframe_collate_fn
 from src.dataloader.lidar4d_test import build_lidar4d_test_dataset
 from src.eval.output_paths import resolve_lidar4d_output_dir
@@ -315,6 +319,13 @@ def main(cfg, config_source="unspecified"):
         print(f"[setup] raydrop_refine base={raydrop_refine_base['ckpt']} "
               f"(epoch {raydrop_refine_base['epoch']}, "
               f"sha256 {raydrop_refine_base['sha256'][:12]})")
+    # A sensor-adaptation checkpoint renders with its own decoder on top of
+    # the frozen model it was trained behind; name that model too.
+    sensor_adapt_base = sensor_adapt_base_record(cfg)
+    if sensor_adapt_base is not None:
+        print(f"[setup] sensor_adapt base={sensor_adapt_base['ckpt']} "
+              f"(epoch {sensor_adapt_base['epoch']}, "
+              f"sha256 {sensor_adapt_base['sha256'][:12]})")
     backends = MetricBackends(lpips_net="alex")
     # Per-sequence Gaussian center/surfel HTML holds every window's Gaussians
     # in memory and takes ~140 MB per window on disk; false keeps the metrics,
@@ -539,6 +550,7 @@ def main(cfg, config_source="unspecified"):
                    "velocity_source": velocity_source,
                    "raydrop_refine": raydrop_refine,
                    "raydrop_refine_base": raydrop_refine_base,
+                   "sensor_adapt_base": sensor_adapt_base,
                    "input_offsets_sec": list(input_offsets_sec),
                    "shuffle_orders": shuffle_orders,
                    "vfov": list(vfov),
