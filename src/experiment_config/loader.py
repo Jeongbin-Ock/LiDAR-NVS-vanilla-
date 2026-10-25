@@ -403,6 +403,16 @@ def raydrop_refine_enabled(config) -> bool:
     return bool(OmegaConf.select(config, "raydrop_refine.enable", default=False))
 
 
+def _frozen_base_record(block):
+    return {
+        "ckpt": str(block.base_ckpt),
+        "sha256": str(block.base_ckpt_sha256),
+        "epoch": int(block.base_epoch),
+        "global_step": int(block.base_global_step),
+        "exp_name": str(block.base_exp_name),
+    }
+
+
 def raydrop_refine_base_record(config):
     """The frozen base checkpoint a refinement config was trained on top of, or None.
 
@@ -412,31 +422,27 @@ def raydrop_refine_base_record(config):
     """
     if not raydrop_refine_enabled(config):
         return None
-    refine = config.raydrop_refine
-    return {
-        "ckpt": str(refine.base_ckpt),
-        "sha256": str(refine.base_ckpt_sha256),
-        "epoch": int(refine.base_epoch),
-        "global_step": int(refine.base_global_step),
-        "exp_name": str(refine.base_exp_name),
-    }
+    return _frozen_base_record(config.raydrop_refine)
 
 
-def resolve_refine_profile(name) -> Path:
-    """``raydrop_unet`` -> config/refine/raydrop_unet.yaml; any other value is a file path."""
-
+def _resolve_stage_profile(name, directory: Path, option: str) -> Path:
     text = str(name)
-    candidate = REFINE_CONFIG_DIR / f"{text}.yaml"
+    candidate = directory / f"{text}.yaml"
     if "/" not in text and not text.endswith((".yaml", ".yml")) and candidate.is_file():
         return candidate
     path = Path(text).expanduser().resolve()
     if not path.is_file():
-        known = ", ".join(sorted(p.stem for p in REFINE_CONFIG_DIR.glob("*.yaml")))
-        raise FileNotFoundError(f"Unknown refine_config={text!r}; expected one of {known} or a path")
+        known = ", ".join(sorted(p.stem for p in directory.glob("*.yaml")))
+        raise FileNotFoundError(f"Unknown {option}={text!r}; expected one of {known} or a path")
     return path
 
 
-def _swap_refine_data(stored, profile_path: Path) -> DictConfig:
+def resolve_refine_profile(name) -> Path:
+    """``raydrop_unet`` -> config/refine/raydrop_unet.yaml; any other value is a file path."""
+    return _resolve_stage_profile(name, REFINE_CONFIG_DIR, "refine_config")
+
+
+def _swap_stage_data(stored, profile_path: Path) -> DictConfig:
     """The base run's config with its data block replaced by a data profile's."""
     profile = _load_data_profile(profile_path)
     frame = OmegaConf.select(profile, "data.coordinate_frame", default=None)
@@ -448,6 +454,72 @@ def _swap_refine_data(stored, profile_path: Path) -> DictConfig:
     if str(swapped.data.dataset_name) == "kitti360_dynamic":
         _bind_kitti360_split_manifest(swapped)
     return swapped
+
+
+# Stages composed on top of a finished model checkpoint, by CLI option: the
+# config root they add, the roots their overlay and CLI may set, what the run
+# is called in messages, and where their overlays live.
+_FROZEN_MODEL_STAGES = {
+    "refine_config": ("raydrop_refine", REFINE_OVERLAY_ROOTS, "refinement", resolve_refine_profile),
+}
+
+
+def _compose_frozen_model_stage(cli, option: str) -> tuple[DictConfig, str]:
+    """The body of compose_refine_config, kept generic over _FROZEN_MODEL_STAGES."""
+    root, overlay_roots, noun, resolve_profile = _FROZEN_MODEL_STAGES[option]
+    cli = OmegaConf.create(OmegaConf.to_container(_as_config(cli), resolve=False))
+    profile_path = resolve_profile(cli.pop(option))
+    data_config = cli.pop("data_config", None)
+    data_path = resolve_data_profile(data_config) if data_config is not None else None
+    overlay = OmegaConf.load(profile_path)
+    for source, block in ((profile_path, overlay), ("the CLI", cli)):
+        unknown = sorted(set(block) - set(overlay_roots))
+        if unknown:
+            raise ValueError(f"{source} cannot set {', '.join(unknown)}; a {noun} run "
+                             f"may only set {', '.join(overlay_roots)}")
+    request = OmegaConf.merge(overlay, cli)
+    if str(OmegaConf.select(request, "mode", default="train")) != "train":
+        raise ValueError(f"{option} composes training runs (mode=train)")
+    if OmegaConf.select(request, "train.ckpt_path", default=None):
+        raise ValueError(f"{option} starts a {noun} run; resume one with "
+                         f"train.ckpt_path=<{noun} checkpoint> and no {option}")
+    for path in (f"{root}.base_ckpt", "exp_name"):
+        parent, _, key = path.rpartition(".")
+        node = OmegaConf.select(request, parent) if parent else request
+        if node is None or key not in node or OmegaConf.is_missing(node, key) or not node[key]:
+            raise ValueError(f"{option} requires {path}")
+    stage = request[root]
+    base_ckpt = Path(str(stage.base_ckpt)).expanduser().resolve()
+    stored, source = load_checkpoint_config(base_ckpt)
+    for other_root, _roots, other_noun, _resolve in _FROZEN_MODEL_STAGES.values():
+        if OmegaConf.select(stored, f"{other_root}.enable", default=False):
+            raise ValueError(f"{base_ckpt} is already a {other_noun} checkpoint")
+    if data_path is not None:
+        stored = _swap_stage_data(stored, data_path)
+        stage.data_profile = str(data_path.resolve())
+        source = f"{source}; data profile: {data_path.resolve()}"
+
+    import torch
+
+    blob = torch.load(base_ckpt, map_location="cpu", weights_only=False, mmap=True)
+    stage.base_ckpt = str(base_ckpt)
+    stage.base_ckpt_sha256 = checkpoint_sha256(base_ckpt)
+    stage.base_epoch = int(blob["epoch"])
+    stage.base_global_step = int(blob["global_step"])
+    stage.base_exp_name = str(stored.exp_name)
+    del blob
+    config = _merge_checkpoint_cli(stored, request, unlocked_roots=(root,))
+    config.mode = "train"
+    if not OmegaConf.select(config, f"{root}.enable", default=False):
+        raise ValueError(f"{profile_path} must set {root}.enable=true")
+    if data_path is not None and str(config.data.dataset_name) == "kitti360_dynamic":
+        config.exp_name = _kitti360_exp_name(config, named=True)
+    if str(config.exp_name) == str(stored.exp_name) or (
+        Path(str(config.logger.dir)).resolve() == Path(str(stored.logger.dir)).resolve()
+    ):
+        raise ValueError(f"A {noun} run needs its own exp_name and logger.dir, "
+                         f"not the base run's {stored.exp_name!r}")
+    return config, f"{source}; {option.split('_')[0]} overlay: {profile_path.resolve()}"
 
 
 def compose_refine_config(cli=None) -> tuple[DictConfig, str]:
@@ -469,57 +541,7 @@ def compose_refine_config(cli=None) -> tuple[DictConfig, str]:
     as ``raydrop_refine.data_profile``. A KITTI-360 profile binds its split
     manifest hash and adds the GT-mode suffix to exp_name, as a fresh run does.
     """
-    cli = OmegaConf.create(OmegaConf.to_container(_as_config(cli), resolve=False))
-    profile_path = resolve_refine_profile(cli.pop("refine_config"))
-    data_config = cli.pop("data_config", None)
-    data_path = resolve_data_profile(data_config) if data_config is not None else None
-    overlay = OmegaConf.load(profile_path)
-    for source, block in ((profile_path, overlay), ("the CLI", cli)):
-        unknown = sorted(set(block) - set(REFINE_OVERLAY_ROOTS))
-        if unknown:
-            raise ValueError(f"{source} cannot set {', '.join(unknown)}; a refinement run "
-                             f"may only set {', '.join(REFINE_OVERLAY_ROOTS)}")
-    request = OmegaConf.merge(overlay, cli)
-    if str(OmegaConf.select(request, "mode", default="train")) != "train":
-        raise ValueError("refine_config composes training runs (mode=train)")
-    if OmegaConf.select(request, "train.ckpt_path", default=None):
-        raise ValueError("refine_config starts a refinement run; resume one with "
-                         "train.ckpt_path=<refinement checkpoint> and no refine_config")
-    for path in ("raydrop_refine.base_ckpt", "exp_name"):
-        parent, _, key = path.rpartition(".")
-        node = OmegaConf.select(request, parent) if parent else request
-        if node is None or key not in node or OmegaConf.is_missing(node, key) or not node[key]:
-            raise ValueError(f"refine_config requires {path}")
-    base_ckpt = Path(str(request.raydrop_refine.base_ckpt)).expanduser().resolve()
-    stored, source = load_checkpoint_config(base_ckpt)
-    if raydrop_refine_enabled(stored):
-        raise ValueError(f"{base_ckpt} is already a refinement checkpoint")
-    if data_path is not None:
-        stored = _swap_refine_data(stored, data_path)
-        request.raydrop_refine.data_profile = str(data_path.resolve())
-        source = f"{source}; data profile: {data_path.resolve()}"
-
-    import torch
-
-    blob = torch.load(base_ckpt, map_location="cpu", weights_only=False, mmap=True)
-    request.raydrop_refine.base_ckpt = str(base_ckpt)
-    request.raydrop_refine.base_ckpt_sha256 = checkpoint_sha256(base_ckpt)
-    request.raydrop_refine.base_epoch = int(blob["epoch"])
-    request.raydrop_refine.base_global_step = int(blob["global_step"])
-    request.raydrop_refine.base_exp_name = str(stored.exp_name)
-    del blob
-    config = _merge_checkpoint_cli(stored, request, unlocked_roots=("raydrop_refine",))
-    config.mode = "train"
-    if not raydrop_refine_enabled(config):
-        raise ValueError(f"{profile_path} must set raydrop_refine.enable=true")
-    if data_path is not None and str(config.data.dataset_name) == "kitti360_dynamic":
-        config.exp_name = _kitti360_exp_name(config, named=True)
-    if str(config.exp_name) == str(stored.exp_name) or (
-        Path(str(config.logger.dir)).resolve() == Path(str(stored.logger.dir)).resolve()
-    ):
-        raise ValueError("A refinement run needs its own exp_name and logger.dir, "
-                         f"not the base run's {stored.exp_name!r}")
-    return config, f"{source}; refine overlay: {profile_path.resolve()}"
+    return _compose_frozen_model_stage(cli, "refine_config")
 
 
 def resolve_main_config(cli=None) -> tuple[DictConfig, str]:
