@@ -45,6 +45,7 @@ from src.experiment_config import (
     DYNAMIC_VARIANT_V17_1,
     DYNAMIC_VARIANT_V18,
     DYNAMIC_VARIANT_V18_1,
+    DYNAMIC_VARIANT_V18_2,
     DYNAMIC_VARIANTS,
     DENSE_COUNT_DYNAMIC_VARIANTS,
     DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT,
@@ -70,6 +71,7 @@ from src.experiment_config import (
     ORDINAL_COUNT_OPTION_COUNTS,
     POST_ACTIVATION_STEM_DYNAMIC_VARIANTS,
     ROUTED_COUNT_BLOCKS,
+    UNET_DECODER_DYNAMIC_VARIANTS,
     V15_FAMILY_DYNAMIC_VARIANTS,
     VARIANT_CONFIG_PATHS,
     compose_fresh_config,
@@ -1815,7 +1817,7 @@ class V15ConfigTest(unittest.TestCase):
             DYNAMIC_VARIANT_V15, DYNAMIC_VARIANT_V15_1,
             DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
             DYNAMIC_VARIANT_V15_5, DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1,
-            DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1,
+            DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1, DYNAMIC_VARIANT_V18_2,
         ))
         for group in (
             LOCAL_ATTENTION_DYNAMIC_VARIANTS,
@@ -2229,6 +2231,7 @@ class V15SiblingConfigTest(unittest.TestCase):
         for variant in (
             DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
             DYNAMIC_VARIANT_V15_5, DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1,
+            DYNAMIC_VARIANT_V18_2,
         ):
             with self.subTest(variant=variant):
                 self.assertIn(variant, DYNAMIC_VARIANTS)
@@ -2245,7 +2248,8 @@ class V15SiblingConfigTest(unittest.TestCase):
         self.assertEqual(
             DENSE_COUNT_DYNAMIC_VARIANTS,
             (DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4, DYNAMIC_VARIANT_V15_5,
-             DYNAMIC_VARIANT_V17_1, DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1),
+             DYNAMIC_VARIANT_V17_1, DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1,
+             DYNAMIC_VARIANT_V18_2),
         )
         self.assertEqual(DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT, {
             DYNAMIC_VARIANT_V15_3: 12, DYNAMIC_VARIANT_V15_4: 8,
@@ -2253,6 +2257,7 @@ class V15SiblingConfigTest(unittest.TestCase):
             DYNAMIC_VARIANT_V17_1: 8,
             DYNAMIC_VARIANT_V18: 8,
             DYNAMIC_VARIANT_V18_1: 8,
+            DYNAMIC_VARIANT_V18_2: 8,
         })
         self.assertEqual(EXPERT_COUNT_MODE, "expert_gumbel")
         self.assertEqual(EXPERT_AUXILIARY_RENDERS, ("dense_add", "none"))
@@ -2412,7 +2417,7 @@ class V15SiblingConfigTest(unittest.TestCase):
     def test_v18_1_config_is_v18s_without_the_sensor_embedding(self):
         self.assertEqual(
             FEATURE_DECODER_DYNAMIC_VARIANTS,
-            (DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1),
+            (DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1, DYNAMIC_VARIANT_V18_2),
         )
         self.assertEqual(NO_SENSOR_EMBEDDING_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V18_1,))
         v18, _ = self._compose(variant=DYNAMIC_VARIANT_V18)
@@ -2449,8 +2454,70 @@ class V15SiblingConfigTest(unittest.TestCase):
             "g2p.lidar_decoder.sensor_embedding_dim=0", variant=DYNAMIC_VARIANT_V18,
         )
         self._rejected(
-            "only available to V18, V18.1$", "p2g.gs_params.feature=30",
+            "only available to V18, V18.1, V18.2$", "p2g.gs_params.feature=30",
             variant=DYNAMIC_VARIANT_V15_4,
+        )
+
+    def test_v18_2_config_is_v18_1s_with_a_32_channel_feature_and_a_unet(self):
+        self.assertEqual(UNET_DECODER_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V18_2,))
+        self.assertNotIn(DYNAMIC_VARIANT_V18_2, NO_SENSOR_EMBEDDING_DYNAMIC_VARIANTS)
+        v18_1, _ = self._compose(variant=DYNAMIC_VARIANT_V18_1)
+        v18_2, _ = self._compose(variant=DYNAMIC_VARIANT_V18_2)
+        a = self._leaves(OmegaConf.to_container(v18_1, resolve=True))
+        b = self._leaves(OmegaConf.to_container(v18_2, resolve=True))
+        changed = {
+            key for key in set(a) | set(b)
+            if a.get(key, "<absent>") != b.get(key, "<absent>")
+        }
+        decoder = "g2p.lidar_decoder."
+        self.assertEqual(changed, {
+            "model.variant", "exp_name", "logger.dir", "p2g.gs_params.feature",
+            decoder + "feature_dim", decoder + "sensor_embedding_dim",
+            decoder + "hidden_dims", decoder + "channels", decoder + "norm_groups",
+        })
+        self.assertEqual(b["p2g.gs_params.feature"], 32)
+        self.assertEqual(b[decoder + "feature_dim"], 32)
+        self.assertEqual(b[decoder + "channels"], [64, 128, 256, 256])
+        self.assertEqual(b[decoder + "norm_groups"], 32)
+        self.assertEqual(b[decoder + "range_scale_m"], 80.0)
+        for key in ("sensor_embedding_dim", "num_sensors", "hidden_dims"):
+            self.assertNotIn(decoder + key, b)
+
+    def test_v18_2_unet_decoder_keys_are_its_own(self):
+        decoder = "g2p.lidar_decoder"
+        self._rejected(
+            "Unsupported keys under g2p.lidar_decoder: hidden_dims",
+            f"{decoder}.hidden_dims=[96,96]", variant=DYNAMIC_VARIANT_V18_2,
+        )
+        self._rejected(
+            "Unsupported keys under g2p.lidar_decoder: sensor_embedding_dim",
+            f"{decoder}.sensor_embedding_dim=0", variant=DYNAMIC_VARIANT_V18_2,
+        )
+        self._rejected(
+            "channels must list at least two positive integer encoder widths",
+            f"{decoder}.channels=[64]", variant=DYNAMIC_VARIANT_V18_2,
+        )
+        self._rejected(
+            "norm_groups must divide every width",
+            f"{decoder}.norm_groups=48", variant=DYNAMIC_VARIANT_V18_2,
+        )
+        self._rejected(
+            "divisible by the attention's 8 heads",
+            f"{decoder}.channels=[64,128,252]", f"{decoder}.norm_groups=4",
+            variant=DYNAMIC_VARIANT_V18_2,
+        )
+        self._rejected(
+            "feature_dim must equal p2g.gs_params.feature",
+            f"{decoder}.feature_dim=30", variant=DYNAMIC_VARIANT_V18_2,
+        )
+        self._rejected(
+            "must be at most 32",
+            "p2g.gs_params.feature=33", variant=DYNAMIC_VARIANT_V18_2,
+        )
+        # The MLP variants keep rejecting the U-Net's keys.
+        self._rejected(
+            "Unsupported keys under g2p.lidar_decoder: channels",
+            f"{decoder}.channels=[64,128]", variant=DYNAMIC_VARIANT_V18_1,
         )
 
     def test_v15_3_and_v15_4_pin_their_temporal_head_counts(self):
@@ -2460,6 +2527,7 @@ class V15SiblingConfigTest(unittest.TestCase):
             (DYNAMIC_VARIANT_V15_5, 8, 12),
             (DYNAMIC_VARIANT_V18, 8, 12),
             (DYNAMIC_VARIANT_V18_1, 8, 12),
+            (DYNAMIC_VARIANT_V18_2, 8, 12),
         ):
             with self.subTest(variant=variant):
                 self._rejected(

@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 from src.experiment_config import (
     DYNAMIC_VARIANT_V15_4,
     DYNAMIC_VARIANT_V18,
+    DYNAMIC_VARIANT_V18_2,
     checkpoint_sha256,
     compose_adapt_config,
     compose_fresh_config,
@@ -231,9 +232,12 @@ def test_wrapper_trains_only_the_sensor_head_and_keeps_the_model_in_eval_mode():
     assert sum(p.numel() for p in decoder.parameters()) == 15_776
     wrapper.train()
     assert wrapper.training and wrapper.loss.training
+    # The head follows the wrapper's mode; everything it decodes stays in eval.
+    head = {id(module) for module in decoder.modules()}
+    assert all(module.training for module in decoder.modules())
     assert not any(module.training for module in (
         *wrapper.p2g_model.modules(), *wrapper.g2g_model.modules(), *wrapper.g2p_model.modules(),
-    ))
+    ) if id(module) not in head)
     with mock.patch.object(
         SensorAdaptWrapper, "trainer", new=SimpleNamespace(estimated_stepping_batches=16_000),
     ):
@@ -243,6 +247,35 @@ def test_wrapper_trains_only_the_sensor_head_and_keeps_the_model_in_eval_mode():
     assert [id(p) for p in group["params"]] == [id(p) for p in decoder.parameters()]
     assert (group["initial_lr"], group["weight_decay"]) == (5.0e-4, 1.0e-4)
     assert group["lr"] == pytest.approx(5.0e-4 / 500)  # first warmup step
+
+
+@requires_cuda
+def test_v18_2_adaptation_trains_its_unet_with_dropout_in_training_only():
+    """V18.2's head is the U-Net; its dropout follows the wrapper's mode."""
+    from src.model_wrapper import build_model_wrapper
+    from src.models.module.lidar_unet_decoder import LidarUNetDecoder
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _stored, checkpoint = _base_checkpoint(
+            tmp, variant=DYNAMIC_VARIANT_V18_2, exp_name="v18.2_wint0.5"
+        )
+        config, _ = _compose(checkpoint, "data_config=kitti360_lidar4d")
+        wrapper = build_model_wrapper(config)
+    decoder = wrapper.g2p_model.lidar_decoder
+    assert isinstance(decoder, LidarUNetDecoder)
+    trainable = {name for name, p in wrapper.named_parameters() if p.requires_grad}
+    assert trainable == {f"g2p_model.lidar_decoder.{name}" for name, _ in decoder.named_parameters()}
+    assert sum(p.numel() for p in decoder.parameters()) == 6_464_194
+    dropout = [m for m in decoder.modules() if isinstance(m, torch.nn.Dropout2d)]
+    assert dropout and all(m.training for m in dropout)
+    head = {id(module) for module in decoder.modules()}
+    assert not any(
+        module.training for module in wrapper.g2p_model.modules() if id(module) not in head
+    )
+    wrapper.eval()
+    assert not any(module.training for module in decoder.modules())
+    wrapper.train()
+    assert all(m.training for m in dropout)
 
 
 @requires_cuda

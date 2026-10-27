@@ -11,16 +11,17 @@ from ..utils.render import Gaussianutil
 gu = Gaussianutil(None)
 
 
-def panorama_ray_directions(viewpoint_camera, device, dtype):
-    """Every pixel's unit ray direction in the render's world frame, ``(3, H, W)``.
+def panorama_camera_ray_directions(viewpoint_camera, device, dtype):
+    """Every pixel's unit ray direction in the render camera's frame, ``(3, H, W)``.
 
     The rasterizer casts pixel (row y, column x) along azimuth
     ``phi = x * (hfov_max - hfov_min) / W + hfov_min`` and polar angle
     ``theta = row_to_theta[y]``, i.e. along
     ``(sin(theta) sin(phi), -cos(theta), sin(theta) cos(phi))`` in its camera
-    frame. ``world_view_transform[:3, :3]`` is the transposed world-to-camera
-    rotation, so it takes that direction to the world frame, which for Dynamic
-    2DGS is the window's reference frame the Gaussians live in.
+    frame: the rendering LiDAR's own axes, permuted by the loaders to x right,
+    y down, z forward for nuScenes and KITTI-360 alike. The map depends only on
+    the panorama's rows and columns, so it is the same for every view of a
+    sensor.
     """
     height = int(viewpoint_camera.image_height)
     width = int(viewpoint_camera.image_width)
@@ -30,11 +31,22 @@ def panorama_ray_directions(viewpoint_camera, device, dtype):
     ) + hfov_min
     theta = viewpoint_camera.row_to_theta.to(device=device, dtype=dtype)
     sin_theta = theta.sin().unsqueeze(1)
-    camera_direction = torch.stack([
+    return torch.stack([
         sin_theta * phi.sin().unsqueeze(0),
         (-theta.cos()).unsqueeze(1).expand(height, width),
         sin_theta * phi.cos().unsqueeze(0),
     ], dim=0)
+
+
+def panorama_ray_directions(viewpoint_camera, device, dtype):
+    """Every pixel's unit ray direction in the render's world frame, ``(3, H, W)``.
+
+    ``world_view_transform[:3, :3]`` is the transposed world-to-camera
+    rotation, so it takes :func:`panorama_camera_ray_directions` to the world
+    frame, which for Dynamic 2DGS is the window's reference frame the Gaussians
+    live in.
+    """
+    camera_direction = panorama_camera_ray_directions(viewpoint_camera, device, dtype)
     camera_to_world = viewpoint_camera.world_view_transform[:3, :3].to(
         device=device, dtype=dtype
     )

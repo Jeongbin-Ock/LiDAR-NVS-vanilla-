@@ -43,6 +43,7 @@ DYNAMIC_VARIANT_V16_1 = "dynamic_2dgs_attention_velocity_v16_1"
 DYNAMIC_VARIANT_V17_1 = "dynamic_2dgs_attention_velocity_v17_1"
 DYNAMIC_VARIANT_V18 = "dynamic_2dgs_attention_velocity_v18"
 DYNAMIC_VARIANT_V18_1 = "dynamic_2dgs_attention_velocity_v18_1"
+DYNAMIC_VARIANT_V18_2 = "dynamic_2dgs_attention_velocity_v18_2"
 # The unsuffixed constant always names the current fresh-run baseline. Keep an
 # explicit constant for each variant so checkpoint semantics stay exact.
 DYNAMIC_VARIANT = DYNAMIC_VARIANT_V11_4
@@ -130,7 +131,8 @@ FLASH_ROPE_MATCH_DYNAMIC_VARIANTS = (
 # instead of their learned softmax mixture. V18 is V15.4 whose Gaussians carry
 # a feature, alpha-blended and decoded into intensity and raydrop by G2P's lidar
 # MLP, instead of SH coefficients. V18.1 is V18 whose MLP reads no sensor
-# embedding.
+# embedding. V18.2 is V18 with a 32-channel feature decoded by a LiDAR4D-style
+# U-Net over the whole view instead of the per-pixel MLP.
 # V16 keeps V15's stack and G1..G5 decoder and changes the router: two bounded
 # ordinal gates trained through masked rasterization. V16.1 is V16 whose second
 # training render is a uniformly random prefix of G1..G5 per token instead of
@@ -162,6 +164,7 @@ BARRIER_MATCH_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V17_1,
     DYNAMIC_VARIANT_V18,
     DYNAMIC_VARIANT_V18_1,
+    DYNAMIC_VARIANT_V18_2,
 )
 DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V11,
@@ -192,6 +195,7 @@ DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V17_1,
     DYNAMIC_VARIANT_V18,
     DYNAMIC_VARIANT_V18_1,
+    DYNAMIC_VARIANT_V18_2,
 )
 # Variants whose Utonia encoder is adapted by p2g.utonia_adaptation.mode=hybrid:
 # frozen XYZ stem columns plus a trained intensity column and a nonlinear stem
@@ -203,11 +207,11 @@ DYNAMIC_VARIANTS = (
 # activation (see POST_ACTIVATION_STEM_DYNAMIC_VARIANTS). Only these variants
 # have per-role optimizer groups, so only they accept train.downstream_no_decay.
 # Every V15-family variant (V15, V15.1, V15.2, V15.3, V15.4, V15.5, V16, V16.1,
-# V18, V18.1) shares V15's Utonia adaptation, temporal stack and local-attention block;
+# V18, V18.1, V18.2) shares V15's Utonia adaptation, temporal stack and local-attention block;
 # they differ only in how the Gaussian head turns a token into Gaussians, except
 # V15.4, which is V15.3 with eight temporal heads instead of twelve, V15.5,
-# which is V15.4 with v_init read from the uniform mean over layers, and V18
-# and V18.1, which are V15.4 with a rendered feature in place of the SH
+# which is V15.4 with v_init read from the uniform mean over layers, and V18,
+# V18.1 and V18.2, which are V15.4 with a rendered feature in place of the SH
 # coefficients.
 V15_FAMILY_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15,
@@ -220,6 +224,7 @@ V15_FAMILY_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V16_1,
     DYNAMIC_VARIANT_V18,
     DYNAMIC_VARIANT_V18_1,
+    DYNAMIC_VARIANT_V18_2,
 )
 HYBRID_UTONIA_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V14,
@@ -251,8 +256,8 @@ EXPERT_COUNT_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V15_2,)
 # two-layer decoder, whose hidden width is dynamic_2dgs.gaussian_head.decoder_hidden.
 # V15.4 is V15.3 with eight temporal heads (54 channels each) instead of twelve
 # (36 each). V15.5 is V15.4 whose v_init averages the layers' head-0 readouts
-# uniformly instead of under learned layer logits. V18 and V18.1 decode V15.4's
-# five slots with a feature in place of the SH coefficients.
+# uniformly instead of under learned layer logits. V18, V18.1 and V18.2 decode
+# V15.4's five slots with a feature in place of the SH coefficients.
 DENSE_COUNT_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V15_3,
     DYNAMIC_VARIANT_V15_4,
@@ -260,9 +265,10 @@ DENSE_COUNT_DYNAMIC_VARIANTS = (
     DYNAMIC_VARIANT_V17_1,
     DYNAMIC_VARIANT_V18,
     DYNAMIC_VARIANT_V18_1,
+    DYNAMIC_VARIANT_V18_2,
 )
 # The temporal head count is what separates V15.4 from V15.3, so each pins its
-# own dynamic_2dgs.temporal.num_heads; V15.5, V18 and V18.1 keep V15.4's eight.
+# own dynamic_2dgs.temporal.num_heads; V15.5, V18, V18.1 and V18.2 keep V15.4's eight.
 DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT = {
     DYNAMIC_VARIANT_V15_3: 12,
     DYNAMIC_VARIANT_V15_4: 8,
@@ -270,19 +276,28 @@ DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT = {
     DYNAMIC_VARIANT_V17_1: 8,
     DYNAMIC_VARIANT_V18: 8,
     DYNAMIC_VARIANT_V18_1: 8,
+    DYNAMIC_VARIANT_V18_2: 8,
 }
 # V18 (SplatAD-style LiDAR appearance): every Gaussian carries a feature of
 # p2g.gs_params.feature channels instead of SH coefficients (shs: 0); the
 # rasterizer alpha-blends it, and G2P's lidar decoder (g2p.lidar_decoder) maps
 # [blended feature, world-frame ray direction, median depth / range_scale_m,
 # learned sensor embedding] to intensity and raydrop with one MLP.
-FEATURE_DECODER_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1)
+FEATURE_DECODER_DYNAMIC_VARIANTS = (
+    DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1, DYNAMIC_VARIANT_V18_2,
+)
 # V18.1's decoder reads no sensor embedding (g2p.lidar_decoder.sensor_embedding_dim:
 # 0, no num_sensors). With one LiDAR per training set, V18's embedding is the same
 # vector at every pixel, so it only adds W_e e to the first layer's pre-activation,
 # a constant its bias can hold: the two decoders represent the same functions,
 # but V18.1 trains that bias directly instead of through the product W_e e.
 NO_SENSOR_EMBEDDING_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V18_1,)
+# V18.2's decoder is a LiDAR4D-style U-Net over the whole view
+# (g2p.lidar_decoder.channels, norm_groups) instead of V18's per-pixel MLP. It
+# reads [f', ray in the rendering LiDAR's own axes, median depth / range_scale_m]
+# and has no sensor embedding; GroupNorm replaces LiDAR4D's BatchNorm and its
+# attention merges heads per position. Its Gaussians carry a 32-channel feature.
+UNET_DECODER_DYNAMIC_VARIANTS = (DYNAMIC_VARIANT_V18_2,)
 # The rasterizer blends at most this many feature channels per Gaussian
 # (MAX_FEATURE_CHANNELS in its cuda_rasterizer/config.h).
 RASTERIZER_MAX_FEATURE_CHANNELS = 32
@@ -374,8 +389,9 @@ ADAPT_OVERLAY_ROOTS = (
     *(root for root in REFINE_OVERLAY_ROOTS if root != "raydrop_refine"),
 )
 # sensor_adapt.decoder_init: where the trained sensor head starts. ``base``
-# loads the base checkpoint's sensor embedding (V18.1 has none) and MLP with
-# every other weight; ``random`` keeps the head at its fresh initialization.
+# loads the base checkpoint's sensor head (V18's embedding and MLP, V18.1's MLP,
+# V18.2's U-Net) with every other weight; ``random`` keeps the head at its fresh
+# initialization.
 SENSOR_ADAPT_DECODER_INITS = ("base", "random")
 
 _CHECKPOINT_PROTECTED_PATHS = (

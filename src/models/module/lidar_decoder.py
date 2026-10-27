@@ -81,6 +81,10 @@ class LidarFeatureDecoder(nn.Module):
     34 inputs, and every view is sensor 0.
     """
 
+    # The frame of the ray directions G2P hands this decoder: the window
+    # reference frame's axes (V18.2's U-Net reads the LiDAR's own).
+    ray_frame = "reference"
+
     def __init__(self, cfg):
         super().__init__()
         self.feature_dim = _positive_int(cfg, "feature_dim")

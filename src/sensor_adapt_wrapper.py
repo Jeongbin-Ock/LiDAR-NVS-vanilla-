@@ -5,10 +5,12 @@ config plus a ``sensor_adapt`` block (``adapt_config=``, see config/adapt/),
 usually with another dataset's data block (``data_config=``). The scene model
 -- P2G, temporal G2G and the Gaussians with their features -- runs in eval
 mode under ``no_grad`` on every batch, exactly as at test time. Only G2P's
-``lidar_decoder`` trains: the sensor embedding and the MLP that decodes the
-alpha-blended feature, ray and depth into intensity and raydrop. It starts from
-the base checkpoint's weights, or with ``sensor_adapt.decoder_init=random``
-from the fresh V18 initialization the model was built with. The objective
+``lidar_decoder`` trains, the head that decodes the alpha-blended feature, ray
+and depth into intensity and raydrop (V18's sensor embedding and MLP, V18.1's
+MLP, V18.2's U-Net), in the wrapper's train/eval mode while every other module
+stays in eval mode. It starts from the base checkpoint's weights, or with
+``sensor_adapt.decoder_init=random`` from the fresh initialization the model
+was built with. The objective
 is the loss block's intensity L1 and raydrop BCE; depth and Chamfer stay logged
 as diagnostics of the frozen geometry with weight 0.
 
@@ -20,7 +22,7 @@ import torch
 from src.experiment_config import checkpoint_sha256
 from src.model_wrapper import WANDB_BASE_LOSS_KEYS, ModelWrapper
 
-# The trained sensor head's state_dict keys: the embedding and the MLP.
+# The trained sensor head's state_dict keys.
 DECODER_PREFIX = "g2p_model.lidar_decoder."
 
 
@@ -28,25 +30,29 @@ class SensorAdaptWrapper(ModelWrapper):
     def __init__(self, cfg):
         super().__init__(cfg)
         if self.g2p_model.lidar_decoder is None:
-            raise ValueError("sensor_adapt needs a model with g2p.lidar_decoder (V18)")
+            raise ValueError(
+                "sensor_adapt needs a model with g2p.lidar_decoder (V18, V18.1, V18.2)"
+            )
         self.requires_grad_(False)
         self.g2p_model.lidar_decoder.requires_grad_(True)
-        for module in self._frozen_modules():
-            module.eval()
+        self.train(self.training)
         # The frozen motion does not train, so no velocity prior is computed.
         self._wandb_loss_keys = set(WANDB_BASE_LOSS_KEYS)
 
     def _frozen_modules(self):
-        # G2P too, so it renders as at test time; the decoder it holds is an
-        # MLP with no train-only layers, so eval mode leaves its training as is.
+        # G2P too, so it renders as at test time; ``train`` hands the decoder
+        # it holds back to the wrapper's mode.
         return (self.p2g_model, self.g2g_model, self.g2p_model)
 
     def train(self, mode: bool = True):
         """Lightning switches the whole module to train mode around every
-        validation; the frozen model must keep rendering in eval mode."""
+        validation; the frozen model must keep rendering in eval mode. The
+        trained head follows ``mode``: V18.2's U-Net has dropout, active in
+        training only (V18's and V18.1's MLPs have no mode-dependent layer)."""
         super().train(mode)
         for module in self._frozen_modules():
             module.train(False)
+        self.g2p_model.lidar_decoder.train(mode)
         return self
 
     def load_base_checkpoint(self) -> None:

@@ -12,11 +12,12 @@
 # epoch, global step and run name under sensor_adapt.
 #
 # Every step renders the batch with the frozen scene model (Utonia + adapters,
-# temporal G2G, Gaussians and their 30-ch features) in eval mode under no_grad,
-# as at test time. Only g2p.lidar_decoder trains: the sensor embedding and the
-# MLP [f', ray, depth_median / 80 m, embedding] -> (intensity, raydrop), which
-# starts from the base checkpoint's weights or, with decoder_init=random, from a
-# fresh initialization. The objective is intensity L1 on
+# temporal G2G, Gaussians and their features) in eval mode under no_grad, as at
+# test time. Only g2p.lidar_decoder trains, in the run's train/eval mode: V18's
+# sensor embedding and MLP [f', ray, depth_median / 80 m, embedding] ->
+# (intensity, raydrop), V18.1's MLP or V18.2's U-Net. It starts from the base
+# checkpoint's weights or, with decoder_init=random, from a fresh
+# initialization. The objective is intensity L1 on
 # GT returns plus raydrop BCE on every pixel of every target view; depth and
 # Chamfer are logged for the frozen geometry and carry weight 0.
 sensor_adapt:

@@ -798,10 +798,10 @@ class ModelWrapper(LightningModule):
         All-linear LoRA variants get their historical flat parameter list; the
         hybrid Utonia adaptation (V14) gets one group per role, each with its
         own LR / weight decay, plus the downstream group at train.lr. V18's
-        lidar decoder (MLP and sensor embedding) lives in the renderer and
-        trains in a last ``lidar_decoder`` group at train.lr /
-        train.weight_decay; every other variant's renderer has no parameters,
-        so its groups are exactly Point2Gaus's.
+        lidar decoder (MLP and sensor embedding; V18.1's MLP, V18.2's U-Net)
+        lives in the renderer and trains in a last ``lidar_decoder`` group at
+        train.lr / train.weight_decay; every other variant's renderer has no
+        parameters, so its groups are exactly Point2Gaus's.
         """
         param_groups = self.p2g_model.optimizer_param_groups(self.cfg.train)
         renderer = [

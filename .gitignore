@@ -81,6 +81,7 @@ tests/*
 !tests/test_radius_local_attention.py
 !tests/test_ordinal_count.py
 !tests/test_lidar_feature_decoder.py
+!tests/test_lidar_unet_decoder.py
 !tests/run_dynamic_smoke.py
 test_bbox_viz.py
 inspect_overfit_pair.py

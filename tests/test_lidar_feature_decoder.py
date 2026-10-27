@@ -138,38 +138,43 @@ GEOMETRY = ("position", "opacity", "scales", "rotations")
 
 @requires_cuda
 @pytest.mark.parametrize("masked", [False, True])
-def test_feature_channels_blend_and_differentiate_like_colour_channels(masked):
-    """Thirty features rendered at once == the same values as 4-channel colours.
+@pytest.mark.parametrize("feature_channels", [30, 32, 13])
+def test_feature_channels_blend_and_differentiate_like_colour_channels(feature_channels, masked):
+    """``feature_channels`` features rendered at once == the same values as 4-channel colours.
 
-    The loss is linear in the channels, so the gradient of one 30-channel
-    feature render must be the sum over eight colour renders of four channels
-    each -- for the per-Gaussian values and, through the blending weights,
-    for opacity, position, scale and rotation.
+    30 and 32 run the kernels compiled for V18's and V18.2's feature widths, 13
+    the run-time path. The loss is linear in the channels, so the gradient of
+    one feature render must be the sum over eight colour renders of four
+    channels each -- for the per-Gaussian values and, through the blending
+    weights, for opacity, position, scale and rotation.
     """
     pc = _scene()
     count = pc["position"].shape[0]
     generator = torch.Generator().manual_seed(5)
     values = torch.randn(count, 32, generator=generator).cuda()
-    values[:, 30:] = 0.0
+    values[:, feature_channels:] = 0.0
     weights = torch.randn(32, len(_RING), 512, generator=generator).cuda()
-    weights[30:] = 0.0
+    weights[feature_channels:] = 0.0
     blend_mask = (
         torch.rand(count, generator=generator).cuda() if masked else None
     )
 
     leaves = _leaves(pc)
-    feature_values = values[:, :30].clone().requires_grad_(True)
+    feature_values = values[:, :feature_channels].clone().requires_grad_(True)
     _color, feature, _depth, _alpha = _rasterize(
         leaves, features=feature_values, blend_mask=blend_mask
     )
-    assert feature.shape == (33, len(_RING), 512)
-    (feature[:30] * weights[:30]).sum().backward()
+    assert feature.shape == (feature_channels + 3, len(_RING), 512)
+    (feature[:feature_channels] * weights[:feature_channels]).sum().backward()
     feature_grads = {key: leaves[key].grad for key in GEOMETRY}
 
     colour_grads = {key: torch.zeros_like(pc[key]) for key in GEOMETRY}
     colour_value_grad = torch.zeros(count, 32, device="cuda")
-    # The 30 features padded with two empty channels to eight colour groups.
-    blended = torch.cat([feature.detach()[:30], torch.zeros_like(feature[:2])])
+    # The features padded with empty channels to eight colour groups.
+    blended = torch.cat([
+        feature.detach()[:feature_channels],
+        feature.new_zeros((32 - feature_channels, *feature.shape[1:])),
+    ])
     for group in range(8):
         channels = slice(4 * group, 4 * group + 4)
         leaves = _leaves(pc)
@@ -185,7 +190,7 @@ def test_feature_channels_blend_and_differentiate_like_colour_channels(masked):
 
     # Atomic accumulation order differs between launches, so gradients agree to
     # float32 summation noise relative to their scale, not bitwise.
-    assert _relative(feature_values.grad, colour_value_grad[:, :30]) < 1e-5
+    assert _relative(feature_values.grad, colour_value_grad[:, :feature_channels]) < 1e-5
     for key in GEOMETRY:
         assert feature_grads[key].abs().max() > 0, key
         assert _relative(feature_grads[key], colour_grads[key]) < 1e-4, key

@@ -50,6 +50,7 @@ from .definitions import (
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
     SEED_MODE_TOKEN,
     SENSOR_ADAPT_DECODER_INITS,
+    UNET_DECODER_DYNAMIC_VARIANTS,
     UTONIA_ADAPTATION_MODE_HYBRID,
     UTONIA_ADAPTATION_MODE_INTENSITY_ONLY,
     UTONIA_ADAPTER_ACTIVATIONS,
@@ -1174,13 +1175,15 @@ def _validate_gaussian_head_config(config, variant: str, label: str) -> None:
 def _validate_lidar_appearance(config, variant: str, label: str) -> None:
     """How a Gaussian becomes intensity and raydrop: SH, or V18's decoder.
 
-    Every variant but V18 and V18.1 renders SH coefficients and rejects both
-    V18 keys. V18 and V18.1 need ``p2g.gs_params.feature`` channels (at most
+    Every variant but V18, V18.1 and V18.2 renders SH coefficients and rejects
+    both V18 keys. Those three need ``p2g.gs_params.feature`` channels (at most
     what the rasterizer blends) with ``shs: 0``, and ``g2p.lidar_decoder``
-    reading exactly that many feature channels. V18's decoder also reads a
-    sensor embedding (positive ``sensor_embedding_dim`` and ``num_sensors``);
-    V18.1's reads none, so it sets ``sensor_embedding_dim: 0`` and has no
-    ``num_sensors``.
+    reading exactly that many feature channels. V18's MLP also reads a sensor
+    embedding (positive ``sensor_embedding_dim`` and ``num_sensors``); V18.1's
+    reads none, so it sets ``sensor_embedding_dim: 0`` and has no
+    ``num_sensors``. V18.2's U-Net takes ``channels`` (at least two encoder
+    widths) and ``norm_groups`` (dividing every width) instead of the MLP's
+    keys, and has no sensor embedding.
     """
     feature_path = "p2g.gs_params.feature"
     decoder_path = "g2p.lidar_decoder"
@@ -1206,6 +1209,9 @@ def _validate_lidar_appearance(config, variant: str, label: str) -> None:
         )
     if not _has_path(config, decoder_path):
         raise ValueError(f"{label} requires {decoder_path}")
+    if variant in UNET_DECODER_DYNAMIC_VARIANTS:
+        _validate_unet_lidar_decoder(config, decoder_path, feature_path, feature)
+        return
     _reject_unknown_keys(
         config,
         decoder_path,
@@ -1234,6 +1240,7 @@ def _validate_lidar_appearance(config, variant: str, label: str) -> None:
                 + _only_available_to(tuple(
                     name for name in FEATURE_DECODER_DYNAMIC_VARIANTS
                     if name not in NO_SENSOR_EMBEDDING_DYNAMIC_VARIANTS
+                    and name not in UNET_DECODER_DYNAMIC_VARIANTS
                 ))
             )
     else:
@@ -1249,6 +1256,45 @@ def _validate_lidar_appearance(config, variant: str, label: str) -> None:
     ):
         raise ValueError(
             f"{decoder_path}.hidden_dims must list positive integer widths"
+        )
+    _require_finite(
+        config, f"{decoder_path}.range_scale_m", minimum=0.0, inclusive=False
+    )
+
+
+def _validate_unet_lidar_decoder(config, decoder_path, feature_path, feature) -> None:
+    """V18.2's U-Net decoder: feature width, encoder widths, GroupNorm groups."""
+    _reject_unknown_keys(
+        config, decoder_path,
+        {"feature_dim", "channels", "norm_groups", "range_scale_m"},
+    )
+    if _require_int(config, f"{decoder_path}.feature_dim") != feature:
+        raise ValueError(
+            f"{decoder_path}.feature_dim must equal {feature_path}"
+        )
+    channels = OmegaConf.select(config, f"{decoder_path}.channels")
+    if (
+        not isinstance(channels, ListConfig) or len(channels) < 2
+        or any(
+            isinstance(width, bool) or not isinstance(width, int) or width <= 0
+            for width in channels
+        )
+    ):
+        raise ValueError(
+            f"{decoder_path}.channels must list at least two positive integer "
+            "encoder widths (one Down block per width after the first)"
+        )
+    groups = _require_int(config, f"{decoder_path}.norm_groups")
+    if any(int(width) % groups for width in channels):
+        raise ValueError(
+            f"{decoder_path}.norm_groups must divide every width in "
+            f"{decoder_path}.channels"
+        )
+    # The bottleneck self-attention splits its width into eight heads.
+    if int(channels[-1]) % 8:
+        raise ValueError(
+            f"{decoder_path}.channels[-1] must be divisible by the attention's "
+            "8 heads"
         )
     _require_finite(
         config, f"{decoder_path}.range_scale_m", minimum=0.0, inclusive=False

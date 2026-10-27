@@ -91,7 +91,8 @@ V15.4 is V15.3 with eight temporal heads instead of twelve, V15.5 is V15.4
 with `v_init` read from the uniform mean over layers instead of a learned layer
 mixture, V18 is V15.4 whose Gaussians carry a rendered feature that G2P
 decodes into intensity and raydrop instead of SH coefficients (V18.1: without
-the decoder's sensor embedding), and
+the decoder's sensor embedding; V18.2: a 32-channel feature decoded by a
+LiDAR4D-style U-Net over the whole view), and
 V16 picks V15's prefixes with two bounded ordinal gates trained through masked
 rasterization (`nested_ordinal`); V16.1 is V16 whose second training render is
 a uniformly random prefix per token.
@@ -949,6 +950,41 @@ times faster than a plain bias through the `W_e` columns; V18.1 learns it
 through the bias alone, and its first layer initializes at fan-in 34 instead
 of 64. Every other key, the backend and its checkpoint schema are V18's.
 
+**V18.2** is V18.1 with a 32-channel feature (`p2g.gs_params.feature: 32`, so
+each slot is 42 channels wide, as V15.4's, and the backend checkpoint schema is
+exactly V15.4's) and a U-Net decoder (`LidarUNetDecoder`,
+`src/models/module/lidar_unet_decoder.py`) in place of the per-pixel MLP. The
+U-Net reads the whole view, `[f' (32), d_s (3), r / R (1)]` = 36 channels,
+where `d_s` is the unit ray through the pixel in the rendering LiDAR's own
+panorama axes (x right, y down, z forward for nuScenes and KITTI-360 alike;
+`panorama_camera_ray_directions`, the same map for every view of a sensor) and
+`r` the median depth, read detached as in V18. Its shape is LiDAR4D's
+raydrop-refinement U-Net with one level fewer and twice the base width
+(`g2p.lidar_decoder.channels: [64, 128, 256, 256]`): a 1x1 conv with no norm or
+activation to 64 channels at full resolution, Down blocks to 128 (1/2), 256
+(1/4) and 256 (1/8), eight-head self-attention over the 1/8 positions (8x128 on
+KITTI-360's 66x1030 grid, 4x135 on nuScenes' 32x1085), Up blocks back to 64 at
+full resolution and a norm-ReLU-1x1 head to the two logits; 6,464,194
+parameters, against the refinement U-Net's 6,535,969. Two changes from LiDAR4D's
+blocks keep that count: GroupNorm (`norm_groups: 32`) replaces every BatchNorm,
+because a step decodes the target views of only one or two windows (consecutive
+sweeps of the same scenes), so batch statistics would describe one or two scenes
+and differ from the running averages BatchNorm evaluates with; and the
+attention merges its heads per position, where LiDAR4D's `view(B, H, W, C)` of
+the `[B, heads, HW, C / heads]` output gives each position one head's results
+for eight consecutive query positions. Dropout2d(0.1) and LiDAR4D's 0.1
+attention-logit dropout act in training only; there is no box-mask
+augmentation. Each pixel composites the decoded surface by its alpha exactly as
+V18 (`intensity = a * i`, `raydrop = (1 - a) + a * p`); alpha is not an input.
+The U-Net trains in V18's `lidar_decoder` AdamW group (`train.lr`,
+`train.weight_decay`). The 32-channel feature runs the rasterizer's run-time
+feature path (it compiles only 0 and 30 channels as constants). A 32-channel
+specialization was built and checked on 2026-10-27 and left out: it rendered
+bitwise identically (gradients within atomic-order noise) but no faster on
+synthetic 70k-200k-Gaussian scenes, because it moves the per-pixel feature
+accumulators from local memory into registers (renderCUDA forward 64 -> 127,
+backward 128 -> 172 registers per thread) and so lowers occupancy.
+
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other
 weights shows a=0 to a=4 is decisive (mass beyond the radius 11.2% -> 0.85%,
@@ -1588,17 +1624,19 @@ python main.py adapt_config=sensor_head data_config=kitti360_lidar4d \
   `exp_name`. The base's hash, epoch, step and run name go under
   `sensor_adapt.base_*`, and `main.py` re-checks the hash before loading every
   weight from it.
-- Only a variant with `g2p.lidar_decoder` (V18, V18.1) can be adapted, and a run
+- Only a variant with `g2p.lidar_decoder` (V18, V18.1, V18.2) can be adapted, and a run
   either adapts the sensor head or refines raydrop. A refinement or
   adaptation checkpoint is not accepted as the base of either stage.
 - `SensorAdaptWrapper` (`src/sensor_adapt_wrapper.py`) runs P2G and G2G under
   `no_grad` and keeps P2G, G2G and G2P in eval mode, as at test time. Only
-  `g2p_model.lidar_decoder` (15,776 parameters; V18.1's 12,866) trains, in one
-  `lidar_decoder` AdamW group. `sensor_adapt.decoder_init` sets where it
-  starts: `base` (the overlay's default) loads the base's sensor embedding and
-  MLP with every other weight; `random` loads every other weight and leaves
-  those two at the fresh V18 initialization, seeded (`seed`) as in a
-  from-scratch run. Configs composed before the key existed loaded the base's.
+  `g2p_model.lidar_decoder` (15,776 parameters; V18.1's 12,866, V18.2's U-Net
+  6,464,194) trains, in one `lidar_decoder` AdamW group, and follows the
+  wrapper's train/eval mode, so V18.2's dropout acts in training only.
+  `sensor_adapt.decoder_init` sets where it starts: `base` (the overlay's
+  default) loads the base's head (V18's sensor embedding and MLP) with every
+  other weight; `random` loads every other weight and leaves the head at its
+  fresh initialization, seeded (`seed`) as in a from-scratch run. Configs
+  composed before the key existed loaded the base's.
 - **Objective:** `loss.w_intensity` x intensity L1 on GT returns +
   `loss.w_raydrop` x raydrop BCE on every pixel of every target view (1 and 1
   in the overlay). `w_depth`, `w_depth_median` and `w_chamfer` must be 0: the

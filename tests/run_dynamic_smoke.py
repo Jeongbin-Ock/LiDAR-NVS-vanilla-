@@ -343,10 +343,13 @@ def main():
     count_router_weight = (
         count_predictor[-1].weight if count_predictor is not None else None
     )
-    # V18 decodes intensity and raydrop in the renderer.
+    # V18 decodes intensity and raydrop in the renderer: V18/V18.1 with an
+    # MLP, V18.2 with a U-Net whose first layer is ``inc``.
     lidar_decoder = getattr(model.g2p_model, "lidar_decoder", None)
     lidar_decoder_weight = (
-        lidar_decoder.mlp[0].weight if lidar_decoder is not None else None
+        None if lidar_decoder is None
+        else lidar_decoder.mlp[0].weight if hasattr(lidar_decoder, "mlp")
+        else lidar_decoder.inc.weight
     )
     # V18.1's decoder has no sensor embedding.
     sensor_embedding = getattr(lidar_decoder, "sensor_embedding", None)

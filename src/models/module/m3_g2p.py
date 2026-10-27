@@ -1,8 +1,19 @@
 import torch
 import torch.nn as nn
-from ..gaussian_renderer import render
+from ..gaussian_renderer import panorama_camera_ray_directions, render
 from ..utils.graphics_utils import lidar4d_range_image_to_points
 from .lidar_decoder import LidarFeatureDecoder
+from .lidar_unet_decoder import LidarUNetDecoder
+
+
+def build_lidar_decoder(cfg):
+    """``g2p.lidar_decoder``'s module: V18.2's U-Net when it lists encoder
+    ``channels``, else V18's / V18.1's per-pixel MLP; ``None`` without one."""
+    if cfg is None:
+        return None
+    if getattr(cfg, "channels", None) is not None:
+        return LidarUNetDecoder(cfg)
+    return LidarFeatureDecoder(cfg)
 
 
 class DynamicGausRender(nn.Module):
@@ -12,11 +23,13 @@ class DynamicGausRender(nn.Module):
     while its rotation stays fixed.
 
     Intensity and raydrop come from each Gaussian's SH coefficients, or, with
-    ``g2p.lidar_decoder`` (V18, V18.1), from :class:`LidarFeatureDecoder`
-    applied to the alpha-blended Gaussian ``feature``, the ray direction and
-    the median depth of every pixel and composited over the same no-return
-    background by the pixel's alpha. Either way the returned maps keep the keys
-    ``intensity_sh`` and ``raydrop``.
+    ``g2p.lidar_decoder``, from a decoder of the alpha-blended Gaussian
+    ``feature``, the ray direction and the median depth of every pixel,
+    composited over the same no-return background by the pixel's alpha:
+    :class:`LidarFeatureDecoder`, an MLP per pixel on world-frame rays (V18,
+    V18.1), or :class:`LidarUNetDecoder`, a U-Net over the whole view on rays
+    in the rendering LiDAR's own axes (V18.2). Either way the returned maps keep
+    the keys ``intensity_sh`` and ``raydrop``.
     """
 
     # Evaluation tools read this explicit rendering contract instead of
@@ -29,10 +42,7 @@ class DynamicGausRender(nn.Module):
         # Channels are [unused, unused, intensity, raydrop]. No-return background
         # should carry zero intensity/depth support and raydrop probability 1.
         self.background = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
-        decoder_cfg = getattr(cfg, "lidar_decoder", None)
-        self.lidar_decoder = (
-            None if decoder_cfg is None else LidarFeatureDecoder(decoder_cfg)
-        )
+        self.lidar_decoder = build_lidar_decoder(getattr(cfg, "lidar_decoder", None))
 
     def pack_lidar_shs(self, shs):
         if shs.dim() == 3:
@@ -127,10 +137,18 @@ class DynamicGausRender(nn.Module):
                                        for block, (first, last) in zip(packages, kept_rows)], dim=-2)
                        for key in packages[0]}
         if self.lidar_decoder is not None:
-            # Decoded per pixel, so after the row blocks are stitched; each
-            # block's rays come from its own camera.
+            # Decoded after the row blocks are stitched. World-frame rays come
+            # from each block's own camera; the LiDAR-frame map is the whole
+            # panorama's, which every block shares.
+            if self.lidar_decoder.ray_frame == "sensor":
+                feature = package["feature"]
+                ray_dir = panorama_camera_ray_directions(
+                    camera, feature.device, feature.dtype
+                )
+            else:
+                ray_dir = package["ray_dir"]
             package["intensity_sh"], package["raydrop"] = self.lidar_decoder(
-                package["feature"], package["ray_dir"], package["depth_median"],
+                package["feature"], ray_dir, package["depth_median"],
                 package["alpha"],
             )
         return package
