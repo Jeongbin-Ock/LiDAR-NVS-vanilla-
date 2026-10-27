@@ -20,8 +20,11 @@ Windows never cross a gap greater than `data.max_sweep_gap_sec` (0.15 s by
 default); the Waymo release contains occasional missing sweeps.
 
 The default profile requires all 798 training and 202 validation segments and
-rejects segment IDs present in both splits. Per-epoch validation is capped at
-200 deterministic windows by `data.max_val_windows`; use zero for all windows.
+rejects segment IDs present in both splits. Per-epoch validation uses only the
+20 validation sequences in `config/waymo_lidarverse_top20.json` and is capped
+at 200 deterministic windows by `data.max_val_windows`; use zero for all
+windows within those sequences. Set `data.compact_val.enable=false` to validate
+the full validation split instead. Training still uses all 798 train sequences.
 This training validation is distinct from the LidarVerse benchmark.
 When `data.allow_raw_fallback` is true, a segment whose cache is still being
 created is read from the original v2 components. The reader switches to the

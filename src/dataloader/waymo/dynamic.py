@@ -88,6 +88,24 @@ def _raw_metadata(split_root, sequence):
     return timestamps, vehicle, extrinsic, beams, height, width
 
 
+def _select_validation_sequences(directories, manifest_path):
+    """Select the explicitly listed validation sequences in manifest order."""
+    manifest = json.loads(Path(manifest_path).read_text())
+    if manifest.get("split") != "validation":
+        raise ValueError("Waymo validation sequence manifest must have split=validation")
+    names = manifest.get("ranked_sequence_ids")
+    if (not isinstance(names, list) or not names
+            or any(not isinstance(name, str) or not name for name in names)):
+        raise ValueError("Waymo validation sequence manifest needs nonempty sequence IDs")
+    if len(names) != len(set(names)):
+        raise ValueError("Waymo validation sequence manifest has duplicate IDs")
+    available = {path.name: path for path in directories}
+    missing = [name for name in names if name not in available]
+    if missing:
+        raise ValueError(f"Waymo validation sequences absent from dataset: {missing}")
+    return [available[name] for name in names]
+
+
 class WaymoSequenceReader:
     def __init__(self, path, cfg, raw_split_root=None):
         self.path, self.cfg = Path(path), cfg
@@ -169,8 +187,6 @@ class WaymoDynamicDataset(Dataset):
     collate_fn = staticmethod(dynamic_lidar4d_multiframe_collate_fn)
 
     def __init__(self, cfg, split="train", window_subset=None):
-        if window_subset:
-            raise ValueError("Waymo uses data.max_val_windows, not a compact-val manifest")
         if str(cfg.mode) != "nvs" or str(cfg.coordinate_frame) != "ego_vehicle":
             raise ValueError("Waymo dynamic training requires bbox-free ego_vehicle coordinates")
         if int(cfg.image_height) != 64 or float(cfg.intensity_max) <= 0:
@@ -197,6 +213,10 @@ class WaymoDynamicDataset(Dataset):
         overlap = {p.name for p in directories} & other_names
         if overlap:
             raise ValueError(f"Waymo train/validation segment overlap: {sorted(overlap)[:3]}")
+        if window_subset:
+            if is_train:
+                raise ValueError("Waymo sequence subset is only supported for validation")
+            directories = _select_validation_sequences(directories, window_subset)
         self.is_train = is_train
         self.readers, self.index = {}, []
         self.minimum = float(cfg.dynamic_window.endpoint_min_sec)

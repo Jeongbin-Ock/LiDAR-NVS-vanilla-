@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -107,3 +108,43 @@ def test_waymo_raw_fallback_matches_the_completed_cache(tmp_path):
     prepare_sequence(raw, cache, "training", name, min_free_gib=0)
     cached_reader = WaymoSequenceReader(cache / "training" / name, cfg, raw / "training")
     np.testing.assert_array_equal(cached_reader.points(0).numpy(), raw_points)
+
+
+def test_waymo_validation_manifest_filters_sequences_but_not_training(tmp_path):
+    from src.dataloader.datamodule import DataModule
+
+    raw, cache = tmp_path / "raw", tmp_path / "cache"
+    for split, name in (("training", "train_a"), ("validation", "val_a"),
+                        ("validation", "val_b"), ("validation", "val_c")):
+        _raw_sequence(raw, split, name)
+        prepare_sequence(raw, cache, split, name, min_free_gib=0)
+    manifest = tmp_path / "subset.json"
+    manifest.write_text(json.dumps({"split": "validation", "ranked_sequence_ids": ["val_c", "val_a"]}))
+    data = {"dataroot": str(cache), "mode": "nvs", "coordinate_frame": "ego_vehicle",
+            "train_split": "train", "eval_split": "val", "image_height": 64, "intensity_max": 1.0,
+            "expected_train_sequences": 1, "expected_val_sequences": 3, "window_stride_sec": 0.1,
+            "gt_middle_count": 3, "max_val_windows": 4, "num_workers": 0,
+            "dynamic_window": {"endpoint_min_sec": 0.2, "endpoint_max_sec": 0.4, "eval_seed": 42},
+            "compact_val": {"enable": True, "path": str(manifest)}}
+    module = DataModule(WaymoDynamicDataset, OmegaConf.create({
+        "data": data, "train": {"batch_size": 1}, "test": {"batch_size": 1}}))
+    validation = module.val_dataloader().dataset
+    assert list(validation.readers) == ["val_c", "val_a"]
+    assert {entry[0] for entry in validation.index} == {"val_c", "val_a"}
+    assert len(validation) == 4
+    assert validation.index == module.val_dataloader().dataset.index
+    assert set(module.train_dataloader().dataset.readers) == {"train_a"}
+    assert set(WaymoDynamicDataset(module.cfg.data, "val").readers) == {"val_a", "val_b", "val_c"}
+
+
+def test_waymo_validation_manifest_rejects_missing_or_duplicate_sequences(tmp_path):
+    from src.dataloader.waymo.dynamic import _select_validation_sequences
+
+    manifest = tmp_path / "subset.json"
+    dirs = [tmp_path / "val_a", tmp_path / "val_b"]
+    manifest.write_text(json.dumps({"split": "validation", "ranked_sequence_ids": ["val_a", "missing"]}))
+    with pytest.raises(ValueError, match="absent from dataset"):
+        _select_validation_sequences(dirs, manifest)
+    manifest.write_text(json.dumps({"split": "validation", "ranked_sequence_ids": ["val_a", "val_a"]}))
+    with pytest.raises(ValueError, match="duplicate"):
+        _select_validation_sequences(dirs, manifest)

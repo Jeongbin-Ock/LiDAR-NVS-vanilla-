@@ -31,5 +31,6 @@ data:
   num_workers: 4
   eval_num_workers: 0
   compact_val:
-    enable: false
+    enable: true
+    path: config/waymo_lidarverse_top20.json
   verbose: true

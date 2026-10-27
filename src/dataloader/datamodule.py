@@ -28,10 +28,8 @@ class DataModule(pl.LightningDataModule):
     def _compact_val_subset(self):
         """Path of the compact-val manifest, or None for full-split validation.
 
-        Per-epoch validation over the whole val split is ~5.7k heavily
-        overlapping windows dominated by geometry the velocity head cannot
-        change. `data.compact_val` swaps in a fixed motion-weighted subset
-        (180 dynamic + 20 static) built by tools/build_compact_val_windows.py.
+        The dataset interprets the manifest: nuScenes and KITTI-360 select
+        windows; Waymo selects sequences before applying its window limit.
         """
         compact = getattr(self.cfg.data, "compact_val", None)
         if compact is None or not bool(getattr(compact, "enable", False)):
