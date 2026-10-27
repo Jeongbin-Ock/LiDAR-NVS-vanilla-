@@ -10,6 +10,23 @@ from __future__ import annotations
 import numpy as np
 
 
+def panorama_from_lidar_yaw(vehicle_from_lidar):
+    """Rotate LiDAR axes so the panorama's azimuth follows Waymo's native grid.
+
+    Waymo subtracts the sensor extrinsic yaw when decoding each raw image
+    column. Undo that yaw for the panorama while keeping the LiDAR origin and
+    its calibrated vertical beam angles unchanged.
+    """
+    extrinsic = np.asarray(vehicle_from_lidar, dtype=np.float64)
+    if extrinsic.shape != (4, 4):
+        raise ValueError("vehicle_from_lidar must be 4x4")
+    yaw = np.arctan2(extrinsic[1, 0], extrinsic[0, 0])
+    cosine, sine = np.cos(yaw), np.sin(yaw)
+    result = np.eye(4, dtype=np.float64)
+    result[:2, :2] = [[cosine, -sine], [sine, cosine]]
+    return result
+
+
 def top_range_to_sensor_points(ranges, intensity, pixel_pose, inclination,
                                vehicle_from_lidar, world_from_vehicle):
     """Return first-return XYZI deskewed into the frame-time LiDAR frame.

@@ -262,12 +262,15 @@ class ModelWrapper(LightningModule):
                 compute_points=compute_points,
             )
         self._add_dynamic_motion_regularization(loss_dict, out, prefix=prefix)
-        self._log_losses(loss_dict, prefix=prefix, batch_size=self._batch_size(_input))
+        target_counts = batch.get("meta", {}).get("eval_target_count") if prefix == "val" else None
+        log_weight = sum(int(count) for count in target_counts) if target_counts else self._batch_size(_input)
+        self._log_losses(loss_dict, prefix=prefix, batch_size=log_weight)
         self._log_routing_stats(routing_stats, prefix=prefix)
         self._log_utonia_adaptation(prefix=prefix)
 
         if prefix != "train":
-            self._record_eval_summary(loss_dict, batch_idx=batch_idx, prefix=prefix)
+            self._record_eval_summary(loss_dict, batch_idx=batch_idx, prefix=prefix,
+                                      weight=log_weight if target_counts else 1)
         groups = batch.get("meta", {}).get("window_group")
         if prefix == "val" and groups and self._val_group_metrics is not None:
             self._val_group_metrics.add(loss_dict, groups, self._batch_size(_input))
@@ -725,11 +728,12 @@ class ModelWrapper(LightningModule):
                 batch_size=bin_batch_size,
             )
 
-    def _record_eval_summary(self, losses: dict, *, batch_idx: int, prefix: str) -> None:
+    def _record_eval_summary(self, losses: dict, *, batch_idx: int, prefix: str, weight: int = 1) -> None:
         summary = {
             "epoch": int(getattr(self, "current_epoch", 0)),
             "global_step": int(getattr(self, "global_step", 0)),
             "batch_idx": int(batch_idx),
+            "weight": int(weight),
         }
         for key, value in losses.items():
             if torch.is_tensor(value):
@@ -746,13 +750,13 @@ class ModelWrapper(LightningModule):
         metric_keys = sorted(
             key
             for key in summaries[0].keys()
-            if key not in {"epoch", "global_step", "batch_idx"}
+            if key not in {"epoch", "global_step", "batch_idx", "weight"}
         )
         aggregate = {}
         for key in metric_keys:
-            values = [item[key] for item in summaries if key in item]
+            values = [(item[key], item["weight"]) for item in summaries if key in item]
             if values:
-                aggregate[key] = sum(values) / len(values)
+                aggregate[key] = sum(value * weight for value, weight in values) / sum(weight for _, weight in values)
 
         out_dir = self._eval_output_dir(prefix)
         out_dir.mkdir(parents=True, exist_ok=True)

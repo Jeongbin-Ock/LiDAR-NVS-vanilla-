@@ -119,11 +119,15 @@ def test_waymo_validation_manifest_filters_sequences_but_not_training(tmp_path):
         _raw_sequence(raw, split, name)
         prepare_sequence(raw, cache, split, name, min_free_gib=0)
     manifest = tmp_path / "subset.json"
-    manifest.write_text(json.dumps({"split": "validation", "ranked_sequence_ids": ["val_c", "val_a"]}))
+    manifest.write_text(json.dumps({"split": "validation", "ranked_sequence_ids": ["val_c", "val_a"],
+                                    "window_length_frames": 6, "windows_per_sequence": 1,
+                                    "input_indices": [0, 2, 5]}))
     data = {"dataroot": str(cache), "mode": "nvs", "coordinate_frame": "ego_vehicle",
-            "train_split": "train", "eval_split": "val", "image_height": 64, "intensity_max": 1.0,
+            "train_split": "train", "eval_split": "val", "image_height": 64, "image_width": 16,
+            "vfov": [-17.6, 2.4], "hfov": [-180, 180], "intensity_max": 1.0,
             "expected_train_sequences": 1, "expected_val_sequences": 3, "window_stride_sec": 0.1,
-            "gt_middle_count": 3, "max_val_windows": 4, "num_workers": 0,
+            "gt_middle_count": 3, "max_val_windows": 1, "num_workers": 0,
+            "ego_radius": 0.0, "gt_ego_radius": 0.0, "max_depth_m": 80.0,
             "dynamic_window": {"endpoint_min_sec": 0.2, "endpoint_max_sec": 0.4, "eval_seed": 42},
             "compact_val": {"enable": True, "path": str(manifest)}}
     module = DataModule(WaymoDynamicDataset, OmegaConf.create({
@@ -132,13 +136,21 @@ def test_waymo_validation_manifest_filters_sequences_but_not_training(tmp_path):
     assert list(validation.readers) == ["val_c", "val_a"]
     assert {entry[0] for entry in validation.index} == {"val_c", "val_a"}
     assert len(validation) == 4
+    assert [(a, b) for _, a, b, _ in validation.index] == [(0, 2), (2, 5), (0, 2), (2, 5)]
+    first, second = validation[0], validation[1]
+    assert first["meta"]["input_frame_indices"] == [0, 2]
+    assert first["meta"]["target_frame_indices"] == [1]
+    assert second["meta"]["input_frame_indices"] == [2, 5]
+    assert second["meta"]["target_frame_indices"] == [3, 4]
+    assert [float(cam.timestamp_sec) for cam in second["gt"]["cameras"]] == pytest.approx([0.1, 0.2])
+    assert first["input"]["frame_counts"].tolist() == [256, 256]
     assert validation.index == module.val_dataloader().dataset.index
     assert set(module.train_dataloader().dataset.readers) == {"train_a"}
     assert set(WaymoDynamicDataset(module.cfg.data, "val").readers) == {"val_a", "val_b", "val_c"}
 
 
 def test_waymo_validation_manifest_rejects_missing_or_duplicate_sequences(tmp_path):
-    from src.dataloader.waymo.dynamic import _select_validation_sequences
+    from src.dataloader.waymo.dynamic import _select_validation_sequences, _validation_interpolation_protocol
 
     manifest = tmp_path / "subset.json"
     dirs = [tmp_path / "val_a", tmp_path / "val_b"]
@@ -148,3 +160,6 @@ def test_waymo_validation_manifest_rejects_missing_or_duplicate_sequences(tmp_pa
     manifest.write_text(json.dumps({"split": "validation", "ranked_sequence_ids": ["val_a", "val_a"]}))
     with pytest.raises(ValueError, match="duplicate"):
         _select_validation_sequences(dirs, manifest)
+    with pytest.raises(ValueError, match="interpolation validation protocol"):
+        _validation_interpolation_protocol({"window_length_frames": 20, "windows_per_sequence": 9,
+                                            "input_indices": [0, 1, 9, 14]})

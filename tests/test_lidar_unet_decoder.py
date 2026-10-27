@@ -319,3 +319,42 @@ def test_v18_2_render_losses_reach_the_unet_and_every_gaussian_attribute():
         assert parameter.grad is not None and parameter.grad.abs().max() > 0, name
     for name in ("feature", "opacity", "position", "scaling", "rotation"):
         assert leaves[name].grad.abs().max() > 0, name
+
+
+@requires_cuda
+def test_v18_2_checkpointed_view_preserves_outputs_gradients_and_dropout_rng():
+    """Recomputed rasterizer and stochastic U-Net match the ordinary render."""
+    from copy import deepcopy
+    from src.models.module.m3_g2p import DynamicGausRender
+
+    torch.manual_seed(31)
+    cfg = {**_RENDER_CFG, "lidar_decoder": OmegaConf.to_container(_v18_2_decoder_cfg(), resolve=True)}
+    ordinary = DynamicGausRender(OmegaConf.create(cfg)).cuda().train()
+    recomputed = deepcopy(ordinary)
+    recomputed.activation_checkpoint = True
+    first = _scene(count=1000, seed=7)
+    second = {key: value.detach().clone().requires_grad_(True) for key, value in first.items()}
+    camera = _camera(_NUSCENES_CAMERA_FROM_LIDAR @ _lidar_from_reference(0.4, (1.5, -0.7, -1.8)), width=128)
+
+    def run(renderer, leaves):
+        torch.manual_seed(1234)
+        count = len(leaves["position"])
+        sample = {**leaves, "velocity": torch.zeros(count, 3, device="cuda"),
+                  "source_time_sec": torch.zeros(count, device="cuda")}
+        outputs = renderer([sample], {"cameras": [[camera]]}, compute_points=False)
+        objective = (outputs["depth"].mean() + outputs["depth_median"].mean()
+                     + outputs["intensity_sh"].mean() + outputs["raydrop"].mean())
+        objective.backward()
+        return outputs, torch.rand(8, device="cuda")
+
+    expected, expected_rng = run(ordinary, first)
+    actual, actual_rng = run(recomputed, second)
+    for name in ("depth", "depth_median", "intensity_sh", "raydrop"):
+        torch.testing.assert_close(actual[name], expected[name], rtol=1e-5, atol=1e-6)
+    for name in first:
+        torch.testing.assert_close(second[name].grad, first[name].grad, rtol=2e-3, atol=1e-6)
+    for (name, a), (_, b) in zip(ordinary.lidar_decoder.named_parameters(),
+                                 recomputed.lidar_decoder.named_parameters()):
+        assert a.grad is not None and b.grad is not None, name
+        torch.testing.assert_close(b.grad, a.grad, rtol=2e-3, atol=1e-6)
+    torch.testing.assert_close(actual_rng, expected_rng, rtol=0, atol=0)

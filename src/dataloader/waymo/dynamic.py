@@ -15,7 +15,7 @@ from ..collate import dynamic_lidar4d_multiframe_collate_fn
 from ..kitti360.reader import CAMERA_FROM_LIDAR, _transform_points
 from ..kitti360.sampling import sample_window_frames, window_start_frames
 from ...models.utils.camera import Camera
-from .geometry import project_calibrated_panorama, top_range_to_sensor_points
+from .geometry import panorama_from_lidar_yaw, project_calibrated_panorama, top_range_to_sensor_points
 
 
 @lru_cache(maxsize=8)
@@ -103,7 +103,22 @@ def _select_validation_sequences(directories, manifest_path):
     missing = [name for name in names if name not in available]
     if missing:
         raise ValueError(f"Waymo validation sequences absent from dataset: {missing}")
-    return [available[name] for name in names]
+    return [available[name] for name in names], manifest
+
+
+def _validation_interpolation_protocol(manifest):
+    """Validate fixed 20-frame chunks and adjacent observed-frame pairs."""
+    length = manifest.get("window_length_frames")
+    count = manifest.get("windows_per_sequence")
+    inputs = manifest.get("input_indices")
+    if (isinstance(length, bool) or not isinstance(length, int) or length < 3
+            or isinstance(count, bool) or not isinstance(count, int) or count < 1
+            or not isinstance(inputs, list) or len(inputs) < 2
+            or any(isinstance(i, bool) or not isinstance(i, int) for i in inputs)
+            or inputs[0] < 0 or inputs[-1] >= length
+            or any(b - a < 2 for a, b in zip(inputs, inputs[1:]))):
+        raise ValueError("Invalid Waymo interpolation validation protocol")
+    return length, count, inputs
 
 
 class WaymoSequenceReader:
@@ -170,14 +185,16 @@ class WaymoSequenceReader:
 
     def camera(self, points, lidar_from_ref, timestamp, timestamp_sec):
         points = points[torch.linalg.norm(points[:, :3], dim=1) > float(self.cfg.gt_ego_radius)]
-        depth, intensity = project_calibrated_panorama(points.numpy(), self.inclination_rad,
+        panorama_from_lidar = panorama_from_lidar_yaw(self.vehicle_from_lidar)
+        panorama_points = _transform_points(points, panorama_from_lidar)
+        depth, intensity = project_calibrated_panorama(panorama_points.numpy(), self.inclination_rad,
                                                       self.cfg.image_width, self.cfg.max_depth_m)
         return Camera(R=np.eye(3), T=np.zeros(3), vfov=tuple(self.cfg.vfov), hfov=tuple(self.cfg.hfov),
                       timestamp=float(timestamp), timestamp_sec=float(timestamp_sec),
                       resolution=(int(self.cfg.image_width), int(self.cfg.image_height)),
                       pts_depth=torch.from_numpy(depth), pts_intensity=torch.from_numpy(intensity),
-                      points=points[:, :3],
-                      viewmatrix=(CAMERA_FROM_LIDAR @ lidar_from_ref).astype(np.float32),
+                      points=panorama_points[:, :3],
+                      viewmatrix=(CAMERA_FROM_LIDAR @ panorama_from_lidar @ lidar_from_ref).astype(np.float32),
                       ring_to_elevation_deg=np.degrees(self.inclination_rad).tolist())
 
 
@@ -213,10 +230,13 @@ class WaymoDynamicDataset(Dataset):
         overlap = {p.name for p in directories} & other_names
         if overlap:
             raise ValueError(f"Waymo train/validation segment overlap: {sorted(overlap)[:3]}")
+        self.fixed_interpolation_val = bool(window_subset)
+        protocol = None
         if window_subset:
             if is_train:
                 raise ValueError("Waymo sequence subset is only supported for validation")
-            directories = _select_validation_sequences(directories, window_subset)
+            directories, manifest = _select_validation_sequences(directories, window_subset)
+            protocol = _validation_interpolation_protocol(manifest)
         self.is_train = is_train
         self.readers, self.index = {}, []
         self.minimum = float(cfg.dynamic_window.endpoint_min_sec)
@@ -229,6 +249,15 @@ class WaymoDynamicDataset(Dataset):
         for path in directories:
             reader = WaymoSequenceReader(path, cfg, raw_root / split_dir if allow_raw else None)
             self.readers[path.name] = reader
+            if protocol is not None:
+                length, count, inputs = protocol
+                if len(reader.timestamps_us) < length * count:
+                    raise ValueError(f"Waymo validation sequence has fewer than {length * count} frames: {path.name}")
+                for chunk_start in range(0, length * count, length):
+                    for left, right in zip(inputs, inputs[1:]):
+                        first, last = chunk_start + left, chunk_start + right
+                        self.index.append((path.name, first, last, first))
+                continue
             breaks = np.flatnonzero(np.diff(reader.timestamps_ns) > round(max_gap * 1e9)) + 1
             boundaries = [0, *breaks.tolist(), len(reader.timestamps_us)]
             for first, end in zip(boundaries[:-1], boundaries[1:]):
@@ -239,7 +268,7 @@ class WaymoDynamicDataset(Dataset):
         if not self.index:
             raise ValueError(f"No usable Waymo {split_dir} windows in {root}")
         limit = int(getattr(cfg, "max_val_windows", 0) or 0)
-        if not is_train and limit > 0 and len(self.index) > limit:
+        if not is_train and protocol is None and limit > 0 and len(self.index) > limit:
             positions = np.linspace(0, len(self.index) - 1, limit, dtype=np.int64)
             self.index = [self.index[int(position)] for position in positions]
         if bool(getattr(cfg, "verbose", False)):
@@ -252,14 +281,17 @@ class WaymoDynamicDataset(Dataset):
         name, first, last, start = self.index[index]
         reader = self.readers[name]
         segment = {"first_frame": first, "last_frame": last}
-        if self.is_train:
+        if self.fixed_interpolation_val:
+            frames = list(range(first, last + 1))
+        elif self.is_train:
             rng = random
         else:
             seed = f"{self.eval_seed}|{name}|{start}".encode()
             rng = random.Random(int.from_bytes(hashlib.blake2b(seed, digest_size=8).digest(), "big"))
-        _, _, frames = sample_window_frames(segment, reader.timestamps_ns, start,
-            endpoint_min_sec=self.minimum, endpoint_max_sec=self.maximum,
-            gt_middle_count=self.middle_count, rng=rng)
+        if not self.fixed_interpolation_val:
+            _, _, frames = sample_window_frames(segment, reader.timestamps_ns, start,
+                endpoint_min_sec=self.minimum, endpoint_max_sec=self.maximum,
+                gt_middle_count=self.middle_count, rng=rng)
         world_vehicle = [reader.world_from_vehicle[i] for i in frames]
         world_sensor = [pose @ reader.vehicle_from_lidar for pose in world_vehicle]
         ref_from_world = np.linalg.inv(world_vehicle[0])
@@ -268,18 +300,23 @@ class WaymoDynamicDataset(Dataset):
                                 for i in frames], dtype=torch.float32)
         duration = seconds[-1].clone()
         normalized = seconds / duration
-        cameras = [reader.camera(points, np.linalg.inv(world_sensor[i]) @ np.linalg.inv(ref_from_world),
-                                 normalized[i], seconds[i]) for i, points in enumerate(sensor)]
+        targets = range(1, len(frames) - 1) if self.fixed_interpolation_val else range(len(frames))
+        cameras = [reader.camera(sensor[i], np.linalg.inv(world_sensor[i]) @ np.linalg.inv(ref_from_world),
+                                 normalized[i], seconds[i]) for i in targets]
         selected = (0, len(frames) - 1)
         endpoint_sensor = [sensor[i][torch.linalg.norm(sensor[i][:, :3], dim=1) > float(self.cfg.ego_radius)]
                            for i in selected]
         endpoint_ego = [_transform_points(points, reader.vehicle_from_lidar) for points in endpoint_sensor]
         pose = torch.from_numpy(np.stack([ref_from_world @ world_vehicle[i] for i in selected]).astype(np.float32))
         lidar_pose = torch.from_numpy(np.stack([ref_from_world @ world_sensor[i] for i in selected]).astype(np.float32))
-        return {"input": {"lidar_points_local": torch.cat(endpoint_ego), "lidar_points_ego": torch.cat(endpoint_ego),
+        result = {"input": {"lidar_points_local": torch.cat(endpoint_ego), "lidar_points_ego": torch.cat(endpoint_ego),
                           "lidar_points_sensor": torch.cat(endpoint_sensor),
                           "frame_counts": torch.tensor([len(points) for points in endpoint_sensor], dtype=torch.long),
                           "pose": pose, "pose_lidar_to_ref": lidar_pose,
                           "timestamps": normalized[list(selected)], "timestamps_sec": seconds[list(selected)],
                           "window_duration_sec": duration},
                 "gt": {"cameras": cameras}}
+        if self.fixed_interpolation_val:
+            result["meta"] = {"eval_target_count": len(cameras), "sequence": name,
+                              "input_frame_indices": [first, last], "target_frame_indices": frames[1:-1]}
+        return result

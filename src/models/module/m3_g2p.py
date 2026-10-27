@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from ..gaussian_renderer import panorama_camera_ray_directions, render
 from ..utils.graphics_utils import lidar4d_range_image_to_points
 from .lidar_decoder import LidarFeatureDecoder
@@ -43,6 +44,7 @@ class DynamicGausRender(nn.Module):
         # should carry zero intensity/depth support and raydrop probability 1.
         self.background = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
         self.lidar_decoder = build_lidar_decoder(getattr(cfg, "lidar_decoder", None))
+        self.activation_checkpoint = bool(getattr(cfg, "activation_checkpoint", False))
 
     def pack_lidar_shs(self, shs):
         if shs.dim() == 3:
@@ -209,7 +211,14 @@ class DynamicGausRender(nn.Module):
                     pc["blend_mask"] = b_gs["blend_mask"]
 
                 # 랜더링
-                render_pkg = self._render_view(gt_cam, pc, t)
+                if self.activation_checkpoint and self.training and torch.is_grad_enabled():
+                    # Recompute each view during backward instead of retaining
+                    # every rasterizer/decoder activation for the whole batch.
+                    # Preserve the U-Net's dropout RNG across recomputation.
+                    render_pkg = checkpoint(self._render_view, gt_cam, pc, t,
+                                            use_reentrant=False, preserve_rng_state=True)
+                else:
+                    render_pkg = self._render_view(gt_cam, pc, t)
 
                 gt_depth = gt_cam.pts_depth.to(device=means3D.device, dtype=means3D.dtype)
                 gt_intensity_sh = gt_cam.pts_intensity.to(device=means3D.device, dtype=means3D.dtype)

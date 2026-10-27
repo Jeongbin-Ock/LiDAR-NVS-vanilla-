@@ -16,16 +16,33 @@ including Waymo's per-pixel motion compensation, and expresses points in the
 frame-time LiDAR and vehicle frames. It projects target points to a calibrated
 64×1024 panorama, keeping the nearest point per ray. Intensities are clipped
 to `[0, 1]`; raw values and the original data remain unchanged.
-Windows never cross a gap greater than `data.max_sweep_gap_sec` (0.15 s by
-default); the Waymo release contains occasional missing sweeps.
+Training windows never cross a gap greater than `data.max_sweep_gap_sec`
+(0.15 s by default); the Waymo release contains occasional missing sweeps.
+
+Waymo vehicle axes are +x forward, +y left, +z up; sensor orientation comes
+from the recorded `vehicle_from_lidar` extrinsic. Write `W_Ei` for the recorded
+world-from-vehicle pose and `E_L` for that extrinsic. Points sent to Utonia
+are in each frame's vehicle axes, and `pose[i] = inverse(W_E0) @ W_Ei` maps
+them into the first input's vehicle frame. `pose_lidar_to_ref[i]` additionally
+includes `E_L`. The target camera maps that shared frame to its LiDAR frame
+and then to yaw-aligned panorama axes followed by the renderer's
+`(x, y, z) = (-panorama_y, -panorama_z, panorama_x)` axes. Waymo's native
+range image compensates sensor extrinsic yaw so its centre faces vehicle
+forward; the same yaw adjustment is applied to the GT points and the camera
+view. The sensor origin and calibrated beam elevations remain unchanged.
+Per-pixel deskew accounts for ego motion during a sweep, not object motion.
 
 The default profile requires all 798 training and 202 validation segments and
 rejects segment IDs present in both splits. Per-epoch validation uses only the
-20 validation sequences in `config/waymo_lidarverse_top20.json` and is capped
-at 200 deterministic windows by `data.max_val_windows`; use zero for all
-windows within those sequences. Set `data.compact_val.enable=false` to validate
-the full validation split instead. Training still uses all 798 train sequences.
-This training validation is distinct from the LidarVerse benchmark.
+20 validation sequences in `config/waymo_lidarverse_top20.json`, each split into
+nine fixed non-overlapping 20-frame chunks. Each chunk uses input pairs (0, 4),
+(4, 9) and (9, 14) and renders every interior sweep only: 540 input pairs and
+1,980 interpolation target views. Timestamps are the recorded physical times;
+missing sweeps are not invented. `data.max_val_windows` applies only when
+compact validation is disabled; it never truncates this protocol. Training
+still uses all 798 train sequences and its original random time sampling.
+This interpolation-only validation uses two inputs per pass and is distinct
+from the LidarVerse four-input aggregate benchmark, including extrapolation.
 When `data.allow_raw_fallback` is true, a segment whose cache is still being
 created is read from the original v2 components. The reader switches to the
 lossless cache after its `READY.json` appears. Each loader process retains at

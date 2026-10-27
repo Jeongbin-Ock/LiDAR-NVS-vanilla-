@@ -27,7 +27,7 @@ data:
   ego_radius: 2.5
   gt_ego_radius: 0.0
   max_depth_m: 80.0
-  max_val_windows: 200
+  max_val_windows: 200  # only for full-split validation, not the fixed compact protocol
   num_workers: 4
   eval_num_workers: 0
   compact_val:
