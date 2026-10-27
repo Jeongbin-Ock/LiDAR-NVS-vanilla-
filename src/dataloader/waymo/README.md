@@ -32,8 +32,8 @@ before constructing the dataset.
 
 ```bash
 python -m src.dataloader.waymo.prepare \
-  --raw-root /data/jeongbin/datasets/waymo_v2 \
-  --cache-root /data/jeongbin/datasets/waymo_v2_cache --workers 4
+  --raw-root /data/waymo/waymo_v2 \
+  --cache-root /data/waymo/waymo_v2_cache --workers 4
 
 python main.py model.variant=dynamic_2dgs_attention_velocity_v18_2 data_config=waymo
 ```

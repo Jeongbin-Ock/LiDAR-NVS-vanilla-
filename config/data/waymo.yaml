@@ -1,8 +1,8 @@
 # Waymo Perception v2.0.1 TOP LiDAR, calibrated 64x1024 target panorama.
 data:
   dataset_name: waymo_dynamic
-  dataroot: /data/jeongbin/datasets/waymo_v2_cache
-  raw_dataroot: /data/jeongbin/datasets/waymo_v2
+  dataroot: /data/waymo/waymo_v2_cache
+  raw_dataroot: /data/waymo/waymo_v2
   allow_raw_fallback: true
   version: waymo_perception_v2_0_1
   train_split: train
