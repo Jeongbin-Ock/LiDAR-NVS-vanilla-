@@ -359,6 +359,10 @@ ADAPT_OVERLAY_ROOTS = (
     "loss",
     *(root for root in REFINE_OVERLAY_ROOTS if root != "raydrop_refine"),
 )
+# sensor_adapt.decoder_init: where the trained sensor head starts. ``base``
+# loads the base checkpoint's sensor embedding and MLP with every other weight;
+# ``random`` keeps those two at the fresh V18 initialization.
+SENSOR_ADAPT_DECODER_INITS = ("base", "random")
 
 _CHECKPOINT_PROTECTED_PATHS = (
     "data.dataset_name",

@@ -122,6 +122,22 @@ class AdaptConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no LiDAR decoder to adapt"):
                 _compose(checkpoint)
 
+    def test_sensor_head_starts_from_the_base_unless_asked_for_a_fresh_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _stored, checkpoint = _base_checkpoint(tmp)
+            config, _ = _compose(checkpoint, "data_config=kitti360_lidar4d")
+            self.assertEqual(config.sensor_adapt.decoder_init, "base")
+            config, _ = _compose(
+                checkpoint, "data_config=kitti360_lidar4d", "sensor_adapt.decoder_init=random",
+            )
+            self.assertEqual(config.sensor_adapt.decoder_init, "random")
+            with self.assertRaisesRegex(ValueError, "decoder_init must be one of"):
+                _compose(checkpoint, "sensor_adapt.decoder_init=zeros")
+            # Runs composed before the key existed loaded the base's head.
+            del config.sensor_adapt["decoder_init"]
+            from src.experiment_config import validate_experiment_config
+            validate_experiment_config(config)
+
     def test_the_objective_is_intensity_and_raydrop_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             _stored, checkpoint = _base_checkpoint(tmp)
@@ -227,6 +243,42 @@ def test_wrapper_trains_only_the_sensor_head_and_keeps_the_model_in_eval_mode():
     assert [id(p) for p in group["params"]] == [id(p) for p in decoder.parameters()]
     assert (group["initial_lr"], group["weight_decay"]) == (5.0e-4, 1.0e-4)
     assert group["lr"] == pytest.approx(5.0e-4 / 500)  # first warmup step
+
+
+@requires_cuda
+@pytest.mark.parametrize("decoder_init", ["base", "random"])
+def test_base_checkpoint_loads_the_sensor_head_only_when_asked(decoder_init):
+    """``random`` leaves exactly the sensor head at its seeded fresh init."""
+    from src.model_wrapper import build_model_wrapper
+    from src.sensor_adapt_wrapper import DECODER_PREFIX
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _stored, checkpoint = _base_checkpoint(tmp)
+        config, _ = _compose(
+            checkpoint, "data_config=kitti360_lidar4d",
+            f"sensor_adapt.decoder_init={decoder_init}",
+        )
+        torch.manual_seed(42)
+        wrapper = build_model_wrapper(config)
+        fresh = {key: value.clone() for key, value in wrapper.state_dict().items()}
+        # A base whose every floating-point weight differs from the fresh init.
+        base = {
+            key: value + 1.0 if value.is_floating_point() else value.clone()
+            for key, value in fresh.items()
+        }
+        blob = {"state_dict": base, "epoch": 28, "global_step": 46_000}
+        with mock.patch("src.sensor_adapt_wrapper.torch.load", return_value=blob):
+            wrapper.load_base_checkpoint()
+        loaded = wrapper.state_dict()
+    decoder_keys = {key for key in loaded if key.startswith(DECODER_PREFIX)}
+    assert decoder_keys == {
+        f"{DECODER_PREFIX}{name}" for name in ("sensor_embedding.weight", "mlp.0.weight",
+                                                "mlp.0.bias", "mlp.2.weight", "mlp.2.bias",
+                                                "mlp.4.weight", "mlp.4.bias")
+    }
+    for key, value in loaded.items():
+        expected = fresh[key] if decoder_init == "random" and key in decoder_keys else base[key]
+        assert torch.equal(value, expected), key
 
 
 if __name__ == "__main__":

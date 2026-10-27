@@ -1579,7 +1579,11 @@ python main.py adapt_config=sensor_head data_config=kitti360_lidar4d \
 - `SensorAdaptWrapper` (`src/sensor_adapt_wrapper.py`) runs P2G and G2G under
   `no_grad` and keeps P2G, G2G and G2P in eval mode, as at test time. Only
   `g2p_model.lidar_decoder` (15,776 parameters) trains, in one
-  `lidar_decoder` AdamW group, starting from the base's weights.
+  `lidar_decoder` AdamW group. `sensor_adapt.decoder_init` sets where it
+  starts: `base` (the overlay's default) loads the base's sensor embedding and
+  MLP with every other weight; `random` loads every other weight and leaves
+  those two at the fresh V18 initialization, seeded (`seed`) as in a
+  from-scratch run. Configs composed before the key existed loaded the base's.
 - **Objective:** `loss.w_intensity` x intensity L1 on GT returns +
   `loss.w_raydrop` x raydrop BCE on every pixel of every target view (1 and 1
   in the overlay). `w_depth`, `w_depth_median` and `w_chamfer` must be 0: the

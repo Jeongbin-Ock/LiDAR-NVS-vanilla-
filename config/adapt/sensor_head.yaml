@@ -15,12 +15,18 @@
 # temporal G2G, Gaussians and their 30-ch features) in eval mode under no_grad,
 # as at test time. Only g2p.lidar_decoder trains: the sensor embedding and the
 # MLP [f', ray, depth_median / 80 m, embedding] -> (intensity, raydrop), which
-# starts from the base checkpoint's weights. The objective is intensity L1 on
+# starts from the base checkpoint's weights or, with decoder_init=random, from a
+# fresh initialization. The objective is intensity L1 on
 # GT returns plus raydrop BCE on every pixel of every target view; depth and
 # Chamfer are logged for the frozen geometry and carry weight 0.
 sensor_adapt:
   enable: true
   base_ckpt: ???
+  # Where the trained sensor head starts: ``base`` loads the base checkpoint's
+  # sensor embedding and MLP with the rest of the model; ``random`` keeps only
+  # those at the fresh V18 initialization (seeded as in a from-scratch run) and
+  # loads every other weight from the base.
+  decoder_init: base
 
 exp_name: ???
 

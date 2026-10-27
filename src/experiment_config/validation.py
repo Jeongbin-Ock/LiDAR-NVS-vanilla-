@@ -48,6 +48,7 @@ from .definitions import (
     ROUTED_COUNT_BLOCKS,
     ROUTER_CAPABLE_DYNAMIC_VARIANTS,
     SEED_MODE_TOKEN,
+    SENSOR_ADAPT_DECODER_INITS,
     UTONIA_ADAPTATION_MODE_HYBRID,
     UTONIA_ADAPTATION_MODE_INTENSITY_ONLY,
     UTONIA_ADAPTER_ACTIVATIONS,
@@ -384,7 +385,7 @@ def _validate_sensor_adapt(config, variant: str, label: str) -> None:
     root = "sensor_adapt"
     _reject_unknown_keys(config, root, {
         "enable", "base_ckpt", "base_ckpt_sha256", "base_epoch",
-        "base_global_step", "base_exp_name", "data_profile",
+        "base_global_step", "base_exp_name", "data_profile", "decoder_init",
     })
     _require_flag(config, f"{root}.enable")
     if not bool(OmegaConf.select(config, f"{root}.enable")):
@@ -399,6 +400,9 @@ def _validate_sensor_adapt(config, variant: str, label: str) -> None:
         )
     if bool(OmegaConf.select(config, "raydrop_refine.enable", default=False)):
         raise ValueError("A run either refines raydrop or adapts the sensor head, not both")
+    # Absent in runs composed before the key existed: they loaded the base's head.
+    if _has_path(config, f"{root}.decoder_init"):
+        _require_choice(config, f"{root}.decoder_init", SENSOR_ADAPT_DECODER_INITS)
     for weight in ("w_depth", "w_depth_median", "w_chamfer"):
         if float(OmegaConf.select(config, f"loss.{weight}", default=0.0)) != 0.0:
             raise ValueError(

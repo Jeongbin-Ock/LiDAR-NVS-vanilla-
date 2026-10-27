@@ -6,7 +6,9 @@ usually with another dataset's data block (``data_config=``). The scene model
 -- P2G, temporal G2G and the Gaussians with their features -- runs in eval
 mode under ``no_grad`` on every batch, exactly as at test time. Only G2P's
 ``lidar_decoder`` trains: the sensor embedding and the MLP that decodes the
-alpha-blended feature, ray and depth into intensity and raydrop. The objective
+alpha-blended feature, ray and depth into intensity and raydrop. It starts from
+the base checkpoint's weights, or with ``sensor_adapt.decoder_init=random``
+from the fresh V18 initialization the model was built with. The objective
 is the loss block's intensity L1 and raydrop BCE; depth and Chamfer stay logged
 as diagnostics of the frozen geometry with weight 0.
 
@@ -17,6 +19,9 @@ import torch
 
 from src.experiment_config import checkpoint_sha256
 from src.model_wrapper import WANDB_BASE_LOSS_KEYS, ModelWrapper
+
+# The trained sensor head's state_dict keys: the embedding and the MLP.
+DECODER_PREFIX = "g2p_model.lidar_decoder."
 
 
 class SensorAdaptWrapper(ModelWrapper):
@@ -45,12 +50,14 @@ class SensorAdaptWrapper(ModelWrapper):
         return self
 
     def load_base_checkpoint(self) -> None:
-        """Load every weight from ``sensor_adapt.base_ckpt``.
+        """Load the frozen model's weights from ``sensor_adapt.base_ckpt``.
 
-        Called once for a fresh adaptation run (the decoder starts from the
-        base model's); a resumed run restores every weight from its own
-        checkpoint instead. The file must still match the hash recorded when
-        the run was composed and hold exactly this model's weights.
+        Called once for a fresh adaptation run; a resumed run restores every
+        weight from its own checkpoint instead. The file must still match the
+        hash recorded when the run was composed and hold exactly this model's
+        weights. ``sensor_adapt.decoder_init`` decides the sensor head:
+        ``base`` (or absent) loads it too, ``random`` leaves it at the fresh
+        initialization ``__init__`` gave it, seeded like a from-scratch run.
         """
         adapt = self.cfg.sensor_adapt
         path = str(adapt.base_ckpt)
@@ -71,10 +78,26 @@ class SensorAdaptWrapper(ModelWrapper):
                 "Base checkpoint does not match the model: "
                 f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
             )
-        self.load_state_dict(state)
+        decoder_init = str(adapt.get("decoder_init", "base")).lower()
+        if decoder_init == "random":
+            decoder_keys = {key for key in own_keys if key.startswith(DECODER_PREFIX)}
+            incompatible = self.load_state_dict(
+                {key: value for key, value in state.items() if key not in decoder_keys},
+                strict=False,
+            )
+            if set(incompatible.missing_keys) != decoder_keys or incompatible.unexpected_keys:
+                raise RuntimeError(
+                    "decoder_init=random must leave exactly the sensor head unloaded: "
+                    f"missing={sorted(incompatible.missing_keys)}, "
+                    f"unexpected={sorted(incompatible.unexpected_keys)}"
+                )
+        else:
+            self.load_state_dict(state)
         if self._is_rank_zero():
             print(f"[sensor_adapt] frozen base {path} (epoch {int(blob['epoch'])}, "
-                  f"step {int(blob['global_step'])}, sha256 {digest[:12]})", flush=True)
+                  f"step {int(blob['global_step'])}, sha256 {digest[:12]}); "
+                  f"sensor head from {'a fresh initialization' if decoder_init == 'random' else 'the base'}",
+                  flush=True)
 
     def configure_optimizers(self):
         return self._scheduled_optimizer([{
