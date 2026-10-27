@@ -23,6 +23,12 @@ The default profile requires all 798 training and 202 validation segments and
 rejects segment IDs present in both splits. Per-epoch validation is capped at
 200 deterministic windows by `data.max_val_windows`; use zero for all windows.
 This training validation is distinct from the LidarVerse benchmark.
+When `data.allow_raw_fallback` is true, a segment whose cache is still being
+created is read from the original v2 components. The reader switches to the
+lossless cache after its `READY.json` appears. Each loader process retains at
+most one uncached raw sequence in memory; this can use substantially more RAM
+and I/O than reading a prepared cache. Set it to false to require all caches
+before constructing the dataset.
 
 ```bash
 python -m src.dataloader.waymo.prepare \

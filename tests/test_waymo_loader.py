@@ -7,7 +7,7 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
 
-from src.dataloader.waymo.dynamic import WaymoDynamicDataset
+from src.dataloader.waymo.dynamic import WaymoDynamicDataset, WaymoSequenceReader
 from src.dataloader.waymo.prepare import prepare_sequence
 
 
@@ -90,3 +90,20 @@ def test_waymo_windows_never_cross_missing_sweeps(tmp_path):
     assert [(first, last, start) for _, first, last, start in dataset.index] == [(0, 2, 0), (3, 5, 3)]
     for sample in dataset:
         assert sample["input"]["window_duration_sec"].item() == pytest.approx(0.2)
+
+
+def test_waymo_raw_fallback_matches_the_completed_cache(tmp_path):
+    raw, cache, name = tmp_path / "raw", tmp_path / "cache", "raw_sequence"
+    _raw_sequence(raw, "training", name)
+    cfg = OmegaConf.create({"dataroot": str(cache), "raw_dataroot": str(raw),
+        "allow_raw_fallback": True, "mode": "nvs", "coordinate_frame": "ego_vehicle",
+        "image_height": 64, "image_width": 16, "vfov": [-17.6, 2.4], "hfov": [-180, 180],
+        "expected_train_sequences": 1, "expected_val_sequences": 0, "intensity_max": 1.0,
+        "window_stride_sec": 0.1, "gt_middle_count": 3, "ego_radius": 0.0, "gt_ego_radius": 0.0,
+        "max_depth_m": 80.0, "dynamic_window": {"endpoint_min_sec": 0.2, "endpoint_max_sec": 0.4, "eval_seed": 42}})
+    dataset = WaymoDynamicDataset(cfg, "train")
+    raw_points = dataset.readers[name].points(0).numpy().copy()
+    assert dataset[0]["input"]["frame_counts"].tolist() == [256, 256]
+    prepare_sequence(raw, cache, "training", name, min_free_gib=0)
+    cached_reader = WaymoSequenceReader(cache / "training" / name, cfg, raw / "training")
+    np.testing.assert_array_equal(cached_reader.points(0).numpy(), raw_points)

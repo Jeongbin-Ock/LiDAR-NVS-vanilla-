@@ -25,40 +25,124 @@ def _parquet_file(path):
     return pq.ParquetFile(path)
 
 
+def _timestamp_map(table):
+    stamps = np.asarray(table["key.frame_timestamp_micros"].to_numpy(), dtype=np.int64)
+    if len(set(stamps.tolist())) != len(stamps):
+        raise ValueError("Waymo component contains duplicate timestamps")
+    return {int(stamp): index for index, stamp in enumerate(stamps)}
+
+
+@lru_cache(maxsize=1)
+def _raw_tables(split_root, sequence):
+    """Hold one uncached raw sequence per loader process, without writing it."""
+    import pyarrow.parquet as pq
+    root = Path(split_root)
+    range_prefix = "[LiDARComponent].range_image_return1"
+    pose_prefix = "[LiDARPoseComponent].range_image_return1"
+    lidar = pq.read_table(root / "lidar" / f"{sequence}.parquet",
+        columns=["key.frame_timestamp_micros", "key.laser_name",
+                 f"{range_prefix}.values", f"{range_prefix}.shape"],
+        filters=[("key.laser_name", "=", 1)])
+    poses = pq.read_table(root / "lidar_pose" / f"{sequence}.parquet",
+        columns=["key.frame_timestamp_micros", f"{pose_prefix}.values", f"{pose_prefix}.shape"])
+    lidar_index, pose_index = _timestamp_map(lidar), _timestamp_map(poses)
+    if set(lidar_index) != set(pose_index):
+        raise ValueError(f"Waymo raw LiDAR and pixel-pose timestamps differ: {sequence}")
+    return lidar, poses, lidar_index, pose_index
+
+
+def _raw_metadata(split_root, sequence):
+    """Read lightweight timestamps, vehicle poses and TOP calibration only."""
+    import pyarrow.parquet as pq
+    root = Path(split_root)
+    for component in ("lidar", "lidar_pose", "vehicle_pose", "lidar_calibration"):
+        if not (root / component / f"{sequence}.parquet").is_file():
+            raise FileNotFoundError(root / component / f"{sequence}.parquet")
+    stamp = "key.frame_timestamp_micros"
+    lidar = pq.read_table(root / "lidar" / f"{sequence}.parquet",
+        columns=[stamp, "key.laser_name", "[LiDARComponent].range_image_return1.shape"],
+        filters=[("key.laser_name", "=", 1)])
+    poses = pq.read_table(root / "lidar_pose" / f"{sequence}.parquet", columns=[stamp])
+    vehicles = pq.read_table(root / "vehicle_pose" / f"{sequence}.parquet",
+        columns=[stamp, "[VehiclePoseComponent].world_from_vehicle.transform"])
+    calib = pq.read_table(root / "lidar_calibration" / f"{sequence}.parquet",
+        filters=[("key.laser_name", "=", 1)])
+    li, pi, vi = map(_timestamp_map, (lidar, poses, vehicles))
+    if not li or set(li) != set(pi) or set(li) != set(vi) or len(calib) != 1:
+        raise ValueError(f"Waymo raw LiDAR, pose or calibration mismatch: {sequence}")
+    timestamps = np.asarray(sorted(li), dtype=np.int64)
+    shape = lidar["[LiDARComponent].range_image_return1.shape"][li[int(timestamps[0])]].as_py()
+    if len(shape) != 3 or shape[0] != 64 or shape[2] != 4:
+        raise ValueError(f"Unexpected Waymo TOP range image shape: {sequence} {shape}")
+    height, width = int(shape[0]), int(shape[1])
+    extrinsic = np.asarray(calib["[LiDARCalibrationComponent].extrinsic.transform"][0].as_py(),
+                           dtype=np.float64).reshape(4, 4)
+    beams = calib["[LiDARCalibrationComponent].beam_inclination.values"][0].as_py()
+    if not beams:
+        lo = float(calib["[LiDARCalibrationComponent].beam_inclination.min"][0].as_py())
+        hi = float(calib["[LiDARCalibrationComponent].beam_inclination.max"][0].as_py())
+        beams = lo + (np.arange(height) + 0.5) / height * (hi - lo)
+    beams = np.asarray(beams, dtype=np.float64)[::-1].copy()
+    vehicle = np.stack([np.asarray(vehicles["[VehiclePoseComponent].world_from_vehicle.transform"]
+        [vi[int(t)]].as_py(), dtype=np.float64).reshape(4, 4) for t in timestamps])
+    return timestamps, vehicle, extrinsic, beams, height, width
+
+
 class WaymoSequenceReader:
-    def __init__(self, path, cfg):
+    def __init__(self, path, cfg, raw_split_root=None):
         self.path, self.cfg = Path(path), cfg
-        ready = json.loads((self.path / "READY.json").read_text())
-        if ready.get("version") != 1 or ready.get("sequence") != self.path.name:
-            raise ValueError(f"Invalid Waymo cache manifest: {self.path}")
-        with np.load(self.path / "metadata.npz", allow_pickle=False) as meta:
-            self.timestamps_us = meta["timestamps_us"].copy()
-            self.world_from_vehicle = meta["world_from_vehicle"].copy()
-            self.vehicle_from_lidar = meta["vehicle_from_lidar"].copy()
-            self.inclination_rad = meta["inclination_rad"].copy()
-            self.height, self.width = int(meta["height"]), int(meta["width"])
+        self.raw_split_root = None if raw_split_root is None else str(raw_split_root)
+        if self.raw_split_root is not None:
+            (self.timestamps_us, self.world_from_vehicle, self.vehicle_from_lidar,
+             self.inclination_rad, self.height, self.width) = _raw_metadata(self.raw_split_root, self.path.name)
+            ready_frames = len(self.timestamps_us)
+        else:
+            ready = json.loads((self.path / "READY.json").read_text())
+            if ready.get("version") != 1 or ready.get("sequence") != self.path.name:
+                raise ValueError(f"Invalid Waymo cache manifest: {self.path}")
+            with np.load(self.path / "metadata.npz", allow_pickle=False) as meta:
+                self.timestamps_us = meta["timestamps_us"].copy()
+                self.world_from_vehicle = meta["world_from_vehicle"].copy()
+                self.vehicle_from_lidar = meta["vehicle_from_lidar"].copy()
+                self.inclination_rad = meta["inclination_rad"].copy()
+                self.height, self.width = int(meta["height"]), int(meta["width"])
+            ready_frames = ready["frames"]
         self.timestamps_ns = self.timestamps_us * np.int64(1000)
-        if (len(self.timestamps_us) != ready["frames"] or self.height != 64
+        if (len(self.timestamps_us) != ready_frames or self.height != 64
                 or self.world_from_vehicle.shape != (len(self.timestamps_us), 4, 4)
                 or self.vehicle_from_lidar.shape != (4, 4)
                 or self.inclination_rad.shape != (64,)
                 or np.any(np.diff(self.timestamps_us) <= 0)):
             raise ValueError(f"Invalid Waymo cache metadata: {self.path}")
-        if not (self.path / "frames.parquet").is_file():
+        if self.raw_split_root is None and not (self.path / "frames.parquet").is_file():
             raise FileNotFoundError(self.path / "frames.parquet")
 
     @lru_cache(maxsize=4)
     def points(self, index):
-        parquet = _parquet_file(str(self.path / "frames.parquet"))
-        if parquet.num_row_groups != len(self.timestamps_us):
-            raise ValueError(f"Waymo cache row groups do not match timestamps: {self.path}")
-        frame = parquet.read_row_group(int(index))
-        if int(frame["timestamp_us"][0].as_py()) != int(self.timestamps_us[index]):
-            raise ValueError(f"Waymo cache frame order mismatch: {self.path} {index}")
-        def array(column):
-            return frame[column][0].values.to_numpy(zero_copy_only=False).reshape(self.height, self.width)
-        ranges, intensity = array("range"), array("intensity")
-        pixel_pose = np.stack([array(f"pose_{i}") for i in range(6)], axis=-1)
+        if (self.path / "READY.json").is_file():
+            parquet = _parquet_file(str(self.path / "frames.parquet"))
+            if parquet.num_row_groups != len(self.timestamps_us):
+                raise ValueError(f"Waymo cache row groups do not match timestamps: {self.path}")
+            frame = parquet.read_row_group(int(index))
+            if int(frame["timestamp_us"][0].as_py()) != int(self.timestamps_us[index]):
+                raise ValueError(f"Waymo cache frame order mismatch: {self.path} {index}")
+            def array(column):
+                return frame[column][0].values.to_numpy(zero_copy_only=False).reshape(self.height, self.width)
+            ranges, intensity = array("range"), array("intensity")
+            pixel_pose = np.stack([array(f"pose_{i}") for i in range(6)], axis=-1)
+        else:
+            if self.raw_split_root is None:
+                raise FileNotFoundError(f"Waymo cache is not ready: {self.path}")
+            lidar, poses, lidar_idx, pose_idx = _raw_tables(self.raw_split_root, self.path.name)
+            stamp = int(self.timestamps_us[index])
+            li, pi = lidar_idx[stamp], pose_idx[stamp]
+            rp, pp = "[LiDARComponent].range_image_return1", "[LiDARPoseComponent].range_image_return1"
+            rshape, pshape = lidar[f"{rp}.shape"][li].as_py(), poses[f"{pp}.shape"][pi].as_py()
+            if rshape != [self.height, self.width, 4] or pshape != [self.height, self.width, 6]:
+                raise ValueError(f"Unexpected Waymo raw frame shape: {self.path} {stamp}")
+            scan = lidar[f"{rp}.values"][li].values.to_numpy(zero_copy_only=False).reshape(rshape)
+            pixel_pose = poses[f"{pp}.values"][pi].values.to_numpy(zero_copy_only=False).reshape(pshape)
+            ranges, intensity = scan[..., 0], scan[..., 1]
         result = top_range_to_sensor_points(ranges, intensity, pixel_pose, self.inclination_rad,
                                             self.vehicle_from_lidar, self.world_from_vehicle[index])
         # Waymo intensity is ordinarily in [0, 1], with occasional much larger
@@ -97,12 +181,19 @@ class WaymoDynamicDataset(Dataset):
         is_train = self.split in ("train", "training")
         split_dir = "training" if is_train else "validation"
         root = Path(str(cfg.dataroot))
-        directories = sorted(p.parent for p in (root / split_dir).glob("*/READY.json"))
+        allow_raw = bool(getattr(cfg, "allow_raw_fallback", False))
+        raw_root = Path(str(cfg.raw_dataroot)) if allow_raw else None
+        if allow_raw:
+            names = sorted(p.stem for p in (raw_root / split_dir / "lidar").glob("*.parquet"))
+            directories = [root / split_dir / name for name in names]
+        else:
+            directories = sorted(p.parent for p in (root / split_dir).glob("*/READY.json"))
         expected = int(cfg.expected_train_sequences if is_train else cfg.expected_val_sequences)
         if expected and len(directories) != expected:
             raise ValueError(f"Waymo {split_dir} cache has {len(directories)} sequences; expected {expected}")
         other = "validation" if is_train else "training"
-        other_names = {p.parent.name for p in (root / other).glob("*/READY.json")}
+        other_names = ({p.stem for p in (raw_root / other / "lidar").glob("*.parquet")}
+                       if allow_raw else {p.parent.name for p in (root / other).glob("*/READY.json")})
         overlap = {p.name for p in directories} & other_names
         if overlap:
             raise ValueError(f"Waymo train/validation segment overlap: {sorted(overlap)[:3]}")
@@ -116,7 +207,7 @@ class WaymoDynamicDataset(Dataset):
         if not np.isfinite(max_gap) or max_gap <= 0:
             raise ValueError("Waymo max_sweep_gap_sec must be finite and positive")
         for path in directories:
-            reader = WaymoSequenceReader(path, cfg)
+            reader = WaymoSequenceReader(path, cfg, raw_root / split_dir if allow_raw else None)
             self.readers[path.name] = reader
             breaks = np.flatnonzero(np.diff(reader.timestamps_ns) > round(max_gap * 1e9)) + 1
             boundaries = [0, *breaks.tolist(), len(reader.timestamps_us)]

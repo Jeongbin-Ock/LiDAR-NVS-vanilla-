@@ -2,6 +2,8 @@
 data:
   dataset_name: waymo_dynamic
   dataroot: /data/jeongbin/datasets/waymo_v2_cache
+  raw_dataroot: /data/jeongbin/datasets/waymo_v2
+  allow_raw_fallback: true
   version: waymo_perception_v2_0_1
   train_split: train
   eval_split: val
