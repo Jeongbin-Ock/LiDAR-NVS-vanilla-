@@ -44,6 +44,7 @@ from src.experiment_config import (
     DYNAMIC_VARIANT_V16_1,
     DYNAMIC_VARIANT_V17_1,
     DYNAMIC_VARIANT_V18,
+    DYNAMIC_VARIANT_V18_1,
     DYNAMIC_VARIANTS,
     DENSE_COUNT_DYNAMIC_VARIANTS,
     DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT,
@@ -51,6 +52,7 @@ from src.experiment_config import (
     EXPERT_AUXILIARY_RENDERS,
     EXPERT_COUNT_DYNAMIC_VARIANTS,
     EXPERT_COUNT_MODE,
+    FEATURE_DECODER_DYNAMIC_VARIANTS,
     HYBRID_UTONIA_DYNAMIC_VARIANTS,
     LOCAL_ATTENTION_DYNAMIC_VARIANTS,
     LOCAL_ATTENTION_IMPLEMENTATIONS,
@@ -59,6 +61,7 @@ from src.experiment_config import (
     NESTED_COUNT_DYNAMIC_VARIANTS,
     NESTED_COUNT_MODE,
     NESTED_COUNT_OPTION_COUNTS,
+    NO_SENSOR_EMBEDDING_DYNAMIC_VARIANTS,
     NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS,
     ORDINAL_AUXILIARY_RENDER_BY_VARIANT,
     ORDINAL_AUXILIARY_RENDERS,
@@ -1812,7 +1815,7 @@ class V15ConfigTest(unittest.TestCase):
             DYNAMIC_VARIANT_V15, DYNAMIC_VARIANT_V15_1,
             DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
             DYNAMIC_VARIANT_V15_5, DYNAMIC_VARIANT_V16, DYNAMIC_VARIANT_V16_1,
-            DYNAMIC_VARIANT_V18,
+            DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1,
         ))
         for group in (
             LOCAL_ATTENTION_DYNAMIC_VARIANTS,
@@ -2225,7 +2228,7 @@ class V15SiblingConfigTest(unittest.TestCase):
     def test_registration(self):
         for variant in (
             DYNAMIC_VARIANT_V15_2, DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4,
-            DYNAMIC_VARIANT_V15_5, DYNAMIC_VARIANT_V18,
+            DYNAMIC_VARIANT_V15_5, DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1,
         ):
             with self.subTest(variant=variant):
                 self.assertIn(variant, DYNAMIC_VARIANTS)
@@ -2242,13 +2245,14 @@ class V15SiblingConfigTest(unittest.TestCase):
         self.assertEqual(
             DENSE_COUNT_DYNAMIC_VARIANTS,
             (DYNAMIC_VARIANT_V15_3, DYNAMIC_VARIANT_V15_4, DYNAMIC_VARIANT_V15_5,
-             DYNAMIC_VARIANT_V17_1, DYNAMIC_VARIANT_V18),
+             DYNAMIC_VARIANT_V17_1, DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1),
         )
         self.assertEqual(DENSE_COUNT_TEMPORAL_HEADS_BY_VARIANT, {
             DYNAMIC_VARIANT_V15_3: 12, DYNAMIC_VARIANT_V15_4: 8,
             DYNAMIC_VARIANT_V15_5: 8,
             DYNAMIC_VARIANT_V17_1: 8,
             DYNAMIC_VARIANT_V18: 8,
+            DYNAMIC_VARIANT_V18_1: 8,
         })
         self.assertEqual(EXPERT_COUNT_MODE, "expert_gumbel")
         self.assertEqual(EXPERT_AUXILIARY_RENDERS, ("dense_add", "none"))
@@ -2405,12 +2409,57 @@ class V15SiblingConfigTest(unittest.TestCase):
                     variant=DYNAMIC_VARIANT_V15_4,
                 )
 
+    def test_v18_1_config_is_v18s_without_the_sensor_embedding(self):
+        self.assertEqual(
+            FEATURE_DECODER_DYNAMIC_VARIANTS,
+            (DYNAMIC_VARIANT_V18, DYNAMIC_VARIANT_V18_1),
+        )
+        self.assertEqual(NO_SENSOR_EMBEDDING_DYNAMIC_VARIANTS, (DYNAMIC_VARIANT_V18_1,))
+        v18, _ = self._compose(variant=DYNAMIC_VARIANT_V18)
+        v18_1, _ = self._compose(variant=DYNAMIC_VARIANT_V18_1)
+        a = self._leaves(OmegaConf.to_container(v18, resolve=True))
+        b = self._leaves(OmegaConf.to_container(v18_1, resolve=True))
+        changed = {
+            key for key in set(a) | set(b)
+            if a.get(key, "<absent>") != b.get(key, "<absent>")
+        }
+        decoder = "g2p.lidar_decoder."
+        self.assertEqual(changed, {
+            "model.variant", "exp_name", "logger.dir",
+            decoder + "sensor_embedding_dim", decoder + "num_sensors",
+        })
+        self.assertEqual(b[decoder + "sensor_embedding_dim"], 0)
+        self.assertNotIn(decoder + "num_sensors", b)
+        # [f' (30), ray (3), r / R (1)] = 34 inputs.
+        self.assertEqual(b[decoder + "feature_dim"] + 3 + 1, 34)
+
+    def test_v18_1_and_v18_sensor_embedding_keys_are_their_own(self):
+        self._rejected(
+            "decodes without a sensor embedding; "
+            "g2p.lidar_decoder.sensor_embedding_dim must be 0",
+            "g2p.lidar_decoder.sensor_embedding_dim=30",
+            variant=DYNAMIC_VARIANT_V18_1,
+        )
+        self._rejected(
+            "num_sensors is only available to V18$",
+            "g2p.lidar_decoder.num_sensors=1", variant=DYNAMIC_VARIANT_V18_1,
+        )
+        self._rejected(
+            "sensor_embedding_dim must be a positive integer",
+            "g2p.lidar_decoder.sensor_embedding_dim=0", variant=DYNAMIC_VARIANT_V18,
+        )
+        self._rejected(
+            "only available to V18, V18.1$", "p2g.gs_params.feature=30",
+            variant=DYNAMIC_VARIANT_V15_4,
+        )
+
     def test_v15_3_and_v15_4_pin_their_temporal_head_counts(self):
         for variant, heads, other in (
             (DYNAMIC_VARIANT_V15_3, 12, 8),
             (DYNAMIC_VARIANT_V15_4, 8, 12),
             (DYNAMIC_VARIANT_V15_5, 8, 12),
             (DYNAMIC_VARIANT_V18, 8, 12),
+            (DYNAMIC_VARIANT_V18_1, 8, 12),
         ):
             with self.subTest(variant=variant):
                 self._rejected(

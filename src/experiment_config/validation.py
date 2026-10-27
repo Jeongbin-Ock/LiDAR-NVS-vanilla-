@@ -36,6 +36,7 @@ from .definitions import (
     NESTED_COUNT_DYNAMIC_VARIANTS,
     NESTED_COUNT_MODE,
     NESTED_COUNT_OPTION_COUNTS,
+    NO_SENSOR_EMBEDDING_DYNAMIC_VARIANTS,
     NO_TEMPORAL_LAYER_SCALE_DYNAMIC_VARIANTS,
     ORDINAL_AUXILIARY_RENDER_BY_VARIANT,
     ORDINAL_AUXILIARY_RENDERS,
@@ -1173,10 +1174,13 @@ def _validate_gaussian_head_config(config, variant: str, label: str) -> None:
 def _validate_lidar_appearance(config, variant: str, label: str) -> None:
     """How a Gaussian becomes intensity and raydrop: SH, or V18's decoder.
 
-    Every variant but V18 renders SH coefficients and rejects both V18 keys.
-    V18 needs ``p2g.gs_params.feature`` channels (at most what the rasterizer
-    blends) with ``shs: 0``, and ``g2p.lidar_decoder`` reading exactly that
-    many feature channels.
+    Every variant but V18 and V18.1 renders SH coefficients and rejects both
+    V18 keys. V18 and V18.1 need ``p2g.gs_params.feature`` channels (at most
+    what the rasterizer blends) with ``shs: 0``, and ``g2p.lidar_decoder``
+    reading exactly that many feature channels. V18's decoder also reads a
+    sensor embedding (positive ``sensor_embedding_dim`` and ``num_sensors``);
+    V18.1's reads none, so it sets ``sensor_embedding_dim: 0`` and has no
+    ``num_sensors``.
     """
     feature_path = "p2g.gs_params.feature"
     decoder_path = "g2p.lidar_decoder"
@@ -1214,8 +1218,27 @@ def _validate_lidar_appearance(config, variant: str, label: str) -> None:
         raise ValueError(
             f"{decoder_path}.feature_dim must equal {feature_path}"
         )
-    _require_int(config, f"{decoder_path}.sensor_embedding_dim")
-    _require_int(config, f"{decoder_path}.num_sensors")
+    embedding_path = f"{decoder_path}.sensor_embedding_dim"
+    sensors_path = f"{decoder_path}.num_sensors"
+    if variant in NO_SENSOR_EMBEDDING_DYNAMIC_VARIANTS:
+        embedding_dim = OmegaConf.select(config, embedding_path, default=None)
+        if isinstance(embedding_dim, bool) or embedding_dim != 0:
+            raise ValueError(
+                f"{label} decodes without a sensor embedding; "
+                f"{embedding_path} must be 0, got {embedding_dim!r}"
+            )
+        if _has_path(config, sensors_path):
+            raise ValueError(
+                f"{label} has no sensor embedding to index; {sensors_path} "
+                "is only available to "
+                + _only_available_to(tuple(
+                    name for name in FEATURE_DECODER_DYNAMIC_VARIANTS
+                    if name not in NO_SENSOR_EMBEDDING_DYNAMIC_VARIANTS
+                ))
+            )
+    else:
+        _require_int(config, embedding_path)
+        _require_int(config, sensors_path)
     hidden = OmegaConf.select(config, f"{decoder_path}.hidden_dims")
     if (
         not isinstance(hidden, ListConfig) or len(hidden) == 0

@@ -5,7 +5,8 @@ its colour channels, whose kernels every earlier variant trains through:
 same per-pixel values, same gradients to the per-Gaussian values, and the
 same gradients to opacity and geometry through the blending weights (which
 the feature channels did not receive before V18). G2P's decoder then reads
-[f', ray direction, median depth / R, sensor embedding] per pixel.
+[f', ray direction, median depth / R, sensor embedding] per pixel; V18.1's
+reads [f', ray direction, median depth / R].
 """
 from __future__ import annotations
 
@@ -306,10 +307,64 @@ def test_decoder_reads_feature_ray_range_and_sensor_embedding_in_order():
     torch.testing.assert_close(pixel_raydrop[0, 1], raydrop[0, 1])
 
 
+def test_v18_1_decoder_reads_no_sensor_embedding():
+    from src.models.module.lidar_decoder import LidarFeatureDecoder
+
+    config = {key: value for key, value in DECODER_CFG.items() if key != "num_sensors"}
+    decoder = LidarFeatureDecoder(OmegaConf.create({**config, "sensor_embedding_dim": 0}))
+    assert decoder.input_dim == 34
+    assert decoder.sensor_embedding is None
+    assert decoder.mlp[0].in_features == 34
+    assert sum(p.numel() for p in decoder.parameters()) == 12866
+    feature = torch.randn(30, 4, 6)
+    ray = F.normalize(torch.randn(3, 4, 6), dim=0)
+    depth = 100 * torch.rand(1, 4, 6)
+    rows = decoder.decoder_input(feature, ray, depth)
+    assert rows.shape == (24, 34)
+    torch.testing.assert_close(rows[:, :30], feature.reshape(30, -1).T)
+    torch.testing.assert_close(rows[:, 30:33], ray.reshape(3, -1).T)
+    torch.testing.assert_close(rows[:, 33], depth.reshape(-1) / 80.0)
+    with pytest.raises(ValueError, match="sensor 0 only"):
+        decoder.decoder_input(feature, ray, depth, sensor_index=1)
+
+
+def test_v18_decoder_folds_its_sensor_embedding_into_v18_1s_first_bias():
+    """One sensor: V18's embedding is a constant input, i.e. first-layer bias."""
+    from src.models.module.lidar_decoder import LidarFeatureDecoder
+
+    torch.manual_seed(0)
+    v18 = LidarFeatureDecoder(OmegaConf.create(DECODER_CFG)).double()
+    config = {key: value for key, value in DECODER_CFG.items() if key != "num_sensors"}
+    v18_1 = LidarFeatureDecoder(
+        OmegaConf.create({**config, "sensor_embedding_dim": 0})
+    ).double()
+    state = v18.state_dict()
+    first = state["mlp.0.weight"]
+    folded = {
+        name: value for name, value in state.items()
+        if name not in ("sensor_embedding.weight", "mlp.0.weight", "mlp.0.bias")
+    }
+    folded["mlp.0.weight"] = first[:, :34]
+    folded["mlp.0.bias"] = (
+        state["mlp.0.bias"] + first[:, 34:] @ state["sensor_embedding.weight"][0]
+    )
+    v18_1.load_state_dict(folded, strict=True)
+    feature = torch.randn(30, 5, 7, dtype=torch.float64)
+    ray = F.normalize(torch.randn(3, 5, 7, dtype=torch.float64), dim=0)
+    depth = 100 * torch.rand(1, 5, 7, dtype=torch.float64)
+    alpha = torch.rand(1, 5, 7, dtype=torch.float64)
+    for expected, actual in zip(
+        v18(feature, ray, depth, alpha), v18_1(feature, ray, depth, alpha)
+    ):
+        torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+
+
 @pytest.mark.parametrize("overrides, message", [
     ({"hidden_dims": []}, "hidden_dims"),
     ({"feature_dim": 0}, "feature_dim"),
     ({"range_scale_m": 0.0}, "range_scale_m"),
+    ({"sensor_embedding_dim": -1}, "sensor_embedding_dim"),
+    ({"num_sensors": 0}, "num_sensors"),
 ])
 def test_decoder_rejects_an_invalid_config(overrides, message):
     from src.models.module.lidar_decoder import LidarFeatureDecoder

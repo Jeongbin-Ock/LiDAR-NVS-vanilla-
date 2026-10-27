@@ -90,7 +90,8 @@ has no router and renders five Gaussians per token (`legacy`, `K_max: 5`),
 V15.4 is V15.3 with eight temporal heads instead of twelve, V15.5 is V15.4
 with `v_init` read from the uniform mean over layers instead of a learned layer
 mixture, V18 is V15.4 whose Gaussians carry a rendered feature that G2P
-decodes into intensity and raydrop instead of SH coefficients, and
+decodes into intensity and raydrop instead of SH coefficients (V18.1: without
+the decoder's sensor embedding), and
 V16 picks V15's prefixes with two bounded ordinal gates trained through masked
 rasterization (`nested_ordinal`); V16.1 is V16 whose second training render is
 a uniformly random prefix per token.
@@ -934,6 +935,20 @@ last `lidar_decoder` optimizer group at `train.lr` / `train.weight_decay`; the
 backend checkpoint keys are V15.4's in V15.4's order, plus G2P's
 `g2p_model.lidar_decoder.*`.
 
+**V18.1** is V18 whose decoder reads no sensor embedding:
+`sensor_embedding_dim: 0` and no `num_sensors` (both checked by validation; V18
+still requires positive values), so the MLP is `[f', d, r / R]` = 34 -> 96 ->
+96 -> 2, 12,866 parameters instead of 15,776, and its checkpoint keys are
+`mlp.*` only. Every V18 run trains on one LiDAR, so V18's embedding is the same
+vector at every pixel and only adds `W_e e` to the first layer's
+pre-activation, which that layer's bias can hold: the two decoders represent the
+same functions, and a trained V18 decoder folds into V18.1's exactly (bias
+`b + W_e e`). Trained from scratch they differ: V18 starts that constant at
+std ~0.40 (`e ~ N(0, 1)`) and, under AdamW, moves it ~`1 + |e|_1` (about 25)
+times faster than a plain bias through the `W_e` columns; V18.1 learns it
+through the bias alone, and its first layer initializes at fan-in 34 instead
+of 64. Every other key, the backend and its checkpoint schema are V18's.
+
 `barrier_weight` stays at 4 **in V11 itself**. Re-scoring V11's trained head-0
 features at other
 weights shows a=0 to a=4 is decisive (mass beyond the radius 11.2% -> 0.85%,
@@ -1573,12 +1588,12 @@ python main.py adapt_config=sensor_head data_config=kitti360_lidar4d \
   `exp_name`. The base's hash, epoch, step and run name go under
   `sensor_adapt.base_*`, and `main.py` re-checks the hash before loading every
   weight from it.
-- Only a variant with `g2p.lidar_decoder` (V18) can be adapted, and a run
+- Only a variant with `g2p.lidar_decoder` (V18, V18.1) can be adapted, and a run
   either adapts the sensor head or refines raydrop. A refinement or
   adaptation checkpoint is not accepted as the base of either stage.
 - `SensorAdaptWrapper` (`src/sensor_adapt_wrapper.py`) runs P2G and G2G under
   `no_grad` and keeps P2G, G2G and G2P in eval mode, as at test time. Only
-  `g2p_model.lidar_decoder` (15,776 parameters) trains, in one
+  `g2p_model.lidar_decoder` (15,776 parameters; V18.1's 12,866) trains, in one
   `lidar_decoder` AdamW group. `sensor_adapt.decoder_init` sets where it
   starts: `base` (the overlay's default) loads the base's sensor embedding and
   MLP with every other weight; `random` loads every other weight and leaves

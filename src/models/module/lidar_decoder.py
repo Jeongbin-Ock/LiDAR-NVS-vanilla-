@@ -29,6 +29,14 @@ the pixel's surface is. Geometry is supervised by the depth losses, and a live
 ``r`` would let the raydrop loss move the median Gaussian's depth wherever the
 decoder finds dropping easier to predict -- unopposed on GT-dropped pixels,
 which carry no depth loss.
+
+V18.1 is V18 without ``e`` (``sensor_embedding_dim: 0``): the MLP reads
+``[f', d, r / R]``. With one LiDAR per training set, ``e`` is the same vector at
+every pixel, so it only adds ``W_e e`` to the first layer's pre-activation, a
+constant that layer's bias can hold. Both decoders represent the same
+functions, and a V18 decoder folded into V18.1's (``b + W_e e`` as the bias)
+decodes the same maps; trained from scratch they differ, because V18 learns
+that constant through the product ``W_e e`` and V18.1 through the bias alone.
 """
 from __future__ import annotations
 
@@ -53,20 +61,33 @@ def _positive_int(cfg, name):
     return int(value)
 
 
+def _non_negative_int(cfg, name):
+    value = getattr(cfg, name, None)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            f"g2p.lidar_decoder.{name} must be a non-negative integer, got {value!r}"
+        )
+    return int(value)
+
+
 class LidarFeatureDecoder(nn.Module):
     """``[f', d, r / R, e] -> (intensity, raydrop)`` for every pixel of a view.
 
     ``g2p.lidar_decoder`` sets ``feature_dim`` (the per-Gaussian feature width),
     ``sensor_embedding_dim``, ``num_sensors``, ``hidden_dims`` (the MLP's
     hidden widths, SiLU after each) and ``range_scale_m`` (R). V18:
-    30 + 3 + 1 + 30 = 64 inputs, 64 -> 96 -> 96 -> 2.
+    30 + 3 + 1 + 30 = 64 inputs, 64 -> 96 -> 96 -> 2. ``sensor_embedding_dim:
+    0`` (V18.1) builds no embedding and reads no ``num_sensors``: 30 + 3 + 1 =
+    34 inputs, and every view is sensor 0.
     """
 
     def __init__(self, cfg):
         super().__init__()
         self.feature_dim = _positive_int(cfg, "feature_dim")
-        self.sensor_embedding_dim = _positive_int(cfg, "sensor_embedding_dim")
-        self.num_sensors = _positive_int(cfg, "num_sensors")
+        self.sensor_embedding_dim = _non_negative_int(cfg, "sensor_embedding_dim")
+        self.num_sensors = (
+            _positive_int(cfg, "num_sensors") if self.sensor_embedding_dim else 1
+        )
         hidden_dims = getattr(cfg, "hidden_dims", None)
         try:
             self.hidden_dims = tuple(int(width) for width in hidden_dims)
@@ -85,8 +106,9 @@ class LidarFeatureDecoder(nn.Module):
             self.feature_dim + RAY_CHANNELS + RANGE_CHANNELS
             + self.sensor_embedding_dim
         )
-        self.sensor_embedding = nn.Embedding(
-            self.num_sensors, self.sensor_embedding_dim
+        self.sensor_embedding = (
+            nn.Embedding(self.num_sensors, self.sensor_embedding_dim)
+            if self.sensor_embedding_dim else None
         )
         layers = []
         width = self.input_dim
@@ -99,7 +121,8 @@ class LidarFeatureDecoder(nn.Module):
     def decoder_input(self, feature, ray_dir, median_depth, sensor_index=0):
         """The ``(H*W, input_dim)`` rows ``[f', d, r / R, e]`` of one view.
 
-        ``r`` is detached (see the module docstring).
+        ``r`` is detached (see the module docstring). Without a sensor
+        embedding (V18.1) the rows are ``[f', d, r / R]``.
         """
         if feature.ndim != 3 or feature.shape[0] != self.feature_dim:
             raise ValueError(
@@ -111,16 +134,25 @@ class LidarFeatureDecoder(nn.Module):
             raise ValueError("ray_dir must be (3,H,W) like the feature")
         if tuple(median_depth.shape) != (RANGE_CHANNELS, height, width):
             raise ValueError("median_depth must be (1,H,W) like the feature")
-        index = torch.full(
-            (1,), int(sensor_index), dtype=torch.long, device=feature.device
-        )
-        embedding = self.sensor_embedding(index).reshape(-1, 1, 1)
-        rows = torch.cat([
+        columns = [
             feature,
             ray_dir.to(dtype=feature.dtype),
             median_depth.detach() / self.range_scale_m,
-            embedding.to(dtype=feature.dtype).expand(-1, height, width),
-        ], dim=0)
+        ]
+        if self.sensor_embedding is not None:
+            index = torch.full(
+                (1,), int(sensor_index), dtype=torch.long, device=feature.device
+            )
+            embedding = self.sensor_embedding(index).reshape(-1, 1, 1)
+            columns.append(
+                embedding.to(dtype=feature.dtype).expand(-1, height, width)
+            )
+        elif int(sensor_index) != 0:
+            raise ValueError(
+                "a lidar decoder without a sensor embedding decodes sensor 0 "
+                f"only, got sensor_index={sensor_index}"
+            )
+        rows = torch.cat(columns, dim=0)
         return rows.reshape(self.input_dim, height * width).transpose(0, 1)
 
     def surface(self, feature, ray_dir, median_depth, sensor_index=0):

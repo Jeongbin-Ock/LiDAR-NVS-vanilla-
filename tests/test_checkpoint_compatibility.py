@@ -106,6 +106,9 @@ _BACKEND_CLASS = {
     "dynamic_2dgs_attention_velocity_v18": (
         "DenseCountBarrierVelocityGaussianBackend"
     ),
+    "dynamic_2dgs_attention_velocity_v18_1": (
+        "DenseCountBarrierVelocityGaussianBackend"
+    ),
 }
 
 
@@ -250,6 +253,10 @@ _PRE_REFACTOR_MANIFEST = {
     # of five 42-channel ones (32 SH coefficients). Its lidar decoder lives in
     # the renderer (see test_v18_renderer_owns_the_lidar_decoder).
     "dynamic_2dgs_attention_velocity_v18": (
+        "8cadb1f651af5e46ad32", "ceac3d77acf6877837cd"
+    ),
+    # V18.1 changes only G2P's lidar decoder; its backend schema is V18's.
+    "dynamic_2dgs_attention_velocity_v18_1": (
         "8cadb1f651af5e46ad32", "ceac3d77acf6877837cd"
     ),
 }
@@ -441,7 +448,10 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
             ],
         )
         for variant in DYNAMIC_VARIANTS:
-            if variant == "dynamic_2dgs_attention_velocity_v18":
+            if variant in (
+                "dynamic_2dgs_attention_velocity_v18",
+                "dynamic_2dgs_attention_velocity_v18_1",
+            ):
                 continue
             with self.subTest(variant=variant):
                 config, _source = compose_fresh_config(
@@ -450,6 +460,25 @@ class DynamicCheckpointCompatibilityTest(unittest.TestCase):
                 self.assertIsNone(
                     OmegaConf.select(config, "g2p.lidar_decoder", default=None)
                 )
+
+    def test_v18_1_renderer_owns_v18s_lidar_decoder_without_the_embedding(self):
+        """G2P's checkpoint keys: the 34-96-96-2 MLP, no sensor embedding."""
+        config, _source = compose_fresh_config(OmegaConf.from_dotlist(
+            ["model.variant=dynamic_2dgs_attention_velocity_v18_1"]
+        ))
+        decoder = _load_lidar_decoder_module().LidarFeatureDecoder(
+            config.g2p.lidar_decoder
+        )
+        self.assertIsNone(decoder.sensor_embedding)
+        self.assertEqual(
+            [(name, tuple(value.shape)) for name, value in decoder.state_dict().items()],
+            [
+                ("mlp.0.weight", (96, 34)), ("mlp.0.bias", (96,)),
+                ("mlp.2.weight", (96, 96)), ("mlp.2.bias", (96,)),
+                ("mlp.4.weight", (2, 96)), ("mlp.4.bias", (2,)),
+            ],
+        )
+        self.assertEqual(sum(p.numel() for p in decoder.parameters()), 12866)
 
     def test_v11_5_builds_the_v11_3_decoder_under_the_v11_4_hinge(self):
         backend = _build_backend("dynamic_2dgs_attention_velocity_v11_5")

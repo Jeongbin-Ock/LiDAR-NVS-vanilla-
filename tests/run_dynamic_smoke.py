@@ -348,9 +348,10 @@ def main():
     lidar_decoder_weight = (
         lidar_decoder.mlp[0].weight if lidar_decoder is not None else None
     )
+    # V18.1's decoder has no sensor embedding.
+    sensor_embedding = getattr(lidar_decoder, "sensor_embedding", None)
     sensor_embedding_weight = (
-        lidar_decoder.sensor_embedding.weight
-        if lidar_decoder is not None else None
+        sensor_embedding.weight if sensor_embedding is not None else None
     )
 
     torch.cuda.reset_peak_memory_stats(device)
@@ -619,7 +620,10 @@ def main():
         raise RuntimeError("render loss did not reach Utonia adaptation")
     if lidar_decoder is not None and not all(
         item["lidar_decoder_grad_norm"] > 0.0
-        and item["sensor_embedding_grad_norm"] > 0.0
+        and (
+            sensor_embedding_weight is None
+            or item["sensor_embedding_grad_norm"] > 0.0
+        )
         for item in records
     ):
         raise RuntimeError("render loss did not reach the lidar decoder")

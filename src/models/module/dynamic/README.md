@@ -67,6 +67,7 @@ Every variant's velocity head is `EmbeddedInitVelocityHead`.
 | `attention_velocity_v16_1` | `OrdinalCountBarrierVelocityGaussianBackend` | V15's, unchanged | V16, except that the unmasked auxiliary render is each token's G1..Gk with k drawn uniformly from {1, 3, 5} per step, independently of the router |
 | `attention_velocity_v17_1` | `DenseCountBarrierVelocityGaussianBackend` | V15.4's downstream path; frozen pretrained Utonia with only its zero-init 54-element intensity input column trainable | V15.4's dense five Gaussians per token |
 | `attention_velocity_v18` | `DenseCountBarrierVelocityGaussianBackend` | V15.4's | V15.4's five Gaussians per token, each carrying a 30-channel feature instead of SH coefficients; G2P alpha-blends it and `LidarFeatureDecoder` (`../lidar_decoder.py`) decodes intensity and raydrop per pixel |
+| `attention_velocity_v18_1` | `DenseCountBarrierVelocityGaussianBackend` | V15.4's | V18's; its `LidarFeatureDecoder` reads no sensor embedding (`[f', ray, r / R]`, 34 inputs) |
 
 Checkpoint compatibility depends on the registered module tree, parameter
 assignment order, and tensor shapes, not on class names: Lightning checkpoints

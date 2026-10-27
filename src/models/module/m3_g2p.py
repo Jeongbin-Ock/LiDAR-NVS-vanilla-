@@ -12,10 +12,10 @@ class DynamicGausRender(nn.Module):
     while its rotation stays fixed.
 
     Intensity and raydrop come from each Gaussian's SH coefficients, or, with
-    ``g2p.lidar_decoder`` (V18), from :class:`LidarFeatureDecoder` applied to
-    the alpha-blended Gaussian ``feature``, the ray direction and the median
-    depth of every pixel and composited over the same no-return background by
-    the pixel's alpha. Either way the returned maps keep the keys
+    ``g2p.lidar_decoder`` (V18, V18.1), from :class:`LidarFeatureDecoder`
+    applied to the alpha-blended Gaussian ``feature``, the ray direction and
+    the median depth of every pixel and composited over the same no-return
+    background by the pixel's alpha. Either way the returned maps keep the keys
     ``intensity_sh`` and ``raydrop``.
     """
 
